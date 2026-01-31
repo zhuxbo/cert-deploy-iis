@@ -27,17 +27,24 @@ type APIError struct {
 	RawBody    string
 }
 
+// FileValidation 文件验证信息
+type FileValidation struct {
+	Path    string `json:"path"`    // 验证文件路径，由接口返回，必须在 /.well-known/ 目录下
+	Content string `json:"content"` // 验证文件内容
+}
+
 // CertData 证书数据
 type CertData struct {
-	OrderID     int    `json:"order_id"`
-	Domain      string `json:"domain"`         // common_name
-	Domains     string `json:"domains"`        // alternative_names (逗号分隔)
-	Status      string `json:"status"`         // active, processing, pending, unpaid
-	Certificate string `json:"certificate"`    // 证书内容
-	PrivateKey  string `json:"private_key"`    // 私钥
-	CACert      string `json:"ca_certificate"` // 中间证书
-	ExpiresAt   string `json:"expires_at"`     // 过期日期
-	CreatedAt   string `json:"created_at"`     // 创建日期
+	OrderID     int             `json:"order_id"`
+	Domain      string          `json:"domain"`         // common_name
+	Domains     string          `json:"domains"`        // alternative_names (逗号分隔)
+	Status      string          `json:"status"`         // active, processing, pending, unpaid
+	Certificate string          `json:"certificate"`    // 证书内容
+	PrivateKey  string          `json:"private_key"`    // 私钥
+	CACert      string          `json:"ca_certificate"` // 中间证书
+	ExpiresAt   string          `json:"expires_at"`     // 过期日期
+	CreatedAt   string          `json:"created_at"`     // 创建日期
+	File        *FileValidation `json:"file,omitempty"` // 文件验证信息（processing 状态时返回）
 }
 
 // GetDomainList 返回域名列表
@@ -367,9 +374,10 @@ func (c *Client) Callback(req *CallbackRequest) error {
 
 // CSRRequest CSR 提交请求
 type CSRRequest struct {
-	OrderID int    `json:"order_id,omitempty"` // 订单 ID（重签时使用）
-	Domain  string `json:"domain"`             // 主域名
-	CSR     string `json:"csr"`                // PEM 格式 CSR
+	OrderID          int    `json:"order_id,omitempty"`          // 订单 ID（重签时使用）
+	Domain           string `json:"domain"`                      // 主域名
+	CSR              string `json:"csr"`                         // PEM 格式 CSR
+	ValidationMethod string `json:"validation_method,omitempty"` // 验证方法: file 或 delegation
 }
 
 // CSRResponse CSR 提交响应

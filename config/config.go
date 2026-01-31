@@ -2,6 +2,8 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 )
@@ -18,15 +20,16 @@ type BindRule struct {
 
 // CertConfig 证书配置（以证书为维度）
 type CertConfig struct {
-	OrderID      int        `json:"order_id"`               // 证书订单 ID
-	Domain       string     `json:"domain"`                 // 主域名（显示用）
-	Domains      []string   `json:"domains"`                // 证书包含的所有域名
-	ExpiresAt    string     `json:"expires_at"`             // 过期时间
-	SerialNumber string     `json:"serial_number"`          // 证书序列号
-	Enabled      bool       `json:"enabled"`                // 是否启用自动部署
-	BindRules    []BindRule `json:"bind_rules,omitempty"`   // 绑定规则
-	UseLocalKey  bool       `json:"use_local_key"`          // 使用本地私钥模式
-	AutoBindMode bool       `json:"auto_bind_mode"`         // 自动绑定模式（按已有绑定更换证书）
+	OrderID          int        `json:"order_id"`                     // 证书订单 ID
+	Domain           string     `json:"domain"`                       // 主域名（显示用）
+	Domains          []string   `json:"domains"`                      // 证书包含的所有域名
+	ExpiresAt        string     `json:"expires_at"`                   // 过期时间
+	SerialNumber     string     `json:"serial_number"`                // 证书序列号
+	Enabled          bool       `json:"enabled"`                      // 是否启用自动部署
+	BindRules        []BindRule `json:"bind_rules,omitempty"`         // 绑定规则
+	UseLocalKey      bool       `json:"use_local_key"`                // 使用本地私钥模式
+	ValidationMethod string     `json:"validation_method,omitempty"`  // 验证方法: file 或 delegation
+	AutoBindMode     bool       `json:"auto_bind_mode"`               // 自动绑定模式（按已有绑定更换证书）
 }
 
 // Config 应用配置
@@ -57,10 +60,8 @@ func (c *Config) GetToken() string {
 func (c *Config) SetToken(token string) error {
 	encrypted, err := EncryptToken(token)
 	if err != nil {
-		// 加密失败，回退到明文
-		c.Token = token
-		c.EncryptedToken = ""
-		return nil
+		// 加密失败，返回错误而不是回退到明文存储
+		return fmt.Errorf("Token 加密失败: %w", err)
 	}
 	c.EncryptedToken = encrypted
 	c.Token = "" // 清除明文
@@ -90,8 +91,8 @@ func GetDataDir() string {
 	}
 	dataDir := filepath.Join(filepath.Dir(exe), DataDirName)
 
-	// 确保目录存在
-	os.MkdirAll(dataDir, 0755)
+	// 确保目录存在（使用更严格的权限）
+	os.MkdirAll(dataDir, 0700)
 
 	return dataDir
 }
@@ -104,7 +105,7 @@ func GetConfigPath() string {
 // GetLogDir 获取日志目录
 func GetLogDir() string {
 	logDir := filepath.Join(GetDataDir(), "logs")
-	os.MkdirAll(logDir, 0755)
+	os.MkdirAll(logDir, 0700)
 	return logDir
 }
 
@@ -190,4 +191,34 @@ func GetDefaultBindRules(domains []string) []BindRule {
 		})
 	}
 	return rules
+}
+
+// ValidationMethod 验证方法常量
+const (
+	ValidationMethodFile       = "file"       // 文件验证 (HTTP-01)
+	ValidationMethodDelegation = "delegation" // 委托验证 (DNS-01)
+)
+
+// ValidateValidationMethod 校验域名与验证方法的兼容性
+// 返回错误信息，如果兼容则返回空字符串
+func ValidateValidationMethod(domain string, method string) string {
+	if method == "" {
+		return ""
+	}
+
+	// 检查是否是 IP 地址（使用 net.ParseIP 准确判断）
+	isIP := net.ParseIP(domain) != nil
+
+	// 检查是否是通配符域名
+	isWildcard := len(domain) > 2 && domain[0] == '*' && domain[1] == '.'
+
+	if isIP && method == ValidationMethodDelegation {
+		return "IP 地址不支持委托验证"
+	}
+
+	if isWildcard && method == ValidationMethodFile {
+		return "通配符域名不支持文件验证"
+	}
+
+	return ""
 }

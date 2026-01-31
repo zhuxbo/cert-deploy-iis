@@ -249,7 +249,14 @@ func FilterByDomain(certs []CertInfo, domain string) []CertInfo {
 
 // DeleteCertificate 删除证书
 func DeleteCertificate(thumbprint string) error {
-	thumbprint = strings.ToUpper(strings.ReplaceAll(thumbprint, " ", ""))
+	// 验证并规范化证书指纹
+	cleanThumbprint, err := util.NormalizeThumbprint(thumbprint)
+	if err != nil {
+		return fmt.Errorf("无效的证书指纹: %w", err)
+	}
+
+	// 转义 PowerShell 字符串
+	escapedThumbprint := util.EscapePowerShellString(cleanThumbprint)
 
 	script := fmt.Sprintf(`
 $cert = Get-ChildItem -Path Cert:\LocalMachine\My | Where-Object { $_.Thumbprint -eq '%s' }
@@ -259,7 +266,7 @@ if ($cert) {
 } else {
     Write-Error "证书不存在"
 }
-`, thumbprint)
+`, escapedThumbprint)
 
 	output, err := util.RunPowerShellCombined(script)
 	if err != nil {
@@ -271,7 +278,20 @@ if ($cert) {
 
 // SetFriendlyName 修改证书友好名称
 func SetFriendlyName(thumbprint, friendlyName string) error {
-	thumbprint = strings.ToUpper(strings.ReplaceAll(thumbprint, " ", ""))
+	// 验证并规范化证书指纹
+	cleanThumbprint, err := util.NormalizeThumbprint(thumbprint)
+	if err != nil {
+		return fmt.Errorf("无效的证书指纹: %w", err)
+	}
+
+	// 验证友好名称
+	if err := util.ValidateFriendlyName(friendlyName); err != nil {
+		return fmt.Errorf("无效的友好名称: %w", err)
+	}
+
+	// 转义 PowerShell 字符串
+	escapedThumbprint := util.EscapePowerShellString(cleanThumbprint)
+	escapedFriendlyName := util.EscapePowerShellString(friendlyName)
 
 	script := fmt.Sprintf(`
 $cert = Get-ChildItem -Path Cert:\LocalMachine\My | Where-Object { $_.Thumbprint -eq '%s' }
@@ -281,7 +301,7 @@ if ($cert) {
 } else {
     throw "证书未找到"
 }
-`, thumbprint, friendlyName)
+`, escapedThumbprint, escapedFriendlyName)
 
 	output, err := util.RunPowerShellCombined(script)
 	if err != nil {

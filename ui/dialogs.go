@@ -668,7 +668,23 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 	chkLocalKey := ui.NewCheckBox(dlg,
 		ui.OptsCheckBox().
 			Text("本地私钥").
-			Position(ui.Dpi(150, 420)),
+			Position(ui.Dpi(110, 420)),
+	)
+
+	// 验证方法标签
+	lblValidation := ui.NewStatic(dlg,
+		ui.OptsStatic().
+			Text("验证方法:").
+			Position(ui.Dpi(200, 422)),
+	)
+
+	// 验证方法下拉框
+	cmbValidation := ui.NewComboBox(dlg,
+		ui.OptsComboBox().
+			Position(ui.Dpi(260, 418)).
+			Width(ui.DpiX(100)).
+			Texts("自动", "文件验证", "委托验证").
+			CtrlStyle(co.CBS_DROPDOWNLIST),
 	)
 
 	// 导入证书按钮
@@ -735,14 +751,28 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 	dlg.On().WmCreate(func(_ ui.WmCreate) int {
 		// 添加列
 		lstCerts.Cols.Add("主域名", ui.DpiX(180))
-		lstCerts.Cols.Add("过期时间", ui.DpiX(90))
-		lstCerts.Cols.Add("状态", ui.DpiX(70))
-		lstCerts.Cols.Add("订单ID", ui.DpiX(130))
+		lstCerts.Cols.Add("过期时间", ui.DpiX(100))
+		lstCerts.Cols.Add("订单ID", ui.DpiX(180))
 
 		btnInstall.Hwnd().EnableWindow(false)
 		btnSelectAll.Hwnd().EnableWindow(false)
 		btnDeselectAll.Hwnd().EnableWindow(false)
+
+		// 初始状态：禁用验证方法选择（只有勾选本地私钥时才启用）
+		lblValidation.Hwnd().EnableWindow(false)
+		cmbValidation.Hwnd().EnableWindow(false)
+		cmbValidation.Items.Select(0) // 默认选择"自动"
 		return 0
+	})
+
+	// 本地私钥复选框变化事件
+	chkLocalKey.On().BnClicked(func() {
+		enabled := chkLocalKey.IsChecked()
+		lblValidation.Hwnd().EnableWindow(enabled)
+		cmbValidation.Hwnd().EnableWindow(enabled)
+		if !enabled {
+			cmbValidation.Items.Select(0) // 取消勾选时重置为"自动"
+		}
 	})
 
 	// 全选按钮
@@ -826,7 +856,7 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 				// 更新证书列表
 				certDataList = certList
 				for _, c := range certList {
-					lstCerts.Items.Add(c.Domain, c.ExpiresAt, c.Status, fmt.Sprintf("%d", c.OrderID))
+					lstCerts.Items.Add(c.Domain, c.ExpiresAt, fmt.Sprintf("%d", c.OrderID))
 				}
 
 				// 启用按钮
@@ -860,6 +890,36 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 			return
 		}
 
+		// 获取验证方法
+		localKeyEnabled := chkLocalKey.IsChecked()
+		validationMethod := ""
+		if localKeyEnabled {
+			validationIdx := cmbValidation.Items.Selected()
+			switch validationIdx {
+			case 1:
+				validationMethod = config.ValidationMethodFile
+			case 2:
+				validationMethod = config.ValidationMethodDelegation
+			}
+
+			// 校验验证方法与域名的兼容性（校验选中证书的所有域名包括 SAN）
+			if validationMethod != "" {
+				for _, c := range certsToInstall {
+					if errMsg := config.ValidateValidationMethod(c.Domain, validationMethod); errMsg != "" {
+						ui.MsgOk(dlg, "校验失败", "验证方法不兼容", fmt.Sprintf("证书 [%s] 的主域名 %s: %s", c.Domain, c.Domain, errMsg))
+						return
+					}
+					// 检查所有 SAN 域名
+					for _, d := range c.GetDomainList() {
+						if errMsg := config.ValidateValidationMethod(d, validationMethod); errMsg != "" {
+							ui.MsgOk(dlg, "校验失败", "验证方法不兼容", fmt.Sprintf("证书 [%s] 的 SAN 域名 %s: %s", c.Domain, d, errMsg))
+							return
+						}
+					}
+				}
+			}
+		}
+
 		txtDetail.SetText(fmt.Sprintf("正在检查 %d 个证书...", len(certsToInstall)))
 		btnInstall.Hwnd().EnableWindow(false)
 		btnFetch.Hwnd().EnableWindow(false)
@@ -868,7 +928,7 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 
 		// 在 goroutine 外先获取复选框状态
 		autoUpdateEnabled := chkAutoUpdate.IsChecked()
-		localKeyEnabled := chkLocalKey.IsChecked()
+		validationMethodCopy := validationMethod
 
 		go func() {
 			var results []string
@@ -901,15 +961,16 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 							existing := cfg.GetCertificateByOrderID(certToInstall.OrderID)
 							if existing == nil {
 								certConfig := config.CertConfig{
-									OrderID:      certToInstall.OrderID,
-									Domain:       certToInstall.Domain,
-									Domains:      certToInstall.GetDomainList(),
-									ExpiresAt:    certToInstall.ExpiresAt,
-									SerialNumber: serialNumber,
-									Enabled:      true,
-									UseLocalKey:  localKeyEnabled,
-									AutoBindMode: true,
-									BindRules:    []config.BindRule{},
+									OrderID:          certToInstall.OrderID,
+									Domain:           certToInstall.Domain,
+									Domains:          certToInstall.GetDomainList(),
+									ExpiresAt:        certToInstall.ExpiresAt,
+									SerialNumber:     serialNumber,
+									Enabled:          true,
+									UseLocalKey:      localKeyEnabled,
+									ValidationMethod: validationMethodCopy,
+									AutoBindMode:     true,
+									BindRules:        []config.BindRule{},
 								}
 								cfg.AddCertificate(certConfig)
 								cfg.Save()
@@ -1057,15 +1118,16 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 					if existing == nil {
 						// 创建证书配置
 						certConfig := config.CertConfig{
-							OrderID:      certToInstall.OrderID,
-							Domain:       certToInstall.Domain,
-							Domains:      certToInstall.GetDomainList(),
-							ExpiresAt:    certToInstall.ExpiresAt,
-							SerialNumber: serialNumber,
-							Enabled:      true,
-							UseLocalKey:  localKeyEnabled,
-							AutoBindMode: true,
-							BindRules:    []config.BindRule{},
+							OrderID:          certToInstall.OrderID,
+							Domain:           certToInstall.Domain,
+							Domains:          certToInstall.GetDomainList(),
+							ExpiresAt:        certToInstall.ExpiresAt,
+							SerialNumber:     serialNumber,
+							Enabled:          true,
+							UseLocalKey:      localKeyEnabled,
+							ValidationMethod: validationMethodCopy,
+							AutoBindMode:     true,
+							BindRules:        []config.BindRule{},
 						}
 						cfg.AddCertificate(certConfig)
 						cfg.Save()
@@ -1213,10 +1275,11 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 	)
 
 	// 按钮行
-	btnToggle := ui.NewButton(dlg, ui.OptsButton().Text("启用/停用").Position(ui.Dpi(20, 270)).Width(ui.DpiX(80)).Height(ui.DpiY(28)))
-	btnRemove := ui.NewButton(dlg, ui.OptsButton().Text("删除").Position(ui.Dpi(110, 270)).Width(ui.DpiX(60)).Height(ui.DpiY(28)))
-	btnToggleLocalKey := ui.NewButton(dlg, ui.OptsButton().Text("切换本地私钥").Position(ui.Dpi(180, 270)).Width(ui.DpiX(100)).Height(ui.DpiY(28)))
-	btnRefresh := ui.NewButton(dlg, ui.OptsButton().Text("刷新").Position(ui.Dpi(290, 270)).Width(ui.DpiX(60)).Height(ui.DpiY(28)))
+	btnToggle := ui.NewButton(dlg, ui.OptsButton().Text("启用/停用").Position(ui.Dpi(20, 270)).Width(ui.DpiX(70)).Height(ui.DpiY(28)))
+	btnRemove := ui.NewButton(dlg, ui.OptsButton().Text("删除").Position(ui.Dpi(95, 270)).Width(ui.DpiX(50)).Height(ui.DpiY(28)))
+	btnToggleLocalKey := ui.NewButton(dlg, ui.OptsButton().Text("本地私钥").Position(ui.Dpi(150, 270)).Width(ui.DpiX(70)).Height(ui.DpiY(28)))
+	btnToggleValidation := ui.NewButton(dlg, ui.OptsButton().Text("验证方法").Position(ui.Dpi(225, 270)).Width(ui.DpiX(70)).Height(ui.DpiY(28)))
+	btnRefresh := ui.NewButton(dlg, ui.OptsButton().Text("刷新").Position(ui.Dpi(300, 270)).Width(ui.DpiX(50)).Height(ui.DpiY(28)))
 
 	// 配置区
 	ui.NewStatic(dlg, ui.OptsStatic().Text("提前检测:").Position(ui.Dpi(20, 315)))
@@ -1229,6 +1292,18 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 	btnSave := ui.NewButton(dlg, ui.OptsButton().Text("保存").Position(ui.Dpi(400, 320)).Width(ui.DpiX(80)).Height(ui.DpiY(30)))
 	btnClose := ui.NewButton(dlg, ui.OptsButton().Text("关闭").Position(ui.Dpi(490, 320)).Width(ui.DpiX(80)).Height(ui.DpiY(30)))
 
+	// 获取验证方法显示名称
+	getValidationDisplay := func(method string) string {
+		switch method {
+		case config.ValidationMethodFile:
+			return "文件"
+		case config.ValidationMethodDelegation:
+			return "委托"
+		default:
+			return "自动"
+		}
+	}
+
 	// 刷新列表
 	refreshList := func() {
 		lstCerts.Items.DeleteAll()
@@ -1238,19 +1313,22 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 				status = "停用"
 			}
 			localKey := "否"
+			validation := "-"
 			if c.UseLocalKey {
 				localKey = "是"
+				validation = getValidationDisplay(c.ValidationMethod)
 			}
-			lstCerts.Items.Add(c.Domain, c.ExpiresAt, status, localKey)
+			lstCerts.Items.Add(c.Domain, c.ExpiresAt, status, localKey, validation)
 		}
 	}
 
 	// 初始化
 	dlg.On().WmCreate(func(_ ui.WmCreate) int {
-		lstCerts.Cols.Add("域名", ui.DpiX(200))
-		lstCerts.Cols.Add("证书过期时间", ui.DpiX(100))
-		lstCerts.Cols.Add("状态", ui.DpiX(50))
-		lstCerts.Cols.Add("本地私钥", ui.DpiX(80))
+		lstCerts.Cols.Add("域名", ui.DpiX(170))
+		lstCerts.Cols.Add("过期时间", ui.DpiX(85))
+		lstCerts.Cols.Add("状态", ui.DpiX(45))
+		lstCerts.Cols.Add("本地私钥", ui.DpiX(60))
+		lstCerts.Cols.Add("验证方法", ui.DpiX(60))
 
 		chkIIS7Mode.SetCheck(cfg.IIS7Mode)
 		refreshList()
@@ -1258,23 +1336,35 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 		btnToggle.Hwnd().EnableWindow(false)
 		btnRemove.Hwnd().EnableWindow(false)
 		btnToggleLocalKey.Hwnd().EnableWindow(false)
+		btnToggleValidation.Hwnd().EnableWindow(false)
 		return 0
 	})
+
+	// 更新按钮状态
+	updateButtonStates := func() {
+		if selectedIdx >= 0 && selectedIdx < len(cfg.Certificates) {
+			btnToggle.Hwnd().EnableWindow(true)
+			btnRemove.Hwnd().EnableWindow(true)
+			btnToggleLocalKey.Hwnd().EnableWindow(true)
+			// 只有启用本地私钥时才能切换验证方法
+			btnToggleValidation.Hwnd().EnableWindow(cfg.Certificates[selectedIdx].UseLocalKey)
+		} else {
+			btnToggle.Hwnd().EnableWindow(false)
+			btnRemove.Hwnd().EnableWindow(false)
+			btnToggleLocalKey.Hwnd().EnableWindow(false)
+			btnToggleValidation.Hwnd().EnableWindow(false)
+		}
+	}
 
 	// 选择事件
 	lstCerts.On().NmClick(func(_ *win.NMITEMACTIVATE) {
 		selected := lstCerts.Items.Selected()
 		if len(selected) > 0 {
 			selectedIdx = selected[0].Index()
-			btnToggle.Hwnd().EnableWindow(true)
-			btnRemove.Hwnd().EnableWindow(true)
-			btnToggleLocalKey.Hwnd().EnableWindow(true)
 		} else {
 			selectedIdx = -1
-			btnToggle.Hwnd().EnableWindow(false)
-			btnRemove.Hwnd().EnableWindow(false)
-			btnToggleLocalKey.Hwnd().EnableWindow(false)
 		}
+		updateButtonStates()
 	})
 
 	// 启用/停用
@@ -1294,9 +1384,7 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 			cfg.RemoveCertificateByIndex(selectedIdx)
 			selectedIdx = -1
 			refreshList()
-			btnToggle.Hwnd().EnableWindow(false)
-			btnRemove.Hwnd().EnableWindow(false)
-			btnToggleLocalKey.Hwnd().EnableWindow(false)
+			updateButtonStates()
 		}
 	})
 
@@ -1304,6 +1392,54 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 	btnToggleLocalKey.On().BnClicked(func() {
 		if selectedIdx >= 0 && selectedIdx < len(cfg.Certificates) {
 			cfg.Certificates[selectedIdx].UseLocalKey = !cfg.Certificates[selectedIdx].UseLocalKey
+			// 关闭本地私钥时，清除验证方法
+			if !cfg.Certificates[selectedIdx].UseLocalKey {
+				cfg.Certificates[selectedIdx].ValidationMethod = ""
+			}
+			refreshList()
+			if selectedIdx < lstCerts.Items.Count() {
+				lstCerts.Items.Get(selectedIdx).Select(true)
+			}
+			updateButtonStates()
+		}
+	})
+
+	// 切换验证方法（循环：自动 -> 文件 -> 委托 -> 自动）
+	btnToggleValidation.On().BnClicked(func() {
+		if selectedIdx >= 0 && selectedIdx < len(cfg.Certificates) {
+			cert := &cfg.Certificates[selectedIdx]
+			if !cert.UseLocalKey {
+				return
+			}
+
+			// 获取下一个验证方法
+			var nextMethod string
+			switch cert.ValidationMethod {
+			case "":
+				nextMethod = config.ValidationMethodFile
+			case config.ValidationMethodFile:
+				nextMethod = config.ValidationMethodDelegation
+			case config.ValidationMethodDelegation:
+				nextMethod = ""
+			}
+
+			// 校验兼容性
+			if nextMethod != "" {
+				if errMsg := config.ValidateValidationMethod(cert.Domain, nextMethod); errMsg != "" {
+					ui.MsgOk(dlg, "不兼容", "验证方法不支持", errMsg)
+					// 跳过这个方法，继续下一个
+					if nextMethod == config.ValidationMethodFile {
+						nextMethod = config.ValidationMethodDelegation
+						if errMsg2 := config.ValidateValidationMethod(cert.Domain, nextMethod); errMsg2 != "" {
+							nextMethod = ""
+						}
+					} else {
+						nextMethod = ""
+					}
+				}
+			}
+
+			cert.ValidationMethod = nextMethod
 			refreshList()
 			if selectedIdx < lstCerts.Items.Count() {
 				lstCerts.Items.Get(selectedIdx).Select(true)
@@ -1326,9 +1462,7 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 		chkIIS7Mode.SetCheck(cfg.IIS7Mode)
 		selectedIdx = -1
 		refreshList()
-		btnToggle.Hwnd().EnableWindow(false)
-		btnRemove.Hwnd().EnableWindow(false)
-		btnToggleLocalKey.Hwnd().EnableWindow(false)
+		updateButtonStates()
 	})
 
 	// 保存

@@ -4,12 +4,15 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"cert-deploy/api"
 	"cert-deploy/cert"
 	"cert-deploy/config"
 	"cert-deploy/iis"
+	"cert-deploy/util"
 )
 
 // 全局订单存储实例
@@ -264,12 +267,37 @@ func deployCertWithRules(certData *api.CertData, privateKey string, certCfg conf
 }
 
 // handleLocalKeyMode 处理本地私钥模式
+// 返回: 证书数据, 私钥, 错误
 func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig) (*api.CertData, string, error) {
+	// 校验验证方法（校验证书的所有域名包括 SAN）
+	if certCfg.ValidationMethod != "" {
+		if errMsg := config.ValidateValidationMethod(certCfg.Domain, certCfg.ValidationMethod); errMsg != "" {
+			return nil, "", fmt.Errorf("证书 [%s] 主域名校验失败: %s", certCfg.Domain, errMsg)
+		}
+		for _, d := range certCfg.Domains {
+			if errMsg := config.ValidateValidationMethod(d, certCfg.ValidationMethod); errMsg != "" {
+				return nil, "", fmt.Errorf("证书 [%s] SAN 域名 %s 校验失败: %s", certCfg.Domain, d, errMsg)
+			}
+		}
+	}
 	// 如果有订单 ID，先尝试获取该订单的证书
 	if certCfg.OrderID > 0 {
 		certData, err := client.GetCertByOrderID(certCfg.OrderID)
 		if err != nil {
 			log.Printf("获取订单 %d 证书失败: %v", certCfg.OrderID, err)
+		} else if certData.Status == "processing" {
+			// 处理中状态：检查是否需要文件验证
+			if certData.File != nil && certData.File.Path != "" {
+				log.Printf("订单 %d 需要文件验证", certCfg.OrderID)
+				if err := handleFileValidation(certCfg.Domain, certData.File); err != nil {
+					log.Printf("创建验证文件失败: %v", err)
+				} else {
+					log.Printf("验证文件已创建，等待 CA 验证")
+				}
+			} else {
+				log.Printf("订单 %d 处理中，等待签发", certCfg.OrderID)
+			}
+			return nil, "", nil // 等待下次检测
 		} else if certData.Status == "active" {
 			// 检查本地是否有私钥
 			if orderStore.HasPrivateKey(certCfg.OrderID) {
@@ -309,9 +337,10 @@ func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig) (*api.Ce
 
 	// 提交 CSR
 	csrReq := &api.CSRRequest{
-		OrderID: certCfg.OrderID,
-		Domain:  certCfg.Domain,
-		CSR:     csrPEM,
+		OrderID:          certCfg.OrderID,
+		Domain:           certCfg.Domain,
+		CSR:              csrPEM,
+		ValidationMethod: certCfg.ValidationMethod,
 	}
 
 	csrResp, err := client.SubmitCSR(csrReq)
@@ -561,6 +590,72 @@ func deployCertAutoMode(certData *api.CertData, privateKey string, certCfg confi
 	}
 
 	return results
+}
+
+// handleFileValidation 处理文件验证
+// 在 IIS 站点目录下创建验证文件
+func handleFileValidation(domain string, file *api.FileValidation) error {
+	if file == nil || file.Path == "" || file.Content == "" {
+		return fmt.Errorf("验证文件信息不完整")
+	}
+
+	// 查找域名对应的站点物理路径
+	siteName, sitePath, err := iis.GetSitePhysicalPathByDomain(domain)
+	if err != nil {
+		return fmt.Errorf("查找站点失败: %w", err)
+	}
+
+	log.Printf("找到站点: %s, 路径: %s", siteName, sitePath)
+
+	// 构建验证文件的完整路径
+	// file.Path 由接口返回，必须在 /.well-known/ 目录下
+	relativePath := strings.TrimPrefix(file.Path, "/")
+	relativePath = strings.ReplaceAll(relativePath, "/", string(os.PathSeparator))
+
+	// 安全验证：防止路径遍历攻击
+	fullPath, err := util.ValidateRelativePath(sitePath, relativePath)
+	if err != nil {
+		return fmt.Errorf("验证文件路径无效: %w", err)
+	}
+
+	// 额外限制：必须在 .well-known 目录下
+	expectedPrefix := filepath.Join(sitePath, ".well-known")
+	if !strings.HasPrefix(fullPath, expectedPrefix) {
+		return fmt.Errorf("验证文件路径必须在 .well-known 目录下")
+	}
+
+	// 创建目录
+	dir := filepath.Dir(fullPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("创建目录失败: %w", err)
+	}
+
+	// 写入验证文件
+	if err := os.WriteFile(fullPath, []byte(file.Content), 0644); err != nil {
+		return fmt.Errorf("写入验证文件失败: %w", err)
+	}
+
+	log.Printf("验证文件已创建: %s", fullPath)
+
+	// 创建 web.config 允许无扩展名文件访问（如果不存在）
+	webConfigPath := filepath.Join(dir, "web.config")
+	if _, err := os.Stat(webConfigPath); os.IsNotExist(err) {
+		webConfigContent := `<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <system.webServer>
+    <staticContent>
+      <mimeMap fileExtension="." mimeType="text/plain" />
+    </staticContent>
+  </system.webServer>
+</configuration>`
+		if err := os.WriteFile(webConfigPath, []byte(webConfigContent), 0644); err != nil {
+			log.Printf("警告: 创建 web.config 失败: %v", err)
+		} else {
+			log.Printf("已创建 web.config 允许无扩展名文件访问")
+		}
+	}
+
+	return nil
 }
 
 // isIPBinding 判断是否是 IP 绑定（如 0.0.0.0:443）

@@ -27,6 +27,17 @@ func BindCertificate(hostname string, port int, certHash string) error {
 		port = 443
 	}
 
+	// 参数验证
+	if err := util.ValidateHostname(hostname); err != nil {
+		return fmt.Errorf("无效的主机名: %w", err)
+	}
+	if err := util.ValidatePort(port); err != nil {
+		return fmt.Errorf("无效的端口: %w", err)
+	}
+	if err := util.ValidateThumbprint(certHash); err != nil {
+		return fmt.Errorf("无效的证书指纹: %w", err)
+	}
+
 	// 清理证书哈希（移除空格和连字符）
 	certHash = strings.ReplaceAll(certHash, " ", "")
 	certHash = strings.ReplaceAll(certHash, "-", "")
@@ -84,6 +95,17 @@ func BindCertificateByIP(ip string, port int, certHash string) error {
 		ip = "0.0.0.0"
 	}
 
+	// 参数验证
+	if err := util.ValidateIPv4(ip); err != nil {
+		return fmt.Errorf("无效的 IP 地址: %w", err)
+	}
+	if err := util.ValidatePort(port); err != nil {
+		return fmt.Errorf("无效的端口: %w", err)
+	}
+	if err := util.ValidateThumbprint(certHash); err != nil {
+		return fmt.Errorf("无效的证书指纹: %w", err)
+	}
+
 	// 清理证书哈希
 	certHash = strings.ReplaceAll(certHash, " ", "")
 	certHash = strings.ReplaceAll(certHash, "-", "")
@@ -137,6 +159,14 @@ func UnbindCertificate(hostname string, port int) error {
 		port = 443
 	}
 
+	// 参数验证
+	if err := util.ValidateHostname(hostname); err != nil {
+		return fmt.Errorf("无效的主机名: %w", err)
+	}
+	if err := util.ValidatePort(port); err != nil {
+		return fmt.Errorf("无效的端口: %w", err)
+	}
+
 	hostnamePort := fmt.Sprintf("%s:%d", hostname, port)
 	output, err := util.RunCmdCombined("netsh", "http", "delete", "sslcert",
 		fmt.Sprintf("hostnameport=%s", hostnamePort))
@@ -155,6 +185,14 @@ func UnbindCertificateByIP(ip string, port int) error {
 	}
 	if ip == "" {
 		ip = "0.0.0.0"
+	}
+
+	// 参数验证
+	if err := util.ValidateIPv4(ip); err != nil {
+		return fmt.Errorf("无效的 IP 地址: %w", err)
+	}
+	if err := util.ValidatePort(port); err != nil {
+		return fmt.Errorf("无效的端口: %w", err)
 	}
 
 	ipPort := fmt.Sprintf("%s:%d", ip, port)

@@ -10,6 +10,11 @@ const DefaultTaskName = "CertDeployIIS"
 
 // IsTaskExists 检查任务是否存在
 func IsTaskExists(taskName string) bool {
+	// 验证任务名称
+	if err := ValidateTaskName(taskName); err != nil {
+		return false
+	}
+
 	output, err := RunCmdCombined("schtasks", "/query", "/tn", taskName)
 	if err != nil {
 		return false
@@ -21,6 +26,11 @@ func IsTaskExists(taskName string) bool {
 // CreateTask 创建计划任务
 // intervalHours: 执行间隔（小时）
 func CreateTask(taskName string, intervalHours int) error {
+	// 验证任务名称
+	if err := ValidateTaskName(taskName); err != nil {
+		return fmt.Errorf("无效的任务名称: %w", err)
+	}
+
 	// 获取当前程序路径
 	exePath, err := os.Executable()
 	if err != nil {
@@ -63,6 +73,11 @@ func CreateTask(taskName string, intervalHours int) error {
 
 // DeleteTask 删除计划任务
 func DeleteTask(taskName string) error {
+	// 验证任务名称
+	if err := ValidateTaskName(taskName); err != nil {
+		return fmt.Errorf("无效的任务名称: %w", err)
+	}
+
 	if !IsTaskExists(taskName) {
 		return nil // 不存在则无需删除
 	}
@@ -77,6 +92,11 @@ func DeleteTask(taskName string) error {
 
 // RunTaskNow 立即运行任务
 func RunTaskNow(taskName string) error {
+	// 验证任务名称
+	if err := ValidateTaskName(taskName); err != nil {
+		return fmt.Errorf("无效的任务名称: %w", err)
+	}
+
 	if !IsTaskExists(taskName) {
 		return fmt.Errorf("任务不存在: %s", taskName)
 	}
@@ -91,6 +111,11 @@ func RunTaskNow(taskName string) error {
 
 // GetTaskInfo 获取任务信息
 func GetTaskInfo(taskName string) (string, error) {
+	// 验证任务名称
+	if err := ValidateTaskName(taskName); err != nil {
+		return "", fmt.Errorf("无效的任务名称: %w", err)
+	}
+
 	if !IsTaskExists(taskName) {
 		return "", fmt.Errorf("任务不存在")
 	}

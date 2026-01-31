@@ -11,6 +11,24 @@ import (
 	"cert-deploy/util"
 )
 
+// validateBindingParams 验证绑定参数
+func validateBindingParams(siteName, host string, port int) error {
+	if err := util.ValidateSiteName(siteName); err != nil {
+		return fmt.Errorf("无效的站点名称: %w", err)
+	}
+	if host != "" {
+		if err := util.ValidateDomain(host); err != nil {
+			return fmt.Errorf("无效的主机名: %w", err)
+		}
+	}
+	if port != 0 {
+		if err := util.ValidatePort(port); err != nil {
+			return fmt.Errorf("无效的端口: %w", err)
+		}
+	}
+	return nil
+}
+
 // GetIISMajorVersion 获取 IIS 主版本号
 func GetIISMajorVersion() (int, error) {
 	script := `
@@ -163,6 +181,11 @@ func AddHttpsBinding(siteName, host string, port int) error {
 		port = 443
 	}
 
+	// 参数验证
+	if err := validateBindingParams(siteName, host, port); err != nil {
+		return err
+	}
+
 	bindingInfo := fmt.Sprintf("*:%d:%s", port, host)
 	// sslFlags=1 表示启用 SNI（服务器名称指示）
 	output, err := util.RunCmdCombined(getAppcmdPath(), "set", "site",
@@ -180,6 +203,14 @@ func AddHttpsBinding(siteName, host string, port int) error {
 func AddHttpsBindingWithCert(siteName, host string, port int, certHash string) error {
 	if port == 0 {
 		port = 443
+	}
+
+	// 参数验证
+	if err := validateBindingParams(siteName, host, port); err != nil {
+		return err
+	}
+	if err := util.ValidateThumbprint(certHash); err != nil {
+		return fmt.Errorf("无效的证书指纹: %w", err)
 	}
 
 	// 清理证书哈希
@@ -208,6 +239,11 @@ func RemoveHttpsBinding(siteName, host string, port int) error {
 		port = 443
 	}
 
+	// 参数验证
+	if err := validateBindingParams(siteName, host, port); err != nil {
+		return err
+	}
+
 	bindingInfo := fmt.Sprintf("*:%d:%s", port, host)
 	output, err := util.RunCmdCombined(getAppcmdPath(), "set", "site",
 		fmt.Sprintf("/site.name:%s", siteName),
@@ -222,6 +258,11 @@ func RemoveHttpsBinding(siteName, host string, port int) error {
 
 // GetSiteState 获取站点状态
 func GetSiteState(siteName string) (string, error) {
+	// 参数验证
+	if err := util.ValidateSiteName(siteName); err != nil {
+		return "", fmt.Errorf("无效的站点名称: %w", err)
+	}
+
 	output, err := util.RunCmd(getAppcmdPath(), "list", "site", siteName, "/xml")
 	if err != nil {
 		return "", fmt.Errorf("获取站点状态失败: %v", err)
@@ -241,6 +282,11 @@ func GetSiteState(siteName string) (string, error) {
 
 // StartSite 启动站点
 func StartSite(siteName string) error {
+	// 参数验证
+	if err := util.ValidateSiteName(siteName); err != nil {
+		return fmt.Errorf("无效的站点名称: %w", err)
+	}
+
 	output, err := util.RunCmdCombined(getAppcmdPath(), "start", "site", siteName)
 	if err != nil {
 		return fmt.Errorf("启动站点失败: %v, 输出: %s", err, output)
@@ -250,6 +296,11 @@ func StartSite(siteName string) error {
 
 // StopSite 停止站点
 func StopSite(siteName string) error {
+	// 参数验证
+	if err := util.ValidateSiteName(siteName); err != nil {
+		return fmt.Errorf("无效的站点名称: %w", err)
+	}
+
 	output, err := util.RunCmdCombined(getAppcmdPath(), "stop", "site", siteName)
 	if err != nil {
 		return fmt.Errorf("停止站点失败: %v, 输出: %s", err, output)
@@ -259,10 +310,10 @@ func StopSite(siteName string) error {
 
 // HttpBindingMatch HTTP 绑定匹配结果
 type HttpBindingMatch struct {
-	SiteName    string
-	Host        string
-	Port        int
-	CertDomain  string // 匹配的证书域名
+	SiteName   string
+	Host       string
+	Port       int
+	CertDomain string // 匹配的证书域名
 }
 
 // FindMatchingBindings 查找与证书域名匹配的 IIS 绑定
@@ -337,6 +388,139 @@ func FindMatchingBindings(certDomains []string) (httpsMatches []HttpBindingMatch
 	}
 
 	return httpsMatches, httpMatches, nil
+}
+
+// GetSitePhysicalPath 获取站点的物理路径
+func GetSitePhysicalPath(siteName string) (string, error) {
+	// 参数验证
+	if err := util.ValidateSiteName(siteName); err != nil {
+		return "", fmt.Errorf("无效的站点名称: %w", err)
+	}
+
+	// 转义 PowerShell 字符串
+	escapedSiteName := util.EscapePowerShellString(siteName)
+
+	// 使用 PowerShell 获取站点的物理路径
+	script := fmt.Sprintf(`
+Import-Module WebAdministration -ErrorAction SilentlyContinue
+$site = Get-Item "IIS:\Sites\%s" -ErrorAction SilentlyContinue
+if ($site) {
+    $app = Get-WebApplication -Site '%s' -ErrorAction SilentlyContinue | Where-Object { $_.path -eq "/" }
+    if ($app) {
+        $app.PhysicalPath
+    } else {
+        $site.physicalPath
+    }
+}
+`, escapedSiteName, escapedSiteName)
+
+	output, err := util.RunPowerShell(script)
+	if err != nil {
+		return "", fmt.Errorf("获取站点路径失败: %v", err)
+	}
+
+	path := strings.TrimSpace(output)
+	if path == "" {
+		return "", fmt.Errorf("站点 %s 物理路径为空", siteName)
+	}
+
+	// 展开环境变量
+	path = expandIISPhysicalPath(path)
+
+	return path, nil
+}
+
+func expandIISPhysicalPath(path string) string {
+	expanded := os.ExpandEnv(path)
+	if !strings.Contains(expanded, "%") {
+		return expanded
+	}
+
+	var builder strings.Builder
+	builder.Grow(len(expanded))
+
+	for i := 0; i < len(expanded); i++ {
+		if expanded[i] != '%' {
+			builder.WriteByte(expanded[i])
+			continue
+		}
+
+		end := strings.IndexByte(expanded[i+1:], '%')
+		if end < 0 {
+			builder.WriteByte(expanded[i])
+			continue
+		}
+		end = i + 1 + end
+
+		if end == i+1 {
+			builder.WriteByte('%')
+			i = end
+			continue
+		}
+
+		key := expanded[i+1 : end]
+		if value, ok := os.LookupEnv(key); ok {
+			builder.WriteString(value)
+		} else {
+			builder.WriteString(expanded[i : end+1])
+		}
+		i = end
+	}
+
+	return builder.String()
+}
+
+// GetSitePhysicalPathByDomain 根据域名查找站点并获取物理路径
+func GetSitePhysicalPathByDomain(domain string) (string, string, error) {
+	sites, err := ScanSites()
+	if err != nil {
+		return "", "", err
+	}
+
+	domain = strings.ToLower(strings.TrimSpace(domain))
+
+	for _, site := range sites {
+		for _, binding := range site.Bindings {
+			if strings.EqualFold(binding.Host, domain) {
+				path, err := GetSitePhysicalPath(site.Name)
+				if err != nil {
+					continue
+				}
+				return site.Name, path, nil
+			}
+		}
+	}
+
+	candidateSites := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, site := range sites {
+		for _, binding := range site.Bindings {
+			if binding.Host != "" {
+				continue
+			}
+			if !strings.EqualFold(binding.Protocol, "http") || binding.Port != 80 {
+				continue
+			}
+			if !seen[site.Name] {
+				seen[site.Name] = true
+				candidateSites = append(candidateSites, site.Name)
+			}
+		}
+	}
+
+	if len(candidateSites) == 1 {
+		path, err := GetSitePhysicalPath(candidateSites[0])
+		if err != nil {
+			return "", "", err
+		}
+		return candidateSites[0], path, nil
+	}
+
+	if len(candidateSites) > 1 {
+		return "", "", fmt.Errorf("未找到域名 %s 对应的站点，存在多个无主机头 HTTP 绑定: %s", domain, strings.Join(candidateSites, ", "))
+	}
+
+	return "", "", fmt.Errorf("未找到域名 %s 对应的站点", domain)
 }
 
 // MatchDomainForBinding 检查绑定域名是否匹配证书域名
