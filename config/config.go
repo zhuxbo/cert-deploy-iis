@@ -35,15 +35,16 @@ type CertConfig struct {
 // Config 应用配置
 type Config struct {
 	APIBaseURL       string       `json:"api_base_url"`
-	Token            string       `json:"token,omitempty"`            // 旧版明文 Token（兼容）
-	EncryptedToken   string       `json:"encrypted_token,omitempty"` // 加密后的 Token
-	Certificates     []CertConfig `json:"certificates"`               // 证书配置
-	CheckDays        int          `json:"check_days"`                 // 提前多少天检查证书（默认10天）
-	LastCheck        string       `json:"last_check"`                 // 上次检查时间
-	AutoCheckEnabled bool         `json:"auto_check_enabled"`         // 是否启用自动部署（任务计划）
-	CheckInterval    int          `json:"check_interval"`             // 检测间隔（小时），默认6
-	TaskName         string       `json:"task_name"`                  // 任务计划名称
-	IIS7Mode         bool         `json:"iis7_mode"`                  // IIS7 兼容模式（自动检测）
+	Token            string       `json:"token,omitempty"`             // 旧版明文 Token（兼容）
+	EncryptedToken   string       `json:"encrypted_token,omitempty"`  // 加密后的 Token
+	Certificates     []CertConfig `json:"certificates"`                // 证书配置
+	RenewDaysLocal   int          `json:"renew_days_local"`            // 本地私钥模式：到期前多少天发起续签（默认15）
+	RenewDaysFetch   int          `json:"renew_days_fetch"`            // 拉取模式：到期前多少天开始拉取（默认13）
+	LastCheck        string       `json:"last_check"`                  // 上次检查时间
+	AutoCheckEnabled bool         `json:"auto_check_enabled"`          // 是否启用自动部署（任务计划）
+	CheckInterval    int          `json:"check_interval"`              // 检测间隔（小时），默认6
+	TaskName         string       `json:"task_name"`                   // 任务计划名称
+	IIS7Mode         bool         `json:"iis7_mode"`                   // IIS7 兼容模式（自动检测）
 }
 
 // GetToken 获取解密后的 Token
@@ -74,7 +75,8 @@ func DefaultConfig() *Config {
 		APIBaseURL:       "",
 		Token:            "",
 		Certificates:     []CertConfig{},
-		CheckDays:        10,
+		RenewDaysLocal:   15, // 本地私钥模式：到期前15天发起续签
+		RenewDaysFetch:   13, // 拉取模式：到期前13天开始拉取
 		AutoCheckEnabled: false,
 		CheckInterval:    6,
 		TaskName:         "CertDeployIIS",
@@ -127,8 +129,11 @@ func Load() (*Config, error) {
 	}
 
 	// 设置默认值（不设置 APIBaseURL 和 Token 的默认值，由用户配置）
-	if cfg.CheckDays == 0 {
-		cfg.CheckDays = 10
+	if cfg.RenewDaysLocal == 0 {
+		cfg.RenewDaysLocal = 15 // 本地私钥模式：到期前15天发起续签
+	}
+	if cfg.RenewDaysFetch == 0 {
+		cfg.RenewDaysFetch = 13 // 拉取模式：到期前13天开始拉取
 	}
 	if cfg.CheckInterval == 0 {
 		cfg.CheckInterval = 6

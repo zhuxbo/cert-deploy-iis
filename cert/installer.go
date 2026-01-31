@@ -144,13 +144,11 @@ func splitPEMCertChain(pemData string) (string, string) {
 	return leaf, chain.String()
 }
 
-// escapePassword 转义密码中的特殊字符
+// escapePassword 转义密码中的特殊字符（用于 PowerShell 单引号字符串）
 func escapePassword(password string) string {
-	// 转义 PowerShell 特殊字符
-	password = strings.ReplaceAll(password, "'", "''")   // 单引号
-	password = strings.ReplaceAll(password, "`", "``")   // 反引号
-	password = strings.ReplaceAll(password, "$", "`$")   // 美元符号
-	return password
+	// PowerShell 单引号字符串中，只有单引号需要转义（'' 表示一个单引号）
+	// $ 和反引号在单引号字符串中是字面字符，不需要转义
+	return strings.ReplaceAll(password, "'", "''")
 }
 
 // simplifyPFXError 简化 PFX 导入错误信息

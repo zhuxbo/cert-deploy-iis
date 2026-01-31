@@ -158,44 +158,64 @@ client.Callback(&api.CallbackRequest{
 {
   "api_base_url": "http://manager.example.com",
   "token": "deploy-api-token",
-  "sites": [
+  "certificates": [
     {
       "domain": "example.com",
-      "bind_domains": ["example.com", "www.example.com"],
-      "port": 443,
-      "enabled": true,
+      "domains": ["example.com", "www.example.com"],
       "order_id": 123,
-      "use_local_key": false
+      "use_local_key": false,
+      "enabled": true
     }
   ],
-  "check_days": 10
+  "renew_days_local": 15,
+  "renew_days_fetch": 13,
+  "check_interval": 6
 }
 ```
 
 | 字段 | 说明 |
 |------|------|
-| `domain` | 查询证书用的域名 |
-| `bind_domains` | 要绑定到 IIS 的域名（空则使用证书的所有域名） |
-| `order_id` | 关联的订单 ID（本地私钥模式使用） |
-| `use_local_key` | 是否使用本地私钥模式（默认 false = API 模式） |
+| `domain` | 主域名（common_name） |
+| `domains` | SAN 域名列表 |
+| `order_id` | 订单 ID |
+| `use_local_key` | 本地私钥模式（true）或拉取模式（false） |
+| `renew_days_local` | 本地私钥模式：到期前多少天发起续签（默认 15，需 > 服务端 14 天） |
+| `renew_days_fetch` | 拉取模式：到期前多少天开始拉取（默认 13，需 < 服务端 14 天） |
+| `check_interval` | 定时检测间隔（小时，默认 6） |
 
 ## 部署模式
 
-### API 私钥模式（默认）
+### 拉取模式（UseLocalKey = false，默认）
 
 ```
-获取证书 → API 返回证书 + 私钥 → 直接使用
+查询 OrderID 对应证书
+├─ 失败 → 跳过（下次重试）
+├─ status != active → 跳过
+├─ 剩余天数 > RenewDaysFetch(13) → 跳过，等待服务端自动续签
+└─ 剩余天数 <= RenewDaysFetch(13) → 拉取 API 私钥 + 证书 → 部署
 ```
 
-### 本地私钥模式
+**设计意图**：服务端 14 天自动续签，客户端 13 天开始拉取，确保拿到新证书。
+
+### 本地私钥模式（UseLocalKey = true）
 
 ```
-获取证书 → 检查本地是否有该订单的私钥
-  ├─ 有私钥 → 验证匹配
-  │    ├─ 匹配 → 使用本地私钥 + API 证书
-  │    └─ 不匹配 → 生成新 CSR → 提交重签
-  └─ 无私钥 → 生成 CSR → 提交申请 → 保存私钥到本地
+检查 OrderID > 0?
+├─ 是 → 查询订单状态
+│   ├─ processing → 跳过，等待签发
+│   ├─ active → 检查续签时机
+│   │   ├─ 剩余天数 > RenewDaysLocal(15) → 跳过，未到续签时间
+│   │   └─ 剩余天数 <= RenewDaysLocal(15) → 检查本地私钥
+│   │       ├─ 有私钥且匹配 → 部署证书
+│   │       ├─ 有私钥不匹配 → 删除私钥，生成新 CSR 提交
+│   │       └─ 无私钥但 API 返回私钥 → 使用 API 私钥部署
+│   └─ 查询失败 → 生成新 CSR 提交
+└─ 否 → 生成新 CSR 提交
 ```
+
+**设计意图**：客户端 15 天发起续签，抢在服务端 14 天自动续签之前，确保使用本地私钥。
+
+**重要**：重新签发（reissue）不会改变 OrderID，只有续费（renew）才会生成新 OrderID。
 
 本地存储目录结构：
 ```
@@ -214,6 +234,42 @@ client.Callback(&api.CallbackRequest{
 | 状态 | 说明 |
 |------|------|
 | `active` | 有效，可部署 |
-| `processing` | 处理中 |
+| `processing` | CSR 已提交，等待 CA 签发 |
 | `pending` | 等待提交 |
 | `unpaid` | 未支付 |
+
+## 重试机制
+
+### HTTP 层重试（立即）
+
+```go
+const maxRetries = 3
+
+func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
+    for attempt := 0; attempt <= maxRetries; attempt++ {
+        if attempt > 0 {
+            time.Sleep(time.Duration(attempt) * time.Second) // 1s, 2s, 3s
+        }
+        resp, err := c.HTTPClient.Do(req)
+        if err == nil {
+            return resp, nil
+        }
+    }
+    return nil, fmt.Errorf("请求失败（重试 %d 次）", maxRetries)
+}
+```
+
+- 仅对**网络错误**重试，业务错误不重试
+- 重试间隔递增：1秒、2秒、3秒
+
+### 定时任务重试（延迟）
+
+定时任务每 `CheckInterval`（默认 6）小时运行一次，失败的证书下次自动重试：
+
+| 失败点 | HTTP 层 | 定时任务层 |
+|--------|---------|-----------|
+| 查询订单失败 | 3次重试 | 下次任务重新查询 |
+| 提交 CSR 失败 | 3次重试 | 下次任务重新提交 |
+| CSR 等待签发 | - | 下次任务查询状态 |
+| 私钥不匹配 | - | 删除私钥，重新生成 CSR |
+| 部署失败 | - | 下次任务重新部署 |

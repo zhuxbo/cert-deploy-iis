@@ -241,11 +241,12 @@ func (t *BackgroundTask) updateStatus(status TaskStatus, message string) {
 func CheckCertExpiry(cfg *config.Config) []CertExpiryInfo {
 	results := make([]CertExpiryInfo, 0)
 
-	if cfg.Token == "" {
+	token := cfg.GetToken()
+	if token == "" {
 		return results
 	}
 
-	client := api.NewClient(cfg.APIBaseURL, cfg.Token)
+	client := api.NewClient(cfg.APIBaseURL, token)
 
 	for _, certCfg := range cfg.Certificates {
 		if !certCfg.Enabled {

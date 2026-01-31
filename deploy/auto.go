@@ -63,15 +63,17 @@ func AutoDeploy(cfg *config.Config) []Result {
 			continue
 		}
 
-		log.Printf("检查证书: %s (订单: %d)", certCfg.Domain, certCfg.OrderID)
+		log.Printf("检查证书: %s (订单: %d, 本地私钥: %v)", certCfg.Domain, certCfg.OrderID, certCfg.UseLocalKey)
 
 		var certData *api.CertData
 		var privateKey string
 		var err error
 
 		if certCfg.UseLocalKey {
-			// 本地私钥模式
-			certData, privateKey, err = handleLocalKeyMode(client, &cfg.Certificates[i])
+			// 本地私钥模式：到期前 > RenewDaysLocal 天发起续签
+			// 目的：抢在服务端自动续签（14天）之前，由本地发起 CSR
+			var reason string
+			certData, privateKey, reason, err = handleLocalKeyMode(client, &cfg.Certificates[i], cfg.RenewDaysLocal)
 			if err != nil {
 				log.Printf("本地私钥模式处理失败: %v", err)
 				results = append(results, Result{
@@ -83,11 +85,14 @@ func AutoDeploy(cfg *config.Config) []Result {
 				continue
 			}
 			if certData == nil {
-				log.Printf("CSR 已提交，等待证书签发")
+				if reason != "" {
+					log.Printf("证书 %s 跳过: %s", certCfg.Domain, reason)
+				}
 				continue
 			}
 		} else {
-			// API 私钥模式
+			// 拉取模式：到期前 < RenewDaysFetch 天开始拉取
+			// 目的：等服务端自动续签（14天）完成后再拉取
 			certData, err = client.GetCertByOrderID(certCfg.OrderID)
 			if err != nil {
 				log.Printf("获取证书失败: %v", err)
@@ -99,36 +104,37 @@ func AutoDeploy(cfg *config.Config) []Result {
 				})
 				continue
 			}
+
+			// 检查证书状态
+			if certData.Status != "active" {
+				log.Printf("证书状态非活跃: %s", certData.Status)
+				results = append(results, Result{
+					Domain:  certCfg.Domain,
+					Success: false,
+					Message: fmt.Sprintf("证书状态: %s", certData.Status),
+					OrderID: certData.OrderID,
+				})
+				continue
+			}
+
+			// 拉取模式：检查是否到了拉取时间
+			expiresAt, err := time.Parse("2006-01-02", certData.ExpiresAt)
+			if err != nil {
+				log.Printf("解析过期时间失败: %v", err)
+				continue
+			}
+
+			daysUntilExpiry := int(time.Until(expiresAt).Hours() / 24)
+			if daysUntilExpiry > cfg.RenewDaysFetch {
+				log.Printf("证书 %s 还有 %d 天过期，等待服务端续签（<=%d天后拉取）", certData.Domain, daysUntilExpiry, cfg.RenewDaysFetch)
+				continue
+			}
+
+			log.Printf("证书 %s 将在 %d 天后过期，开始拉取部署...", certData.Domain, daysUntilExpiry)
 			privateKey = certData.PrivateKey
 		}
 
-		// 检查证书状态
-		if certData.Status != "active" {
-			log.Printf("证书状态非活跃: %s", certData.Status)
-			results = append(results, Result{
-				Domain:  certCfg.Domain,
-				Success: false,
-				Message: fmt.Sprintf("证书状态: %s", certData.Status),
-				OrderID: certData.OrderID,
-			})
-			continue
-		}
-
-		// 解析过期时间
-		expiresAt, err := time.Parse("2006-01-02", certData.ExpiresAt)
-		if err != nil {
-			log.Printf("解析过期时间失败: %v", err)
-			continue
-		}
-
-		// 检查是否需要更新
-		daysUntilExpiry := int(time.Until(expiresAt).Hours() / 24)
-		if daysUntilExpiry > cfg.CheckDays {
-			log.Printf("证书 %s 还有 %d 天过期，无需更新", certData.Domain, daysUntilExpiry)
-			continue
-		}
-
-		log.Printf("证书 %s 将在 %d 天后过期，开始部署...", certData.Domain, daysUntilExpiry)
+		log.Printf("证书 %s 开始部署...", certData.Domain)
 
 		// 根据模式选择部署方式
 		var deployResults []Result
@@ -267,16 +273,18 @@ func deployCertWithRules(certData *api.CertData, privateKey string, certCfg conf
 }
 
 // handleLocalKeyMode 处理本地私钥模式
-// 返回: 证书数据, 私钥, 错误
-func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig) (*api.CertData, string, error) {
+// renewDays: 到期前多少天发起续签（默认15天，需大于服务端自动续签的14天）
+// 返回: 证书数据, 私钥, 跳过原因, 错误
+// 当返回 certData=nil 且 error=nil 时，reason 说明跳过原因
+func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig, renewDays int) (*api.CertData, string, string, error) {
 	// 校验验证方法（校验证书的所有域名包括 SAN）
 	if certCfg.ValidationMethod != "" {
 		if errMsg := config.ValidateValidationMethod(certCfg.Domain, certCfg.ValidationMethod); errMsg != "" {
-			return nil, "", fmt.Errorf("证书 [%s] 主域名校验失败: %s", certCfg.Domain, errMsg)
+			return nil, "", "", fmt.Errorf("证书 [%s] 主域名校验失败: %s", certCfg.Domain, errMsg)
 		}
 		for _, d := range certCfg.Domains {
 			if errMsg := config.ValidateValidationMethod(d, certCfg.ValidationMethod); errMsg != "" {
-				return nil, "", fmt.Errorf("证书 [%s] SAN 域名 %s 校验失败: %s", certCfg.Domain, d, errMsg)
+				return nil, "", "", fmt.Errorf("证书 [%s] SAN 域名 %s 校验失败: %s", certCfg.Domain, d, errMsg)
 			}
 		}
 	}
@@ -297,13 +305,26 @@ func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig) (*api.Ce
 			} else {
 				log.Printf("订单 %d 处理中，等待签发", certCfg.OrderID)
 			}
-			return nil, "", nil // 等待下次检测
+			return nil, "", "CSR 已提交，等待签发", nil
 		} else if certData.Status == "active" {
+			// 检查证书是否需要续签
+			expiresAt, err := time.Parse("2006-01-02", certData.ExpiresAt)
+			if err != nil {
+				log.Printf("解析过期时间失败: %v，继续检查私钥", err)
+			} else {
+				daysUntilExpiry := int(time.Until(expiresAt).Hours() / 24)
+				if daysUntilExpiry > renewDays {
+					log.Printf("证书 %s 还有 %d 天过期，未到续签时间（>%d天）", certData.Domain, daysUntilExpiry, renewDays)
+					return nil, "", fmt.Sprintf("未到续签时间（还有 %d 天）", daysUntilExpiry), nil
+				}
+				log.Printf("证书 %s 还有 %d 天过期，需要续签（<=%d天）", certData.Domain, daysUntilExpiry, renewDays)
+			}
+
 			// 检查本地是否有私钥
 			if orderStore.HasPrivateKey(certCfg.OrderID) {
 				localKey, err := orderStore.LoadPrivateKey(certCfg.OrderID)
 				if err != nil {
-					return nil, "", fmt.Errorf("加载本地私钥失败: %w", err)
+					return nil, "", "", fmt.Errorf("加载本地私钥失败: %w", err)
 				}
 
 				// 验证私钥是否匹配证书
@@ -314,7 +335,7 @@ func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig) (*api.Ce
 					log.Printf("使用本地私钥（订单 %d）", certCfg.OrderID)
 					orderStore.SaveCertificate(certCfg.OrderID, certData.Certificate, certData.CACert)
 					updateOrderMeta(certCfg.OrderID, certData)
-					return certData, localKey, nil
+					return certData, localKey, "", nil
 				} else {
 					log.Printf("本地私钥与证书不匹配，需要重新生成 CSR")
 					orderStore.DeleteOrder(certCfg.OrderID)
@@ -323,7 +344,7 @@ func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig) (*api.Ce
 			// 没有本地私钥，但证书已签发
 			if certData.PrivateKey != "" {
 				log.Printf("使用 API 返回的私钥")
-				return certData, certData.PrivateKey, nil
+				return certData, certData.PrivateKey, "", nil
 			}
 		}
 	}
@@ -332,7 +353,7 @@ func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig) (*api.Ce
 	log.Printf("生成新的 CSR")
 	keyPEM, csrPEM, err := cert.GenerateCSR(certCfg.Domain, certCfg.Domains)
 	if err != nil {
-		return nil, "", fmt.Errorf("生成 CSR 失败: %w", err)
+		return nil, "", "", fmt.Errorf("生成 CSR 失败: %w", err)
 	}
 
 	// 提交 CSR
@@ -345,13 +366,13 @@ func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig) (*api.Ce
 
 	csrResp, err := client.SubmitCSR(csrReq)
 	if err != nil {
-		return nil, "", fmt.Errorf("提交 CSR 失败: %w", err)
+		return nil, "", "", fmt.Errorf("提交 CSR 失败: %w", err)
 	}
 
 	// 保存私钥到本地
 	newOrderID := csrResp.Data.OrderID
 	if err := orderStore.SavePrivateKey(newOrderID, keyPEM); err != nil {
-		return nil, "", fmt.Errorf("保存私钥失败: %w", err)
+		return nil, "", "", fmt.Errorf("保存私钥失败: %w", err)
 	}
 
 	// 更新配置中的订单 ID
@@ -365,12 +386,12 @@ func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig) (*api.Ce
 		if err == nil && certData.Status == "active" {
 			orderStore.SaveCertificate(newOrderID, certData.Certificate, certData.CACert)
 			updateOrderMeta(newOrderID, certData)
-			return certData, keyPEM, nil
+			return certData, keyPEM, "", nil
 		}
 	}
 
 	// 等待签发
-	return nil, "", nil
+	return nil, "", "CSR 已提交，等待签发", nil
 }
 
 // checkDomainConflicts 检查域名冲突（同一域名配置在多个证书中）
@@ -619,8 +640,14 @@ func handleFileValidation(domain string, file *api.FileValidation) error {
 	}
 
 	// 额外限制：必须在 .well-known 目录下
-	expectedPrefix := filepath.Join(sitePath, ".well-known")
-	if !strings.HasPrefix(fullPath, expectedPrefix) {
+	// 使用 filepath.Rel 获取相对路径，然后检查第一段是否为 .well-known
+	// Windows 大小写不敏感，统一转小写比较
+	relToSite, err := filepath.Rel(sitePath, fullPath)
+	if err != nil {
+		return fmt.Errorf("计算相对路径失败: %w", err)
+	}
+	pathParts := strings.Split(relToSite, string(os.PathSeparator))
+	if len(pathParts) == 0 || !strings.EqualFold(pathParts[0], ".well-known") {
 		return fmt.Errorf("验证文件路径必须在 .well-known 目录下")
 	}
 

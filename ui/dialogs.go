@@ -1282,11 +1282,14 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 	btnRefresh := ui.NewButton(dlg, ui.OptsButton().Text("刷新").Position(ui.Dpi(300, 270)).Width(ui.DpiX(50)).Height(ui.DpiY(28)))
 
 	// 配置区
-	ui.NewStatic(dlg, ui.OptsStatic().Text("提前检测:").Position(ui.Dpi(20, 315)))
-	txtCheckDays := ui.NewEdit(dlg, ui.OptsEdit().Position(ui.Dpi(80, 313)).Width(ui.DpiX(40)).Text(fmt.Sprintf("%d", cfg.CheckDays)))
-	ui.NewStatic(dlg, ui.OptsStatic().Text("天").Position(ui.Dpi(125, 315)))
+	ui.NewStatic(dlg, ui.OptsStatic().Text("续签:").Position(ui.Dpi(20, 315)))
+	txtRenewLocal := ui.NewEdit(dlg, ui.OptsEdit().Position(ui.Dpi(50, 313)).Width(ui.DpiX(30)).Text(fmt.Sprintf("%d", cfg.RenewDaysLocal)))
+	ui.NewStatic(dlg, ui.OptsStatic().Text("天").Position(ui.Dpi(83, 315)))
+	ui.NewStatic(dlg, ui.OptsStatic().Text("拉取:").Position(ui.Dpi(105, 315)))
+	txtRenewFetch := ui.NewEdit(dlg, ui.OptsEdit().Position(ui.Dpi(135, 313)).Width(ui.DpiX(30)).Text(fmt.Sprintf("%d", cfg.RenewDaysFetch)))
+	ui.NewStatic(dlg, ui.OptsStatic().Text("天").Position(ui.Dpi(168, 315)))
 
-	chkIIS7Mode := ui.NewCheckBox(dlg, ui.OptsCheckBox().Text("IIS7 兼容模式").Position(ui.Dpi(170, 315)))
+	chkIIS7Mode := ui.NewCheckBox(dlg, ui.OptsCheckBox().Text("IIS7 兼容模式").Position(ui.Dpi(200, 315)))
 
 	// 底部按钮
 	btnSave := ui.NewButton(dlg, ui.OptsButton().Text("保存").Position(ui.Dpi(400, 320)).Width(ui.DpiX(80)).Height(ui.DpiY(30)))
@@ -1458,7 +1461,8 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 			newCfg = config.DefaultConfig()
 		}
 		cfg = newCfg
-		txtCheckDays.SetText(fmt.Sprintf("%d", cfg.CheckDays))
+		txtRenewLocal.SetText(fmt.Sprintf("%d", cfg.RenewDaysLocal))
+		txtRenewFetch.SetText(fmt.Sprintf("%d", cfg.RenewDaysFetch))
 		chkIIS7Mode.SetCheck(cfg.IIS7Mode)
 		selectedIdx = -1
 		refreshList()
@@ -1467,12 +1471,18 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 
 	// 保存
 	btnSave.On().BnClicked(func() {
-		days := 10
-		fmt.Sscanf(txtCheckDays.Text(), "%d", &days)
-		if days < 1 {
-			days = 1
+		renewLocal := 15
+		fmt.Sscanf(txtRenewLocal.Text(), "%d", &renewLocal)
+		if renewLocal < 1 {
+			renewLocal = 1
 		}
-		cfg.CheckDays = days
+		renewFetch := 13
+		fmt.Sscanf(txtRenewFetch.Text(), "%d", &renewFetch)
+		if renewFetch < 1 {
+			renewFetch = 1
+		}
+		cfg.RenewDaysLocal = renewLocal
+		cfg.RenewDaysFetch = renewFetch
 		cfg.IIS7Mode = chkIIS7Mode.IsChecked()
 
 		if err := cfg.Save(); err != nil {
