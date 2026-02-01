@@ -54,7 +54,7 @@ func (c *Config) GetToken() string {
 			return decrypted
 		}
 	}
-	return c.Token
+	return "" // 不回退到明文 Token
 }
 
 // SetToken 加密并设置 Token

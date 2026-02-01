@@ -2,11 +2,44 @@ package cert
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+
+	"cert-deploy/config"
 )
+
+// KeyEncryptionPrefix 私钥加密版本前缀
+const KeyEncryptionPrefix = "v1:dpapi:"
+
+// EncryptPrivateKey 使用 DPAPI 加密私钥
+func EncryptPrivateKey(keyPEM string) (string, error) {
+	if keyPEM == "" {
+		return "", nil
+	}
+	encrypted, err := config.EncryptToken(keyPEM)
+	if err != nil {
+		return "", err
+	}
+	// 替换前缀为私钥专用前缀
+	return KeyEncryptionPrefix + strings.TrimPrefix(encrypted, config.EncryptionPrefix), nil
+}
+
+// DecryptPrivateKey 使用 DPAPI 解密私钥
+func DecryptPrivateKey(encrypted string) (string, error) {
+	if encrypted == "" {
+		return "", nil
+	}
+	if !strings.HasPrefix(encrypted, KeyEncryptionPrefix) {
+		return "", errors.New("无效的私钥格式")
+	}
+	// 转换为 Token 加密格式后解密
+	tokenFormat := config.EncryptionPrefix + strings.TrimPrefix(encrypted, KeyEncryptionPrefix)
+	return config.DecryptToken(tokenFormat)
+}
 
 // OrderMeta 订单元数据
 type OrderMeta struct {
@@ -46,23 +79,27 @@ func (s *OrderStore) EnsureOrderDir(orderID int) error {
 	return os.MkdirAll(orderPath, 0700)
 }
 
-// SavePrivateKey 保存私钥到订单目录
+// SavePrivateKey 保存私钥到订单目录（使用 DPAPI 加密）
 func (s *OrderStore) SavePrivateKey(orderID int, keyPEM string) error {
 	if err := s.EnsureOrderDir(orderID); err != nil {
 		return fmt.Errorf("创建订单目录失败: %w", err)
 	}
+	encrypted, err := EncryptPrivateKey(keyPEM)
+	if err != nil {
+		return fmt.Errorf("加密私钥失败: %w", err)
+	}
 	keyPath := filepath.Join(s.GetOrderPath(orderID), "private.key")
-	return os.WriteFile(keyPath, []byte(keyPEM), 0600)
+	return os.WriteFile(keyPath, []byte(encrypted), 0600)
 }
 
-// LoadPrivateKey 从订单目录加载私钥
+// LoadPrivateKey 从订单目录加载私钥（使用 DPAPI 解密）
 func (s *OrderStore) LoadPrivateKey(orderID int) (string, error) {
 	keyPath := filepath.Join(s.GetOrderPath(orderID), "private.key")
 	data, err := os.ReadFile(keyPath)
 	if err != nil {
 		return "", err
 	}
-	return string(data), nil
+	return DecryptPrivateKey(string(data))
 }
 
 // HasPrivateKey 检查订单是否有本地私钥

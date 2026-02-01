@@ -54,6 +54,7 @@ type AppWindow struct {
 	statusBar  *ui.StatusBar
 	certs      []cert.CertInfo
 	sites      []SiteItem
+	dataMu     sync.RWMutex // 保护 certs 和 sites 共享数据
 	btnRefresh *ui.Button
 	btnBind    *ui.Button
 	btnInstall *ui.Button
@@ -73,6 +74,31 @@ type AppWindow struct {
 
 	// 日志缓存
 	logLines []string
+}
+
+// getCerts 安全获取证书列表副本
+func (app *AppWindow) getCerts() []cert.CertInfo {
+	app.dataMu.RLock()
+	defer app.dataMu.RUnlock()
+	return append([]cert.CertInfo{}, app.certs...)
+}
+
+// getSites 安全获取站点列表副本
+func (app *AppWindow) getSites() []SiteItem {
+	app.dataMu.RLock()
+	defer app.dataMu.RUnlock()
+	return append([]SiteItem{}, app.sites...)
+}
+
+// getSite 安全获取指定索引的站点副本
+func (app *AppWindow) getSite(idx int) *SiteItem {
+	app.dataMu.RLock()
+	defer app.dataMu.RUnlock()
+	if idx < 0 || idx >= len(app.sites) {
+		return nil
+	}
+	site := app.sites[idx]
+	return &site
 }
 
 // SiteItem 站点列表项
@@ -575,8 +601,10 @@ func (app *AppWindow) doLoadDataAsync(onComplete func()) {
 			if loadErr != nil {
 				app.setStatus("加载失败: " + loadErr.Error())
 			} else {
+				app.dataMu.Lock()
 				app.certs = certs
 				app.sites = siteItems
+				app.dataMu.Unlock()
 
 				app.siteList.Items.DeleteAll()
 				for _, item := range siteItems {
@@ -670,12 +698,19 @@ func (app *AppWindow) onBindCert() {
 	}
 
 	idx := selected[0].Index()
+
+	// 直接访问数据（UI 线程内安全）
+	app.dataMu.RLock()
 	if idx < 0 || idx >= len(app.sites) {
+		app.dataMu.RUnlock()
 		return
 	}
+	site := app.sites[idx].SiteInfo
+	certs := make([]cert.CertInfo, len(app.certs))
+	copy(certs, app.certs)
+	app.dataMu.RUnlock()
 
-	site := &app.sites[idx].SiteInfo
-	ShowBindDialog(app.mainWnd, site, app.certs, func() {
+	ShowBindDialog(app.mainWnd, &site, certs, func() {
 		app.doLoadDataAsync(nil)
 	})
 }

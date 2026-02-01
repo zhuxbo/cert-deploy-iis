@@ -30,18 +30,18 @@ func InstallPFX(pfxPath, password string) (*InstallResult, error) {
 		return nil, fmt.Errorf("获取绝对路径失败: %v", err)
 	}
 
-	// 使用 PowerShell 导入证书
+	// 使用 PowerShell 导入证书，通过环境变量传递密码
 	script := fmt.Sprintf(`
-$password = ConvertTo-SecureString -String '%s' -Force -AsPlainText
+$password = ConvertTo-SecureString -String $env:PFX_PASSWORD -Force -AsPlainText
 $cert = Import-PfxCertificate -FilePath '%s' -CertStoreLocation Cert:\LocalMachine\My -Password $password -Exportable
 if ($cert) {
     Write-Output "Thumbprint: $($cert.Thumbprint)"
 } else {
     Write-Error "导入失败"
 }
-`, escapePassword(password), absPath)
+`, absPath)
 
-	outputStr, err := util.RunPowerShellCombined(script)
+	outputStr, err := util.RunPowerShellWithEnv(script, map[string]string{"PFX_PASSWORD": password})
 
 	if err != nil {
 		// 简化错误信息
@@ -142,13 +142,6 @@ func splitPEMCertChain(pemData string) (string, string) {
 		return pemData, ""
 	}
 	return leaf, chain.String()
-}
-
-// escapePassword 转义密码中的特殊字符（用于 PowerShell 单引号字符串）
-func escapePassword(password string) string {
-	// PowerShell 单引号字符串中，只有单引号需要转义（'' 表示一个单引号）
-	// $ 和反引号在单引号字符串中是字面字符，不需要转义
-	return strings.ReplaceAll(password, "'", "''")
 }
 
 // simplifyPFXError 简化 PFX 导入错误信息

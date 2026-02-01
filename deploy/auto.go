@@ -487,25 +487,33 @@ func updateOrderMeta(orderID int, certData *api.CertData) {
 	}
 }
 
-// sendCallback 发送部署回调
+// sendCallback 发送部署回调（异步，最多重试3次）
 func sendCallback(client *api.Client, orderID int, domain string, success bool, message string) {
-	status := "success"
-	if !success {
-		status = "failure"
-	}
+	go func() {
+		status := "success"
+		if !success {
+			status = "failure"
+		}
 
-	req := &api.CallbackRequest{
-		OrderID:    orderID,
-		Domain:     domain,
-		Status:     status,
-		DeployedAt: time.Now().Format("2006-01-02 15:04:05"),
-		ServerType: "IIS",
-		Message:    message,
-	}
+		req := &api.CallbackRequest{
+			OrderID:    orderID,
+			Domain:     domain,
+			Status:     status,
+			DeployedAt: time.Now().Format("2006-01-02 15:04:05"),
+			ServerType: "IIS",
+			Message:    message,
+		}
 
-	if err := client.Callback(req); err != nil {
-		log.Printf("发送回调失败: %v", err)
-	}
+		for attempt := 0; attempt < 3; attempt++ {
+			if attempt > 0 {
+				time.Sleep(time.Duration(attempt*10) * time.Second)
+			}
+			if err := client.Callback(req); err == nil {
+				return
+			}
+		}
+		log.Printf("回调最终失败: %s", domain)
+	}()
 }
 
 // CheckAndDeploy 检查并部署（命令行模式入口）

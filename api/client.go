@@ -90,10 +90,20 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 		}
 
 		resp, err := c.HTTPClient.Do(req)
-		if err == nil {
-			return resp, nil
+		if err != nil {
+			lastErr = err
+			continue
 		}
-		lastErr = err
+
+		// 5xx 错误时关闭响应体并重试
+		if resp.StatusCode >= 500 && attempt < maxRetries {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+			continue
+		}
+
+		return resp, nil
 	}
 
 	return nil, fmt.Errorf("请求失败（重试 %d 次）: %w", maxRetries, lastErr)

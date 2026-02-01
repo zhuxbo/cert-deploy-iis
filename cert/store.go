@@ -38,11 +38,12 @@ Get-ChildItem -Path Cert:\LocalMachine\My | ForEach-Object {
     Write-Output "FriendlyName: $($cert.FriendlyName)"
     Write-Output "HasPrivateKey: $($cert.HasPrivateKey)"
     Write-Output "SerialNumber: $($cert.SerialNumber)"
-    # 获取 SAN 中的 DNS 名称
+    # 获取 SAN 中的 DNS 名称（支持多种格式：DNS Name=, DNS:, DNS 名称=）
     $san = $cert.Extensions | Where-Object { $_.Oid.Value -eq "2.5.29.17" }
     if ($san) {
         $sanStr = $san.Format($false)
-        $dnsNames = [regex]::Matches($sanStr, 'DNS Name=([^\s,]+)') | ForEach-Object { $_.Groups[1].Value }
+        # 匹配多种格式：DNS Name=xxx, DNS:xxx, DNS 名称=xxx
+        $dnsNames = [regex]::Matches($sanStr, '(?:DNS Name=|DNS:|DNS 名称=)([^\s,]+)') | ForEach-Object { $_.Groups[1].Value }
         if ($dnsNames) {
             Write-Output "DNSNames: $($dnsNames -join ',')"
         }
@@ -202,6 +203,8 @@ func (c *CertInfo) MatchesDomain(domain string) bool {
 }
 
 // matchDomain 检查证书域名是否匹配目标域名（支持通配符）
+// 通配符只向上匹配一级子域名，例如 *.example.com 匹配 www.example.com，
+// 但不匹配 a.b.example.com。根域名匹配依赖证书 SAN 中的精确域名。
 func matchDomain(certDomain, targetDomain string) bool {
 	if certDomain == "" || targetDomain == "" {
 		return false
@@ -215,15 +218,11 @@ func matchDomain(certDomain, targetDomain string) bool {
 	// 通配符匹配 (*.example.com)
 	if strings.HasPrefix(certDomain, "*.") {
 		suffix := certDomain[1:] // .example.com
-		// 匹配 example.com 本身
-		if targetDomain == certDomain[2:] {
-			return true
-		}
-		// 匹配 sub.example.com
+		// 匹配 sub.example.com（只匹配一级子域名）
 		if strings.HasSuffix(targetDomain, suffix) {
-			// 确保只匹配一级子域名
 			prefix := targetDomain[:len(targetDomain)-len(suffix)]
-			if !strings.Contains(prefix, ".") {
+			// 前缀不能包含点（即只能是单级子域名），且前缀不能为空
+			if !strings.Contains(prefix, ".") && len(prefix) > 0 {
 				return true
 			}
 		}

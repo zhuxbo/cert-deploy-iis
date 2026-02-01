@@ -17,6 +17,12 @@ import (
 	"github.com/rodrigocfd/windigo/win"
 )
 
+// ComboBox 消息常量
+const (
+	CB_SHOWDROPDOWN = 0x014F
+)
+
+
 // ShowBindDialog 显示证书绑定对话框
 func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, onSuccess func()) {
 	// 过滤出有私钥的证书
@@ -127,10 +133,10 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 			Height(ui.DpiY(30)),
 	)
 
-	// 取消按钮
+	// 关闭按钮
 	btnCancel := ui.NewButton(dlg,
 		ui.OptsButton().
-			Text("取消").
+			Text("关闭").
 			Position(ui.Dpi(380, 350)).
 			Width(ui.DpiX(80)).
 			Height(ui.DpiY(30)),
@@ -157,11 +163,17 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 			filteredCerts = allValidCerts
 		}
 
+		// 先关闭下拉列表（如果已展开）
+		cmbCert.Hwnd().SendMessage(CB_SHOWDROPDOWN, 0, 0)
+
 		// 清空并重新添加
 		cmbCert.Items.DeleteAll()
 		for _, c := range filteredCerts {
 			cmbCert.Items.Add(getCertDisplayWithExpiry(&c))
 		}
+
+		// 强制重绘
+		cmbCert.Hwnd().InvalidateRect(nil, true)
 
 		// 选择第一个
 		if len(filteredCerts) > 0 {
@@ -174,14 +186,19 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 		idx := cmbCert.Items.Selected()
 		if idx >= 0 && idx < len(filteredCerts) {
 			c := filteredCerts[idx]
+			sanStr := "(无)"
+			if len(c.DNSNames) > 0 {
+				sanStr = strings.Join(c.DNSNames, ", ")
+			}
 			info := fmt.Sprintf(
-				"指纹: %s\r\n主题: %s\r\n颁发者: %s\r\n有效期: %s 至 %s\r\n状态: %s",
+				"指纹: %s\r\n主题: %s\r\n颁发者: %s\r\n有效期: %s 至 %s\r\n状态: %s\r\nSAN: %s",
 				c.Thumbprint,
 				c.Subject,
 				c.Issuer,
 				c.NotBefore.Format("2006-01-02"),
 				c.NotAfter.Format("2006-01-02"),
 				cert.GetCertStatus(&c),
+				sanStr,
 			)
 			txtCertInfo.SetText(info)
 		} else {
@@ -189,7 +206,7 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 		}
 	}
 
-	// 查询当前绑定（实时查询，无缓存）
+	// 查询当前绑定（实时查询，无缓存，支持通配符匹配）
 	updateCurrentBinding := func() {
 		domain := strings.TrimSpace(cmbDomain.Text())
 		portStr := strings.TrimSpace(txtPort.Text())
@@ -203,11 +220,37 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 			return
 		}
 
-		// 实时查询当前绑定
+		// 先尝试精确查询
 		binding, err := iis.GetBindingForHost(domain, port)
 		if err != nil {
 			txtCurrentBinding.SetText(fmt.Sprintf("查询失败: %v", err))
 			return
+		}
+
+		// 如果精确查询没找到，尝试查找匹配的通配符绑定
+		matchedHost := domain
+		if binding == nil {
+			bindings, _ := iis.ListSSLBindings()
+			for _, b := range bindings {
+				host := iis.ParseHostFromBinding(b.HostnamePort)
+				bindPort := iis.ParsePortFromBinding(b.HostnamePort)
+				if bindPort != port {
+					continue
+				}
+				// 检查是否是匹配的通配符
+				if strings.HasPrefix(host, "*.") {
+					suffix := host[1:] // .aaa.xljy.live
+					if strings.HasSuffix(domain, suffix) {
+						prefix := domain[:len(domain)-len(suffix)]
+						// 确保只有一级子域名
+						if !strings.Contains(prefix, ".") && len(prefix) > 0 {
+							binding = &b
+							matchedHost = host
+							break
+						}
+					}
+				}
+			}
 		}
 
 		if binding == nil {
@@ -221,32 +264,43 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 			if strings.EqualFold(c.Thumbprint, binding.CertHash) {
 				name := cert.GetCertDisplayName(&c)
 				expiry := c.NotAfter.Format("2006-01-02")
-				certInfo = fmt.Sprintf("%s (到期: %s)", name, expiry)
+				if matchedHost != domain {
+					// 显示通配符绑定域名
+					certInfo = fmt.Sprintf("%s [%s] (到期: %s)", name, matchedHost, expiry)
+				} else {
+					certInfo = fmt.Sprintf("%s (到期: %s)", name, expiry)
+				}
 				break
 			}
 		}
 		if certInfo == "" && len(binding.CertHash) >= 16 {
-			certInfo = binding.CertHash[:16] + "..."
+			if matchedHost != domain {
+				certInfo = fmt.Sprintf("[%s] %s...", matchedHost, binding.CertHash[:16])
+			} else {
+				certInfo = binding.CertHash[:16] + "..."
+			}
 		}
 		txtCurrentBinding.SetText(certInfo)
 	}
 
 	// 域名变化时更新证书列表和当前绑定
-	updateForDomain := func() {
-		domain := strings.TrimSpace(cmbDomain.Text())
+	updateForDomainText := func(domain string) {
 		updateCertList(domain)
 		updateCertInfo()
 		updateCurrentBinding()
 	}
 
-	// 域名选择变化事件
+	// 域名选择变化事件 - 通过索引获取选中的域名（避免时序问题）
 	cmbDomain.On().CbnSelChange(func() {
-		updateForDomain()
+		idx := cmbDomain.Items.Selected()
+		if idx >= 0 && idx < len(domainList) {
+			updateForDomainText(domainList[idx])
+		}
 	})
 
-	// 域名编辑变化事件
+	// 域名编辑变化事件 - 使用文本框内容
 	cmbDomain.On().CbnEditChange(func() {
-		updateForDomain()
+		updateForDomainText(strings.TrimSpace(cmbDomain.Text()))
 	})
 
 	// 证书选择变化事件
@@ -325,9 +379,9 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 
 				// 更新当前绑定显示
 				updateCurrentBinding()
+				updateCertInfo()
 
 				ui.MsgOk(dlg, "成功", "证书绑定成功", "证书已成功绑定到域名。")
-				dlg.Hwnd().SendMessage(co.WM_CLOSE, 0, 0)
 				if onSuccess != nil {
 					onSuccess()
 				}

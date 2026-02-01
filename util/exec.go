@@ -2,6 +2,7 @@ package util
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"syscall"
 	"unicode/utf8"
@@ -40,6 +41,31 @@ func RunPowerShellCombined(script string) (string, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,
 		CreationFlags: 0x08000000,
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(output), err
+	}
+
+	return string(output), nil
+}
+
+// RunPowerShellWithEnv 执行 PowerShell 命令，支持环境变量传递敏感数据
+func RunPowerShellWithEnv(script string, env map[string]string) (string, error) {
+	fullScript := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + script
+
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000,
+	}
+
+	// 追加环境变量
+	cmd.Env = os.Environ()
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 
 	output, err := cmd.CombinedOutput()

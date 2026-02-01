@@ -3,6 +3,7 @@ package util
 import (
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -184,7 +185,7 @@ func ValidateIPv4(ip string) error {
 
 // ===== 路径安全 =====
 
-// ValidateRelativePath 验证相对路径是否安全（防止路径遍历）
+// ValidateRelativePath 验证相对路径是否安全（防止路径遍历和符号链接攻击）
 // basePath: 基础路径
 // relativePath: 相对路径
 // 返回: 清理后的完整路径
@@ -220,7 +221,62 @@ func ValidateRelativePath(basePath, relativePath string) (string, error) {
 		return "", fmt.Errorf("路径超出允许的目录范围")
 	}
 
+	// 解析符号链接
+	realBasePath, err := filepath.EvalSymlinks(cleanBase)
+	if err != nil {
+		return "", fmt.Errorf("解析基础路径失败: %w", err)
+	}
+
+	realFullPath, err := evalSymlinksPartial(fullPath)
+	if err != nil {
+		return "", fmt.Errorf("解析目标路径失败: %w", err)
+	}
+
+	// 验证真实路径在基础路径内
+	if !IsPathWithinBase(realBasePath, realFullPath) {
+		return "", fmt.Errorf("路径超出允许范围（符号链接）")
+	}
+
 	return fullPath, nil
+}
+
+// evalSymlinksPartial 解析路径中已存在部分的符号链接
+// 对于不存在的路径部分，保留原样拼接
+func evalSymlinksPartial(path string) (string, error) {
+	// 如果路径存在，直接解析
+	if _, err := os.Stat(path); err == nil {
+		return filepath.EvalSymlinks(path)
+	}
+
+	// 从路径末端向前找到存在的部分
+	dir := path
+	var remaining []string
+
+	for {
+		if _, err := os.Stat(dir); err == nil {
+			break
+		}
+		remaining = append([]string{filepath.Base(dir)}, remaining...)
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// 到达根目录
+			break
+		}
+		dir = parent
+	}
+
+	// 解析存在部分的符号链接
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", err
+	}
+
+	// 拼接剩余部分
+	for _, part := range remaining {
+		realDir = filepath.Join(realDir, part)
+	}
+
+	return realDir, nil
 }
 
 // IsPathWithinBase 检查目标路径是否在基础路径内

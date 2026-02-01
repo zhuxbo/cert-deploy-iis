@@ -91,13 +91,24 @@ cmb := ui.NewComboBox(parent,
         Position(ui.Dpi(100, 20)).
         Width(ui.DpiX(200)).
         Texts("选项1", "选项2").
-        CtrlStyle(co.CBS_DROPDOWNLIST),
+        CtrlStyle(co.CBS_DROPDOWNLIST),  // 只读下拉列表
+        // 或 co.CBS_DROPDOWN 可编辑下拉框
 )
 
+// 选择变化事件
 cmb.On().CbnSelChange(func() {
-    idx := cmb.Items.Selected()
+    idx := cmb.Items.Selected()  // 使用索引，不要用 Text()
+})
+
+// 编辑变化事件（仅 CBS_DROPDOWN）
+cmb.On().CbnEditChange(func() {
+    text := cmb.Text()  // 编辑事件中可用 Text()
 })
 ```
+
+**重要**: ComboBox 样式说明：
+- `CBS_DROPDOWNLIST`: 只读下拉列表，用户只能从列表选择
+- `CBS_DROPDOWN`: 可编辑下拉框，用户可以输入自定义文本
 
 ### 编辑框
 
@@ -330,3 +341,68 @@ certdeploy.exe -debug
 ### 隐藏控制台
 
 编译时加 `-ldflags="-H windowsgui"`
+
+### ComboBox CbnSelChange 事件时序问题（重要）
+
+**问题**: 在可编辑 ComboBox（`CBS_DROPDOWN`）的 `CbnSelChange` 事件中，`cmb.Text()` 返回的可能是**旧值**，因为编辑框文本尚未更新。
+
+**症状**: 第一次选择某个选项时，关联组件显示不正确；再次选择同一选项才正常。
+
+**原因**: Windows ComboBox 在 `CBN_SELCHANGE` 消息触发时，选中索引已更新，但编辑框文本可能延迟更新。
+
+**错误示例**:
+```go
+// ❌ 错误：CbnSelChange 中使用 Text()
+cmbDomain.On().CbnSelChange(func() {
+    domain := cmbDomain.Text()  // 可能是旧值！
+    updateList(domain)
+})
+```
+
+**正确方案**: 使用索引从原始数据获取值：
+```go
+// ✓ 正确：通过索引获取
+domainList := []string{"a.com", "b.com", "c.com"}
+
+cmbDomain.On().CbnSelChange(func() {
+    idx := cmbDomain.Items.Selected()
+    if idx >= 0 && idx < len(domainList) {
+        domain := domainList[idx]  // 从原始列表获取
+        updateList(domain)
+    }
+})
+
+// CbnEditChange 事件中可以用 Text()（用户手动编辑时）
+cmbDomain.On().CbnEditChange(func() {
+    domain := cmbDomain.Text()  // 这里是正确的
+    updateList(domain)
+})
+```
+
+**适用场景**: 仅影响 `CBS_DROPDOWN`（可编辑）样式。`CBS_DROPDOWNLIST`（只读）通常不受影响，但建议也使用索引方式。
+
+### ComboBox 下拉列表刷新问题
+
+**问题**: 动态更新 ComboBox 项目后，下拉列表可能显示旧内容。
+
+**解决**: 更新前关闭下拉列表：
+```go
+const CB_SHOWDROPDOWN = 0x014F
+
+// 更新前关闭下拉列表
+cmbCert.Hwnd().SendMessage(CB_SHOWDROPDOWN, 0, 0)
+
+// 清空并重新添加
+cmbCert.Items.DeleteAll()
+for _, item := range items {
+    cmbCert.Items.Add(item)
+}
+
+// 强制重绘
+cmbCert.Hwnd().InvalidateRect(nil, true)
+
+// 选择第一项
+if len(items) > 0 {
+    cmbCert.Items.Select(0)
+}
+```

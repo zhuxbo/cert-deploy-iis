@@ -2,9 +2,14 @@ package config
 
 import (
 	"encoding/base64"
+	"errors"
+	"strings"
 	"syscall"
 	"unsafe"
 )
+
+// EncryptionPrefix 加密版本前缀
+const EncryptionPrefix = "v1:"
 
 var (
 	dllCrypt32  = syscall.NewLazyDLL("Crypt32.dll")
@@ -47,7 +52,7 @@ func EncryptToken(plaintext string) (string, error) {
 	output := make([]byte, outputBlob.cbData)
 	copy(output, unsafe.Slice(outputBlob.pbData, outputBlob.cbData))
 
-	return base64.StdEncoding.EncodeToString(output), nil
+	return EncryptionPrefix + base64.StdEncoding.EncodeToString(output), nil
 }
 
 // DecryptToken 使用 DPAPI 解密 Token
@@ -56,10 +61,14 @@ func DecryptToken(encrypted string) (string, error) {
 		return "", nil
 	}
 
-	input, err := base64.StdEncoding.DecodeString(encrypted)
+	if !strings.HasPrefix(encrypted, EncryptionPrefix) {
+		return "", errors.New("无效的加密格式")
+	}
+
+	data := strings.TrimPrefix(encrypted, EncryptionPrefix)
+	input, err := base64.StdEncoding.DecodeString(data)
 	if err != nil {
-		// 可能是旧版明文 Token，直接返回
-		return encrypted, nil
+		return "", errors.New("无效的加密数据")
 	}
 
 	inputBlob := dataBlob{
@@ -74,8 +83,7 @@ func DecryptToken(encrypted string) (string, error) {
 		uintptr(unsafe.Pointer(&outputBlob)),
 	)
 	if r == 0 {
-		// 解密失败，可能是明文 Token
-		return encrypted, nil
+		return "", errors.New("解密失败")
 	}
 	defer procLocalFree.Call(uintptr(unsafe.Pointer(outputBlob.pbData)))
 

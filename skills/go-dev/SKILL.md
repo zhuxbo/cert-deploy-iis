@@ -88,6 +88,53 @@ script := `Get-ChildItem Cert:\LocalMachine\My | ForEach-Object { ... }`
 cmd := exec.Command("powershell", "-NoProfile", "-Command", script)
 ```
 
+### 单引号字符串转义
+
+PowerShell 单引号字符串中，只有 `'` 需要转义（`''` 表示一个单引号）：
+
+```go
+// 正确：$ 和反引号在单引号中是字面字符
+func escapePassword(password string) string {
+    return strings.ReplaceAll(password, "'", "''")
+}
+
+// 错误：多余转义会改变真实密码
+password = strings.ReplaceAll(password, "$", "`$")  // 不需要
+```
+
+## 常见陷阱
+
+### Token 加密存储
+
+配置中 Token 可能是加密的，必须用 `GetToken()` 获取解密值：
+
+```go
+// 正确
+token := cfg.GetToken()
+client := api.NewClient(cfg.APIBaseURL, token)
+
+// 错误：cfg.Token 可能是加密后的值
+client := api.NewClient(cfg.APIBaseURL, cfg.Token)
+```
+
+### 路径安全校验
+
+Windows 路径校验需注意：
+1. 大小写不敏感（用 `strings.EqualFold`）
+2. 前缀匹配不安全（`.well-known` 会匹配 `.well-known-evil`）
+
+```go
+// 正确：按路径段校验
+relPath, _ := filepath.Rel(basePath, fullPath)
+parts := strings.Split(relPath, string(os.PathSeparator))
+if !strings.EqualFold(parts[0], ".well-known") {
+    return fmt.Errorf("路径不在 .well-known 下")
+}
+
+// 错误：前缀匹配可被绕过
+if !strings.HasPrefix(fullPath, expectedPrefix) { ... }
+```
+
 ## 并发模式
 
 后台任务使用 goroutine + channel：
