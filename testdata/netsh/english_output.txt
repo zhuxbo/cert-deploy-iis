@@ -1,0 +1,47 @@
+SSL Certificate bindings:
+-------------------------
+
+    IP:port                      : 0.0.0.0:443
+    Certificate Hash             : ABC123DEF456789012345678901234567890ABCD
+    Application ID               : {4dc3e181-e14b-4a21-b022-59fc669b0914}
+    Certificate Store Name       : My
+    Verify Client Certificate Revocation : Enabled
+    Verify Revocation Using Cached Client Certificate Only : Disabled
+    Usage Check                  : Enabled
+    Revocation Freshness Time    : 0
+    URL Retrieval Timeout        : 0
+    Ctl Identifier               : (null)
+    Ctl Store Name               : (null)
+    DS Mapper Usage              : Disabled
+    Negotiate Client Certificate : Disabled
+    Reject Connections           : Disabled
+
+    Hostname:port                : www.example.com:443
+    Certificate Hash             : DEF456789012345678901234567890ABCDEF1234
+    Application ID               : {4dc3e181-e14b-4a21-b022-59fc669b0914}
+    Certificate Store Name       : My
+    Verify Client Certificate Revocation : Enabled
+    Verify Revocation Using Cached Client Certificate Only : Disabled
+    Usage Check                  : Enabled
+    Revocation Freshness Time    : 0
+    URL Retrieval Timeout        : 0
+    Ctl Identifier               : (null)
+    Ctl Store Name               : (null)
+    DS Mapper Usage              : Disabled
+    Negotiate Client Certificate : Disabled
+    Reject Connections           : Disabled
+
+    Hostname:port                : *.example.com:443
+    Certificate Hash             : 1234567890ABCDEF1234567890ABCDEF12345678
+    Application ID               : {4dc3e181-e14b-4a21-b022-59fc669b0914}
+    Certificate Store Name       : My
+    Verify Client Certificate Revocation : Enabled
+    Verify Revocation Using Cached Client Certificate Only : Disabled
+    Usage Check                  : Enabled
+    Revocation Freshness Time    : 0
+    URL Retrieval Timeout        : 0
+    Ctl Identifier               : (null)
+    Ctl Store Name               : (null)
+    DS Mapper Usage              : Disabled
+    Negotiate Client Certificate : Disabled
+    Reject Connections           : Disabled

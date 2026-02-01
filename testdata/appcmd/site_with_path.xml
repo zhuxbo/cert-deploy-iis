@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<appcmd>
+<SITE SITE.NAME="Default Web Site" SITE.ID="1" bindings="http/*:80:www.example.com,https/*:443:www.example.com" state="Started">
+  <site name="Default Web Site" id="1">
+    <application path="/">
+      <virtualDirectory path="/" physicalPath="C:\inetpub\wwwroot" />
+    </application>
+  </site>
+</SITE>
+<SITE SITE.NAME="API Site" SITE.ID="2" bindings="http/*:80:api.example.com,https/*:443:api.example.com" state="Started">
+  <site name="API Site" id="2">
+    <application path="/">
+      <virtualDirectory path="/" physicalPath="C:\inetpub\api" />
+    </application>
+  </site>
+</SITE>
+</appcmd>

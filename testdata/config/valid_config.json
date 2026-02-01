@@ -1,0 +1,26 @@
+{
+  "api_base_url": "https://api.example.com/deploy",
+  "encrypted_token": "",
+  "certificates": [
+    {
+      "order_id": 12345,
+      "domain": "example.com",
+      "domains": ["example.com", "www.example.com"],
+      "expires_at": "2025-12-31",
+      "serial_number": "ABC123",
+      "enabled": true,
+      "bind_rules": [
+        {"domain": "www.example.com", "port": 443}
+      ],
+      "use_local_key": false,
+      "auto_bind_mode": false
+    }
+  ],
+  "renew_days_local": 15,
+  "renew_days_fetch": 13,
+  "last_check": "2024-01-01 00:00:00",
+  "auto_check_enabled": false,
+  "check_interval": 6,
+  "task_name": "CertDeployIIS",
+  "iis7_mode": false
+}

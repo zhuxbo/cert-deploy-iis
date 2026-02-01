@@ -376,9 +376,9 @@ func matchDomain(bindingHost, certDomain string) bool {
 	if strings.HasPrefix(certDomain, "*.") {
 		suffix := certDomain[1:] // ".example.com"
 		if strings.HasSuffix(bindingHost, suffix) {
-			// 确保只有一级子域名
+			// 确保只有一级子域名，且前缀不为空
 			prefix := bindingHost[:len(bindingHost)-len(suffix)]
-			if !strings.Contains(prefix, ".") {
+			if !strings.Contains(prefix, ".") && prefix != "" {
 				return true
 			}
 		}

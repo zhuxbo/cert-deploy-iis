@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<appcmd>
+<SITE SITE.NAME="Default Web Site" SITE.ID="1" bindings="http/*:80:,https/*:443:www.example.com" state="Started" />
+<SITE SITE.NAME="Test Site" SITE.ID="2" bindings="http/*:80:test.example.com,https/*:443:test.example.com" state="Started" />
+<SITE SITE.NAME="中文站点" SITE.ID="3" bindings="http/*:80:chinese.example.com" state="Stopped" />
+<SITE SITE.NAME="Wildcard Site" SITE.ID="4" bindings="https/*:443:*.example.com" state="Started" />
+</appcmd>

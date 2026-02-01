@@ -1,0 +1,47 @@
+SSL 证书绑定:
+-------------------------
+
+    IP:端口                      : 0.0.0.0:443
+    证书哈希                     : ABC123DEF456789012345678901234567890ABCD
+    应用程序 ID                  : {4dc3e181-e14b-4a21-b022-59fc669b0914}
+    证书存储名称                 : My
+    验证客户端证书吊销           : Enabled
+    仅使用缓存的客户端证书进行吊销检查 : Disabled
+    使用情况检查                 : Enabled
+    吊销刷新时间                 : 0
+    URL 检索超时                 : 0
+    Ctl 标识符                   : (null)
+    Ctl 存储名称                 : (null)
+    DS 映射器使用情况            : Disabled
+    协商客户端证书               : Disabled
+    拒绝连接                     : Disabled
+
+    主机名:端口                  : www.example.com:443
+    证书哈希                     : DEF456789012345678901234567890ABCDEF1234
+    应用程序 ID                  : {4dc3e181-e14b-4a21-b022-59fc669b0914}
+    证书存储名称                 : My
+    验证客户端证书吊销           : Enabled
+    仅使用缓存的客户端证书进行吊销检查 : Disabled
+    使用情况检查                 : Enabled
+    吊销刷新时间                 : 0
+    URL 检索超时                 : 0
+    Ctl 标识符                   : (null)
+    Ctl 存储名称                 : (null)
+    DS 映射器使用情况            : Disabled
+    协商客户端证书               : Disabled
+    拒绝连接                     : Disabled
+
+    主机名:端口                  : *.example.com:443
+    证书哈希                     : 1234567890ABCDEF1234567890ABCDEF12345678
+    应用程序 ID                  : {4dc3e181-e14b-4a21-b022-59fc669b0914}
+    证书存储名称                 : My
+    验证客户端证书吊销           : Enabled
+    仅使用缓存的客户端证书进行吊销检查 : Disabled
+    使用情况检查                 : Enabled
+    吊销刷新时间                 : 0
+    URL 检索超时                 : 0
+    Ctl 标识符                   : (null)
+    Ctl 存储名称                 : (null)
+    DS 映射器使用情况            : Disabled
+    协商客户端证书               : Disabled
+    拒绝连接                     : Disabled

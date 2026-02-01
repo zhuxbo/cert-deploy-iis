@@ -1,0 +1,10 @@
+{
+  "api_base_url": "https://api.example.com/deploy",
+  "certificates": [
+    {
+      "order_id": "invalid_not_a_number",
+      "domain": 123
+    }
+  ],
+  "invalid_json_here":
+}
