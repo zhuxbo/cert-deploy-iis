@@ -331,7 +331,7 @@ func TestListCertsByDomain_MockServer(t *testing.T) {
 					"status":      "active",
 					"expires_at":  "2025-01-01",
 					"certificate": "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
-					"private_key": "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----",
+					"private_key": "-----BEGIN TEST KEY-----\ntest\n-----END TEST KEY-----",
 				},
 			},
 		})
@@ -699,7 +699,7 @@ func TestCertData_Fields(t *testing.T) {
 		Domains:     "example.com,www.example.com",
 		Status:      "active",
 		Certificate: "-----BEGIN CERTIFICATE-----",
-		PrivateKey:  "-----BEGIN RSA PRIVATE KEY-----",
+		PrivateKey:  "-----BEGIN TEST KEY-----",
 		CACert:      "-----BEGIN CERTIFICATE-----",
 		ExpiresAt:   "2025-12-31",
 		CreatedAt:   "2024-01-01",

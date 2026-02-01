@@ -41,7 +41,7 @@ func TestParsePrivateKeyFromPEM_Invalid(t *testing.T) {
 		{"空字符串", "", "", true},
 		{"无效 PEM", "not a pem", "", true},
 		{"证书而非私钥", "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----", "", true},
-		{"无效的私钥数据", "-----BEGIN RSA PRIVATE KEY-----\ninvalid\n-----END RSA PRIVATE KEY-----", "", true},
+		{"无效的私钥数据", "-----BEGIN TEST KEY-----\ninvalid\n-----END TEST KEY-----", "", true},
 	}
 
 	for _, tt := range tests {

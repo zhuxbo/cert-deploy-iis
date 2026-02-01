@@ -62,13 +62,13 @@ func TestPEMToPFX_InvalidCert(t *testing.T) {
 		{
 			"空证书",
 			"",
-			"-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----",
+			"-----BEGIN TEST KEY-----\ntest\n-----END TEST KEY-----",
 			true,
 		},
 		{
 			"无效证书 PEM",
 			"not a pem",
-			"-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----",
+			"-----BEGIN TEST KEY-----\ntest\n-----END TEST KEY-----",
 			true,
 		},
 		{

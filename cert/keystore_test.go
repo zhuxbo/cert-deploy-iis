@@ -287,7 +287,7 @@ func TestEncryptDecryptPrivateKey(t *testing.T) {
 		wantErr bool
 	}{
 		{"空字符串", "", false},
-		{"有效私钥", "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----", false},
+		{"有效私钥", "-----BEGIN TEST KEY-----\ntest\n-----END TEST KEY-----", false},
 		{"长私钥", string(make([]byte, 2048)), false},
 	}
 
@@ -347,7 +347,7 @@ func TestOrderStore_SaveLoadPrivateKey(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := &OrderStore{BaseDir: tmpDir}
 
-	testKey := "-----BEGIN RSA PRIVATE KEY-----\nMIItest...\n-----END RSA PRIVATE KEY-----"
+	testKey := "-----BEGIN TEST KEY-----\nMIItest...\n-----END TEST KEY-----"
 
 	// 保存
 	err := store.SavePrivateKey(123, testKey)
