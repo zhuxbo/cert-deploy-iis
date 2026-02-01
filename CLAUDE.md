@@ -6,14 +6,7 @@ IIS SSL 证书部署工具，Go + windigo，单文件 exe。
 
 ## 核心指令
 
-- **不要自动提交** - 完成修改后等待用户确认"提交"再执行 git commit/push
 - **测试发现 bug 必须修复代码** - 测试的目的是发现 bug 并修复，绝不修改测试去迎合错误的代码
-
-## 构建
-
-```bash
-go build -ldflags="-s -w -H windowsgui" -o certdeploy.exe
-```
 
 ## 项目结构
 
@@ -24,14 +17,30 @@ cert/         # 证书存储/安装/转换
 api/          # Deploy API 客户端
 config/       # JSON 配置
 deploy/       # 自动部署逻辑
+integration/  # 端到端集成测试
 ```
 
-## 关键模式
+## 构建
 
-- **防 UI 卡死**: 耗时操作用 `go func()` + `UiThread()` 回调
-- **控件动态布局**: 在 `WmSize` 中用 `SetWindowPos` 调整位置
-- **后台任务**: `BackgroundTask` 管理定时检测
-- **证书选择**: 按域名查询列表，选 active + 最新过期的
+```bash
+go build -ldflags="-s -w -H windowsgui" -o certdeploy.exe
+```
+
+## 测试
+
+```bash
+go test ./...                                    # 单元测试
+go test -tags=integration ./integration/...      # 集成测试
+```
+
+## Skills 参考
+
+| 主题 | 文档 |
+|------|------|
+| UI 开发 | `skills/windigo-ui/` |
+| IIS 操作 | `skills/iis-ops/` |
+| API 接口 | `skills/api/` |
+| 构建发布 | `skills/build-release/` |
 
 ## Git 规范
 
@@ -42,9 +51,9 @@ deploy/       # 自动部署逻辑
 开发中发现重要信息时，更新 `skills/` 目录：
 
 ```
-skills/api/SKILL.md          # Deploy API 接口
-skills/windigo-ui/SKILL.md   # windigo GUI 用法
-skills/iis-ops/SKILL.md      # IIS/netsh 操作
+skills/api/SKILL.md          # Deploy API 接口、证书选择逻辑、部署模式
+skills/windigo-ui/SKILL.md   # windigo GUI、防 UI 卡死、动态布局
+skills/iis-ops/SKILL.md      # IIS/netsh 操作、SSL 绑定类型
 skills/go-dev/SKILL.md       # Go 开发规范
-skills/build-release/SKILL.md # 构建发布
+skills/build-release/SKILL.md # 构建发布、版本注入
 ```

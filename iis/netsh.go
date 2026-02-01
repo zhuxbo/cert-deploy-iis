@@ -19,6 +19,7 @@ type SSLBinding struct {
 	AppID           string
 	CertStoreName   string
 	SslCtlStoreName string
+	IsIPBinding     bool // true: IP:port 绑定（空主机名），false: Hostname:port 绑定（SNI）
 }
 
 // BindCertificate 绑定证书到指定的主机名和端口 (SNI 模式)
@@ -221,8 +222,10 @@ func parseSSLBindings(output string) []SSLBinding {
 	bindings := make([]SSLBinding, 0)
 
 	// 正则表达式匹配（支持中英文和全角/半角冒号）
-	// 匹配: "Hostname:port", "IP:port", "主机名:端口", "IP:端口" 等
-	hostPortRe := regexp.MustCompile(`(?i)(?:Hostname:port|IP:port|主机名[:：]端口|IP[:：]端口)\s*[:：]\s*(.+)`)
+	// SNI 绑定: "Hostname:port", "主机名:端口"
+	sniBindingRe := regexp.MustCompile(`(?i)(?:Hostname:port|主机名[:：]端口)\s*[:：]\s*(.+)`)
+	// IP 绑定: "IP:port", "IP:端口"（空主机名，用于通配符泛匹配或 IP 证书）
+	ipBindingRe := regexp.MustCompile(`(?i)(?:IP:port|IP[:：]端口)\s*[:：]\s*(.+)`)
 	certHashRe := regexp.MustCompile(`(?i)(?:Certificate Hash|证书哈希)\s*[:：]\s*([a-fA-F0-9]+)`)
 	appIDRe := regexp.MustCompile(`(?i)(?:Application ID|应用程序\s*ID)\s*[:：]\s*(\{[^}]+\})`)
 	storeRe := regexp.MustCompile(`(?i)(?:Certificate Store Name|证书存储名称)\s*[:：]\s*(.+)`)
@@ -236,13 +239,25 @@ func parseSSLBindings(output string) []SSLBinding {
 			continue
 		}
 
-		// 检查是否是新的绑定条目
-		if matches := hostPortRe.FindStringSubmatch(line); matches != nil {
+		// 检查是否是新的绑定条目（优先检查 SNI 绑定）
+		if matches := sniBindingRe.FindStringSubmatch(line); matches != nil {
 			if current != nil {
 				bindings = append(bindings, *current)
 			}
 			current = &SSLBinding{
 				HostnamePort: strings.TrimSpace(matches[1]),
+				IsIPBinding:  false,
+			}
+			continue
+		}
+		// 检查 IP 绑定（空主机名）
+		if matches := ipBindingRe.FindStringSubmatch(line); matches != nil {
+			if current != nil {
+				bindings = append(bindings, *current)
+			}
+			current = &SSLBinding{
+				HostnamePort: strings.TrimSpace(matches[1]),
+				IsIPBinding:  true,
 			}
 			continue
 		}
@@ -314,8 +329,10 @@ func GetBindingForIP(ip string, port int) (*SSLBinding, error) {
 	return nil, nil // 未找到
 }
 
-// FindBindingsForDomains 查找与指定域名匹配的 SSL 绑定
-// 返回: 实际绑定域名 -> SSLBinding 映射（通配符会匹配多个）
+// FindBindingsForDomains 查找与指定域名匹配的 SNI 绑定
+// 返回: 绑定域名 -> SSLBinding 映射
+// 注意: 只匹配 SNI 绑定（Hostname:port），忽略 IP 绑定（空主机名）
+// IP 绑定用于通配符泛匹配或 IP 证书，需用户手工管理
 func FindBindingsForDomains(domains []string) (map[string]*SSLBinding, error) {
 	bindings, err := ListSSLBindings()
 	if err != nil {
@@ -324,11 +341,17 @@ func FindBindingsForDomains(domains []string) (map[string]*SSLBinding, error) {
 
 	result := make(map[string]*SSLBinding)
 	for i, b := range bindings {
+		// 忽略 IP 绑定（空主机名），只处理 SNI 绑定
+		if b.IsIPBinding {
+			continue
+		}
+
+		// SNI 绑定：按域名匹配
 		host := ParseHostFromBinding(b.HostnamePort)
 		if host == "" {
 			continue
 		}
-		// 检查绑定域名是否匹配任意证书域名（包括通配符匹配）
+		// 检查绑定域名是否匹配任意证书域名（支持通配符匹配）
 		for _, certDomain := range domains {
 			if matchDomain(host, certDomain) {
 				result[host] = &bindings[i]
