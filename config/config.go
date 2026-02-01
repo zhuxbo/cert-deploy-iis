@@ -6,7 +6,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 )
+
+// configMu 保护配置文件读写的全局互斥锁
+var configMu sync.Mutex
 
 // DataDirName 数据目录名称
 const DataDirName = "CertDeploy"
@@ -111,8 +115,11 @@ func GetLogDir() string {
 	return logDir
 }
 
-// Load 加载配置
+// Load 加载配置（线程安全）
 func Load() (*Config, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+
 	path := GetConfigPath()
 
 	data, err := os.ReadFile(path)
@@ -145,16 +152,38 @@ func Load() (*Config, error) {
 	return &cfg, nil
 }
 
-// Save 保存配置
+// Save 保存配置（线程安全，原子写入）
 func (c *Config) Save() error {
+	configMu.Lock()
+	defer configMu.Unlock()
+
 	path := GetConfigPath()
 
+	// 1. 序列化
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0600)
+	// 2. 写入临时文件
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
+		return fmt.Errorf("写入临时文件失败: %w", err)
+	}
+
+	// 3. 原子重命名（Windows 需要先删除目标文件）
+	if _, err := os.Stat(path); err == nil {
+		if err := os.Remove(path); err != nil {
+			os.Remove(tmpPath) // 清理临时文件
+			return fmt.Errorf("删除旧配置失败: %w", err)
+		}
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("重命名配置文件失败: %w", err)
+	}
+
+	return nil
 }
 
 // AddCertificate 添加证书配置

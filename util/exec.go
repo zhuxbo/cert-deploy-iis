@@ -147,3 +147,47 @@ func containsChineseUTF8(data []byte) bool {
 	}
 	return false
 }
+
+// RunCmdDirect 直接执行命令（不经过 shell 解析，更安全）
+// 适用于执行外部程序时需要防止命令注入的场景
+func RunCmdDirect(name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+	}
+
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+
+	// 尝试 GBK 转 UTF-8
+	utf8Output, convErr := GBKToUTF8(output)
+	if convErr != nil {
+		return string(output), nil
+	}
+
+	return string(utf8Output), nil
+}
+
+// RunCmdDirectCombined 直接执行命令，返回 stdout + stderr
+func RunCmdDirectCombined(name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000,
+	}
+
+	output, err := cmd.CombinedOutput()
+
+	// 尝试 GBK 转 UTF-8
+	utf8Output, convErr := GBKToUTF8(output)
+	if convErr != nil {
+		return string(output), err
+	}
+
+	return string(utf8Output), err
+}

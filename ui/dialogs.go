@@ -629,13 +629,24 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 			Position(ui.Dpi(20, 50)),
 	)
 
-	// Token 输入
+	// Token 输入（密码样式，默认隐藏）
 	txtToken := ui.NewEdit(dlg,
 		ui.OptsEdit().
 			Position(ui.Dpi(110, 48)).
-			Width(ui.DpiX(400)).
-			Text(defaultToken),
+			Width(ui.DpiX(320)).
+			Text(defaultToken).
+			CtrlStyle(co.ES_PASSWORD),
 	)
+
+	// 显示/隐藏 Token 按钮
+	btnShowToken := ui.NewButton(dlg,
+		ui.OptsButton().
+			Text("显示").
+			Position(ui.Dpi(440, 46)).
+			Width(ui.DpiX(70)).
+			Height(ui.DpiY(26)),
+	)
+	tokenVisible := false
 
 	// 域名标签
 	ui.NewStatic(dlg,
@@ -817,6 +828,22 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 		cmbValidation.Hwnd().EnableWindow(false)
 		cmbValidation.Items.Select(0) // 默认选择"自动"
 		return 0
+	})
+
+	// 显示/隐藏 Token 按钮事件
+	btnShowToken.On().BnClicked(func() {
+		tokenVisible = !tokenVisible
+		if tokenVisible {
+			// 移除 ES_PASSWORD 样式（使用 SendMessage 设置密码字符为 0）
+			txtToken.Hwnd().SendMessage(0x00CC, 0, 0) // EM_SETPASSWORDCHAR
+			btnShowToken.SetText("隐藏")
+		} else {
+			// 添加 ES_PASSWORD 样式（设置密码字符为 '*'）
+			txtToken.Hwnd().SendMessage(0x00CC, win.WPARAM('*'), 0) // EM_SETPASSWORDCHAR
+			btnShowToken.SetText("显示")
+		}
+		// 刷新显示
+		txtToken.Hwnd().InvalidateRect(nil, true)
 	})
 
 	// 本地私钥复选框变化事件

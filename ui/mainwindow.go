@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -47,6 +48,16 @@ func logDebug(format string, v ...interface{}) {
 	}
 }
 
+// CloseDebugMode 关闭调试模式并释放资源
+func CloseDebugMode() {
+	if debugLogFile != nil {
+		debugLogFile.Sync()
+		debugLogFile.Close()
+		debugLogFile = nil
+		debugLog = nil
+	}
+}
+
 // AppWindow 主窗口
 type AppWindow struct {
 	mainWnd    *ui.Main
@@ -61,6 +72,10 @@ type AppWindow struct {
 	btnAPI     *ui.Button
 	loading    bool
 	loadingMu  sync.Mutex // 保护 loading 标志
+
+	// context 用于取消后台 goroutine
+	ctx       context.Context
+	cancelCtx context.CancelFunc
 
 	// 后台任务相关
 	bgTask          *BackgroundTask
@@ -115,8 +130,14 @@ type SiteItem struct {
 func RunApp() {
 	runtime.LockOSThread()
 
+	// 确保程序退出时清理调试模式资源
+	defer CloseDebugMode()
+
+	ctx, cancel := context.WithCancel(context.Background())
 	app := &AppWindow{
-		bgTask: NewBackgroundTask(),
+		bgTask:    NewBackgroundTask(),
+		ctx:       ctx,
+		cancelCtx: cancel,
 	}
 
 	// 创建主窗口
@@ -239,16 +260,34 @@ func RunApp() {
 
 		// 延迟初始化
 		go func() {
-			time.Sleep(100 * time.Millisecond)
+			select {
+			case <-app.ctx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
 
 			// 异步检查任务计划状态
 			go func() {
+				// 检查 context 是否已取消
+				select {
+				case <-app.ctx.Done():
+					return
+				default:
+				}
+
 				cfg, _ := config.Load()
 				taskName := util.DefaultTaskName
 				if cfg != nil && cfg.TaskName != "" {
 					taskName = cfg.TaskName
 				}
 				taskExists := util.IsTaskExists(taskName)
+
+				// 再次检查 context
+				select {
+				case <-app.ctx.Done():
+					return
+				default:
+				}
 
 				app.mainWnd.UiThread(func() {
 					if taskExists {
@@ -263,6 +302,13 @@ func RunApp() {
 					}
 				})
 			}()
+
+			// 检查 context
+			select {
+			case <-app.ctx.Done():
+				return
+			default:
+			}
 
 			// 加载数据
 			app.mainWnd.UiThread(func() {
@@ -388,6 +434,20 @@ func RunApp() {
 		})
 	})
 
+	// 窗口关闭时清理资源
+	app.mainWnd.On().WmDestroy(func() {
+		// 取消所有后台 goroutine
+		if app.cancelCtx != nil {
+			app.cancelCtx()
+		}
+		// 停止后台任务
+		if app.bgTask != nil {
+			app.bgTask.Stop()
+		}
+		// 关闭调试模式
+		CloseDebugMode()
+	})
+
 	app.mainWnd.RunAsMain()
 }
 
@@ -396,6 +456,13 @@ func (app *AppWindow) toggleAutoCheck() {
 	app.btnAutoCheck.Hwnd().EnableWindow(false)
 
 	go func() {
+		// 检查 context 是否已取消
+		select {
+		case <-app.ctx.Done():
+			return
+		default:
+		}
+
 		cfg, _ := config.Load()
 		taskName := util.DefaultTaskName
 		if cfg != nil && cfg.TaskName != "" {
@@ -419,7 +486,9 @@ func (app *AppWindow) toggleAutoCheck() {
 
 				if cfg != nil {
 					cfg.AutoCheckEnabled = false
-					cfg.Save()
+					if err := cfg.Save(); err != nil {
+						app.appendTaskLog(fmt.Sprintf("警告: 保存配置失败: %v", err))
+					}
 				}
 
 				app.btnAutoCheck.SetText("启动自动部署")
@@ -454,7 +523,9 @@ func (app *AppWindow) toggleAutoCheck() {
 				}
 
 				cfg.AutoCheckEnabled = true
-				cfg.Save()
+				if err := cfg.Save(); err != nil {
+					app.appendTaskLog(fmt.Sprintf("警告: 保存配置失败: %v", err))
+				}
 
 				app.btnAutoCheck.SetText("停止自动部署")
 				app.statusIndicator.SetState(IndicatorRunning)
@@ -471,6 +542,13 @@ func (app *AppWindow) runCheckNow() {
 	app.btnCheckNow.Hwnd().EnableWindow(false)
 
 	go func() {
+		// 检查 context 是否已取消
+		select {
+		case <-app.ctx.Done():
+			return
+		default:
+		}
+
 		cfg, _ := config.Load()
 
 		if cfg == nil || len(cfg.Certificates) == 0 {
@@ -565,6 +643,16 @@ func (app *AppWindow) doLoadDataAsync(onComplete func()) {
 	app.loadingMu.Unlock()
 
 	go func() {
+		// 检查 context 是否已取消
+		select {
+		case <-app.ctx.Done():
+			app.loadingMu.Lock()
+			app.loading = false
+			app.loadingMu.Unlock()
+			return
+		default:
+		}
+
 		var loadErr error
 		var sites []iis.SiteInfo
 		var certs []cert.CertInfo
@@ -575,8 +663,15 @@ func (app *AppWindow) doLoadDataAsync(onComplete func()) {
 		} else {
 			sites, loadErr = iis.ScanSites()
 			if loadErr == nil {
-				certs, _ = cert.ListCertificates()
-				sslBindings, _ = iis.ListSSLBindings()
+				var certErr, sslErr error
+				certs, certErr = cert.ListCertificates()
+				if certErr != nil {
+					log.Printf("警告: 加载证书列表失败: %v", certErr)
+				}
+				sslBindings, sslErr = iis.ListSSLBindings()
+				if sslErr != nil {
+					log.Printf("警告: 加载 SSL 绑定失败: %v", sslErr)
+				}
 			}
 		}
 

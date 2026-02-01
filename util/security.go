@@ -92,8 +92,8 @@ func ValidateDomain(domain string) error {
 	return nil
 }
 
-// ValidateSiteName 验证 IIS 站点名称
-// 允许字母、数字、空格、连字符、下划线、点、中文
+// ValidateSiteName 验证 IIS 站点名称（白名单模式）
+// 只允许：字母、数字、空格、连字符、下划线、点、中文（CJK）
 func ValidateSiteName(siteName string) error {
 	if siteName == "" {
 		return fmt.Errorf("站点名称不能为空")
@@ -102,19 +102,59 @@ func ValidateSiteName(siteName string) error {
 		return fmt.Errorf("站点名称长度不能超过260个字符")
 	}
 
-	// 检查危险字符
-	dangerousChars := []string{"'", "\"", "`", "$", ";", "&", "|", "<", ">", "\n", "\r", "\t"}
-	for _, char := range dangerousChars {
-		if strings.Contains(siteName, char) {
-			return fmt.Errorf("站点名称包含不允许的字符: %q", char)
+	// 白名单验证：只允许特定字符
+	for _, r := range siteName {
+		// 允许：字母、数字
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			continue
 		}
+		// 允许：空格、连字符、下划线、点
+		if r == ' ' || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		// 允许：中文 CJK 基本区 (U+4E00-U+9FFF)
+		if r >= 0x4E00 && r <= 0x9FFF {
+			continue
+		}
+		// 允许：中文 CJK 扩展 A (U+3400-U+4DBF)
+		if r >= 0x3400 && r <= 0x4DBF {
+			continue
+		}
+		// 其他字符一律拒绝
+		return fmt.Errorf("站点名称包含不允许的字符: %q", r)
 	}
 
-	// 检查每个字符是否合法
+	return nil
+}
+
+// ValidateSiteNameStrict 严格验证 IIS 站点名称（仅 ASCII 和中文）
+// 用于特别敏感的场景，不允许特殊字符
+func ValidateSiteNameStrict(siteName string) error {
+	if siteName == "" {
+		return fmt.Errorf("站点名称不能为空")
+	}
+	if len(siteName) > 260 {
+		return fmt.Errorf("站点名称长度不能超过260个字符")
+	}
+
 	for _, r := range siteName {
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != ' ' && r != '-' && r != '_' && r != '.' {
-			return fmt.Errorf("站点名称包含不允许的字符: %q", r)
+		// 允许：ASCII 字母
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+			continue
 		}
+		// 允许：ASCII 数字
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		// 允许：空格、连字符、下划线
+		if r == ' ' || r == '-' || r == '_' {
+			continue
+		}
+		// 允许：中文 CJK 基本区
+		if r >= 0x4E00 && r <= 0x9FFF {
+			continue
+		}
+		return fmt.Errorf("站点名称包含不允许的字符: %q", r)
 	}
 
 	return nil

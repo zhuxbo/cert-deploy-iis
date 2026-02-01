@@ -1,4 +1,4 @@
-﻿package deploy
+package deploy
 
 import (
 	"fmt"
@@ -155,7 +155,9 @@ func AutoDeploy(cfg *config.Config) []Result {
 
 	// 更新检查时间
 	cfg.LastCheck = time.Now().Format("2006-01-02 15:04:05")
-	cfg.Save()
+	if err := cfg.Save(); err != nil {
+		log.Printf("警告: 保存配置失败: %v", err)
+	}
 
 	return results
 }
@@ -333,7 +335,9 @@ func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig, renewDay
 					log.Printf("验证密钥匹配失败: %v", err)
 				} else if matched {
 					log.Printf("使用本地私钥（订单 %d）", certCfg.OrderID)
-					orderStore.SaveCertificate(certCfg.OrderID, certData.Certificate, certData.CACert)
+					if err := orderStore.SaveCertificate(certCfg.OrderID, certData.Certificate, certData.CACert); err != nil {
+						log.Printf("警告: 保存证书失败: %v", err)
+					}
 					updateOrderMeta(certCfg.OrderID, certData)
 					return certData, localKey, "", nil
 				} else {
@@ -384,7 +388,9 @@ func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig, renewDay
 	if csrResp.Data.Status == "active" {
 		certData, err := client.GetCertByOrderID(newOrderID)
 		if err == nil && certData.Status == "active" {
-			orderStore.SaveCertificate(newOrderID, certData.Certificate, certData.CACert)
+			if err := orderStore.SaveCertificate(newOrderID, certData.Certificate, certData.CACert); err != nil {
+				log.Printf("警告: 保存证书失败: %v", err)
+			}
 			updateOrderMeta(newOrderID, certData)
 			return certData, keyPEM, "", nil
 		}
@@ -641,6 +647,15 @@ func handleFileValidation(domain string, file *api.FileValidation) error {
 	relativePath := strings.TrimPrefix(file.Path, "/")
 	relativePath = strings.ReplaceAll(relativePath, "/", string(os.PathSeparator))
 
+	// 验证文件扩展名（禁止危险扩展名）
+	ext := strings.ToLower(filepath.Ext(relativePath))
+	dangerousExts := []string{".exe", ".dll", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".asp", ".aspx", ".php"}
+	for _, dext := range dangerousExts {
+		if ext == dext {
+			return fmt.Errorf("不允许创建 %s 扩展名的验证文件", ext)
+		}
+	}
+
 	// 安全验证：防止路径遍历攻击
 	fullPath, err := util.ValidateRelativePath(sitePath, relativePath)
 	if err != nil {
@@ -659,15 +674,27 @@ func handleFileValidation(domain string, file *api.FileValidation) error {
 		return fmt.Errorf("验证文件路径必须在 .well-known 目录下")
 	}
 
-	// 创建目录
+	// 创建目录（使用更严格的权限 0750）
 	dir := filepath.Dir(fullPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("创建目录失败: %w", err)
 	}
 
 	// 写入验证文件
 	if err := os.WriteFile(fullPath, []byte(file.Content), 0644); err != nil {
 		return fmt.Errorf("写入验证文件失败: %w", err)
+	}
+
+	// 写入后验证文件位置（防止符号链接攻击）
+	realPath, err := filepath.EvalSymlinks(fullPath)
+	if err != nil {
+		// 如果解析失败，删除已写入的文件
+		os.Remove(fullPath)
+		return fmt.Errorf("验证文件路径失败: %w", err)
+	}
+	if !util.IsPathWithinBase(sitePath, realPath) {
+		os.Remove(fullPath)
+		return fmt.Errorf("文件写入位置超出站点目录范围")
 	}
 
 	log.Printf("验证文件已创建: %s", fullPath)
