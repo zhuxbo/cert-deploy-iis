@@ -106,6 +106,30 @@ cmb.On().CbnEditChange(func() {
 })
 ```
 
+**CbnSelChange 时序问题**: 在 `CbnSelChange` 事件中，`cmb.Text()` 可能还未更新为新选中项的文本。如果需要在事件处理函数中调用其他函数并传递选中的值：
+
+```go
+// 错误示范：被调用函数内部读取 cmb.Text()
+updateDisplay := func() {
+    domain := cmb.Text()  // CbnSelChange 时可能还是旧值！
+    doSomething(domain)
+}
+cmb.On().CbnSelChange(func() {
+    updateDisplay()  // 可能显示旧值
+})
+
+// 正确做法：将选中值作为参数传递
+updateDisplay := func(domain string) {
+    doSomething(domain)  // 使用传入的值
+}
+cmb.On().CbnSelChange(func() {
+    idx := cmb.Items.Selected()
+    if idx >= 0 && idx < len(itemList) {
+        updateDisplay(itemList[idx])  // 通过索引获取并传递
+    }
+})
+```
+
 **重要**: ComboBox 样式说明：
 - `CBS_DROPDOWNLIST`: 只读下拉列表，用户只能从列表选择
 - `CBS_DROPDOWN`: 可编辑下拉框，用户可以输入自定义文本

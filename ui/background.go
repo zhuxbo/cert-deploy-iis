@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -192,7 +193,8 @@ func (t *BackgroundTask) doCheck() {
 
 	t.updateStatus(TaskStatusRunning, fmt.Sprintf("正在检查 %d 个证书...", len(cfg.Certificates)))
 
-	results := deploy.AutoDeploy(cfg)
+	store := cert.NewOrderStore()
+	results := deploy.AutoDeploy(cfg, store)
 
 	t.mu.Lock()
 	t.lastRun = time.Now()
@@ -253,7 +255,7 @@ func CheckCertExpiry(cfg *config.Config) []CertExpiryInfo {
 			continue
 		}
 
-		certData, err := client.GetCertByOrderID(certCfg.OrderID)
+		certData, err := client.GetCertByOrderID(context.Background(), certCfg.OrderID)
 		if err != nil {
 			results = append(results, CertExpiryInfo{
 				Domain: certCfg.Domain,

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -298,7 +299,7 @@ func TestListCertsByDomain_Validation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := NewClient(tt.baseURL, tt.token)
-			_, err := client.ListCertsByDomain("example.com")
+			_, err := client.ListCertsByDomain(context.Background(), "example.com")
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ListCertsByDomain() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -340,7 +341,7 @@ func TestListCertsByDomain_MockServer(t *testing.T) {
 
 	// 测试成功请求
 	client := NewClient(server.URL, "test-token")
-	certs, err := client.ListCertsByDomain("example.com")
+	certs, err := client.ListCertsByDomain(context.Background(), "example.com")
 	if err != nil {
 		t.Fatalf("ListCertsByDomain() error = %v", err)
 	}
@@ -355,7 +356,7 @@ func TestListCertsByDomain_MockServer(t *testing.T) {
 
 	// 测试未授权
 	badClient := NewClient(server.URL, "wrong-token")
-	_, err = badClient.ListCertsByDomain("example.com")
+	_, err = badClient.ListCertsByDomain(context.Background(), "example.com")
 	if err == nil {
 		t.Error("使用错误 token 应该返回错误")
 	}
@@ -392,7 +393,7 @@ func TestGetCertByOrderID_MockServer(t *testing.T) {
 	client := NewClient(server.URL, "test-token")
 
 	// 测试存在的订单
-	cert, err := client.GetCertByOrderID(123)
+	cert, err := client.GetCertByOrderID(context.Background(), 123)
 	if err != nil {
 		t.Fatalf("GetCertByOrderID(123) error = %v", err)
 	}
@@ -401,7 +402,7 @@ func TestGetCertByOrderID_MockServer(t *testing.T) {
 	}
 
 	// 测试不存在的订单
-	_, err = client.GetCertByOrderID(999)
+	_, err = client.GetCertByOrderID(context.Background(), 999)
 	if err == nil {
 		t.Error("GetCertByOrderID(999) 应该返回错误")
 	}
@@ -462,7 +463,7 @@ func TestDoWithRetry_Success(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain("example.com")
+	_, err := client.ListCertsByDomain(context.Background(), "example.com")
 
 	if err != nil {
 		t.Fatalf("ListCertsByDomain() error = %v", err)
@@ -491,7 +492,7 @@ func TestDoWithRetry_5xxRetry(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain("example.com")
+	_, err := client.ListCertsByDomain(context.Background(), "example.com")
 
 	if err != nil {
 		t.Fatalf("ListCertsByDomain() error = %v", err)
@@ -598,7 +599,7 @@ func TestGetCertByDomain_MockServer(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	cert, err := client.GetCertByDomain("example.com")
+	cert, err := client.GetCertByDomain(context.Background(), "example.com")
 
 	if err != nil {
 		t.Fatalf("GetCertByDomain() error = %v", err)
@@ -629,7 +630,7 @@ func TestGetCertByDomain_NoActiveCert(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.GetCertByDomain("example.com")
+	_, err := client.GetCertByDomain(context.Background(), "example.com")
 
 	if err == nil {
 		t.Error("GetCertByDomain() 应该返回错误（没有 active 证书）")
@@ -648,7 +649,7 @@ func TestListCertsByDomain_HTTPError(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain("example.com")
+	_, err := client.ListCertsByDomain(context.Background(), "example.com")
 
 	if err == nil {
 		t.Error("ListCertsByDomain() 应该返回错误")
@@ -664,7 +665,7 @@ func TestListCertsByDomain_JSONParseError(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain("example.com")
+	_, err := client.ListCertsByDomain(context.Background(), "example.com")
 
 	if err == nil {
 		t.Error("ListCertsByDomain() 应该返回 JSON 解析错误")
@@ -684,7 +685,7 @@ func TestListCertsByDomain_CodeNotOne(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain("example.com")
+	_, err := client.ListCertsByDomain(context.Background(), "example.com")
 
 	if err == nil {
 		t.Error("ListCertsByDomain() 应该返回错误（code != 1）")
@@ -809,7 +810,7 @@ func TestGetCertByOrderID_Validation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := NewClient(tt.baseURL, tt.token)
-			_, err := client.GetCertByOrderID(123)
+			_, err := client.GetCertByOrderID(context.Background(), 123)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GetCertByOrderID() error = %v, wantErr %v", err, tt.wantErr)
 			}

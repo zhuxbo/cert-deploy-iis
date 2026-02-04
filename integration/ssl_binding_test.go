@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -23,7 +24,7 @@ func TestSSLBinding(t *testing.T) {
 	client := api.NewClient(TestAPIBaseURL, TestToken)
 
 	// 获取一个有效的证书
-	certs, err := client.ListCertsByDomain("")
+	certs, err := client.ListCertsByDomain(context.Background(), "")
 	if err != nil {
 		t.Fatalf("获取证书列表失败: %v", err)
 	}
@@ -195,7 +196,7 @@ func TestFindBindingsIgnoresIPBinding(t *testing.T) {
 	client := api.NewClient(TestAPIBaseURL, TestToken)
 
 	// 获取一个通配符证书
-	certs, err := client.ListCertsByDomain("")
+	certs, err := client.ListCertsByDomain(context.Background(), "")
 	if err != nil {
 		t.Fatalf("获取证书列表失败: %v", err)
 	}

@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -24,7 +25,7 @@ func TestFullDeployFlow(t *testing.T) {
 
 	// 1. 从 API 获取证书
 	t.Log("步骤 1: 从 API 获取证书列表")
-	certs, err := client.ListCertsByDomain("")
+	certs, err := client.ListCertsByDomain(context.Background(), "")
 	if err != nil {
 		t.Fatalf("获取证书列表失败: %v", err)
 	}
@@ -143,7 +144,7 @@ func TestDeployWithIPBinding(t *testing.T) {
 	client := api.NewClient(TestAPIBaseURL, TestToken)
 
 	// 获取证书
-	certs, err := client.ListCertsByDomain("")
+	certs, err := client.ListCertsByDomain(context.Background(), "")
 	if err != nil {
 		t.Fatalf("获取证书列表失败: %v", err)
 	}
@@ -212,7 +213,7 @@ func TestDeployMultipleDomains(t *testing.T) {
 	client := api.NewClient(TestAPIBaseURL, TestToken)
 
 	// 获取证书
-	certs, err := client.ListCertsByDomain("")
+	certs, err := client.ListCertsByDomain(context.Background(), "")
 	if err != nil {
 		t.Fatalf("获取证书列表失败: %v", err)
 	}
@@ -292,7 +293,7 @@ func TestWildcardCertWithIPBinding(t *testing.T) {
 	client := api.NewClient(TestAPIBaseURL, TestToken)
 
 	// 获取一个通配符证书
-	certs, err := client.ListCertsByDomain("")
+	certs, err := client.ListCertsByDomain(context.Background(), "")
 	if err != nil {
 		t.Fatalf("获取证书列表失败: %v", err)
 	}
@@ -376,7 +377,7 @@ func TestCertificateReplacement(t *testing.T) {
 	client := api.NewClient(TestAPIBaseURL, TestToken)
 
 	// 获取两个不同的证书
-	certs, err := client.ListCertsByDomain("")
+	certs, err := client.ListCertsByDomain(context.Background(), "")
 	if err != nil {
 		t.Fatalf("获取证书列表失败: %v", err)
 	}

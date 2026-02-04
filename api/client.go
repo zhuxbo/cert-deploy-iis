@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -81,13 +82,28 @@ func NewClient(baseURL, token string) *Client {
 	}
 }
 
-// doWithRetry 执行带重试的 HTTP 请求
-func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
+// doWithRetry 执行带重试的 HTTP 请求，支持 context 取消
+func (c *Client) doWithRetry(ctx context.Context, req *http.Request) (*http.Response, error) {
 	var lastErr error
 
+	// 将 context 添加到请求
+	req = req.WithContext(ctx)
+
 	for attempt := 0; attempt <= MaxRetries; attempt++ {
+		// 检查 context 是否已取消
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("请求被取消: %w", ctx.Err())
+		default:
+		}
+
 		if attempt > 0 {
-			time.Sleep(time.Duration(attempt) * time.Second)
+			// 带 context 的休眠
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("请求被取消: %w", ctx.Err())
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
 			// 重置 Body（如果有）
 			if req.GetBody != nil {
 				body, _ := req.GetBody()
@@ -97,6 +113,10 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 
 		resp, err := c.HTTPClient.Do(req)
 		if err != nil {
+			// 检查是否因为 context 取消
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("请求被取消: %w", ctx.Err())
+			}
 			lastErr = err
 			continue
 		}
@@ -129,6 +149,38 @@ func (e *APIError) Error() string {
 		return fmt.Sprintf("HTTP %d: %s", e.StatusCode, body)
 	}
 	return fmt.Sprintf("HTTP %d", e.StatusCode)
+}
+
+// handleHTTPError 处理 HTTP 错误响应，提取结构化错误信息
+func handleHTTPError(statusCode int, body []byte) *APIError {
+	var errResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if json.Unmarshal(body, &errResp) == nil && errResp.Msg != "" {
+		return &APIError{
+			StatusCode: statusCode,
+			Code:       errResp.Code,
+			Message:    errResp.Msg,
+		}
+	}
+	return &APIError{
+		StatusCode: statusCode,
+		Message:    fmt.Sprintf("HTTP %d: 接口请求失败", statusCode),
+		RawBody:    string(body),
+	}
+}
+
+// checkAPICode 验证 API 响应的 code 字段
+func checkAPICode(resp *CertListResponse, statusCode int) error {
+	if resp.Code != 1 {
+		return &APIError{
+			StatusCode: statusCode,
+			Code:       resp.Code,
+			Message:    resp.Msg,
+		}
+	}
+	return nil
 }
 
 // parseAPIResponse 解析 API 响应，验证格式
@@ -165,8 +217,8 @@ func parseAPIResponse(body []byte, statusCode int) (*CertListResponse, error) {
 }
 
 // GetCertByDomain 按域名查询证书，返回最佳匹配（active 且最新）
-func (c *Client) GetCertByDomain(domain string) (*CertData, error) {
-	certs, err := c.ListCertsByDomain(domain)
+func (c *Client) GetCertByDomain(ctx context.Context, domain string) (*CertData, error) {
+	certs, err := c.ListCertsByDomain(ctx, domain)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +237,7 @@ func (c *Client) GetCertByDomain(domain string) (*CertData, error) {
 }
 
 // ListCertsByDomain 按域名查询证书列表
-func (c *Client) ListCertsByDomain(domain string) ([]CertData, error) {
+func (c *Client) ListCertsByDomain(ctx context.Context, domain string) ([]CertData, error) {
 	if c.BaseURL == "" {
 		return nil, fmt.Errorf("部署接口地址未配置")
 	}
@@ -206,7 +258,7 @@ func (c *Client) ListCertsByDomain(domain string) ([]CertData, error) {
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.doWithRetry(req)
+	resp, err := c.doWithRetry(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -219,24 +271,7 @@ func (c *Client) ListCertsByDomain(domain string) ([]CertData, error) {
 
 	// 先检查 HTTP 状态码
 	if resp.StatusCode != http.StatusOK {
-		// 尝试解析 JSON 错误信息
-		var errResp struct {
-			Code int    `json:"code"`
-			Msg  string `json:"msg"`
-		}
-		if json.Unmarshal(body, &errResp) == nil && errResp.Msg != "" {
-			return nil, &APIError{
-				StatusCode: resp.StatusCode,
-				Code:       errResp.Code,
-				Message:    errResp.Msg,
-			}
-		}
-		// 非 JSON 响应，返回状态码错误
-		return nil, &APIError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("HTTP %d: 接口请求失败", resp.StatusCode),
-			RawBody:    string(body),
-		}
+		return nil, handleHTTPError(resp.StatusCode, body)
 	}
 
 	// 解析并验证响应格式
@@ -245,12 +280,8 @@ func (c *Client) ListCertsByDomain(domain string) ([]CertData, error) {
 		return nil, err
 	}
 
-	if certResp.Code != 1 {
-		return nil, &APIError{
-			StatusCode: resp.StatusCode,
-			Code:       certResp.Code,
-			Message:    certResp.Msg,
-		}
+	if err := checkAPICode(certResp, resp.StatusCode); err != nil {
+		return nil, err
 	}
 
 	return certResp.Data, nil
@@ -377,7 +408,7 @@ func (c *Client) Callback(req *CallbackRequest) error {
 	httpReq.Header.Set("Authorization", "Bearer "+c.Token)
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.doWithRetry(httpReq)
+	resp, err := c.doWithRetry(context.Background(), httpReq)
 	if err != nil {
 		return err
 	}
@@ -388,7 +419,7 @@ func (c *Client) Callback(req *CallbackRequest) error {
 		if err != nil {
 			return fmt.Errorf("回调失败: HTTP %d (读取响应失败: %v)", resp.StatusCode, err)
 		}
-		return fmt.Errorf("回调失败: %d - %s", resp.StatusCode, string(body))
+		return handleHTTPError(resp.StatusCode, body)
 	}
 
 	return nil
@@ -429,7 +460,7 @@ func (c *Client) SubmitCSR(req *CSRRequest) (*CSRResponse, error) {
 	httpReq.Header.Set("Authorization", "Bearer "+c.Token)
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.doWithRetry(httpReq)
+	resp, err := c.doWithRetry(context.Background(), httpReq)
 	if err != nil {
 		return nil, err
 	}
@@ -441,7 +472,7 @@ func (c *Client) SubmitCSR(req *CSRRequest) (*CSRResponse, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API 返回错误: %d - %s", resp.StatusCode, string(body))
+		return nil, handleHTTPError(resp.StatusCode, body)
 	}
 
 	var csrResp CSRResponse
@@ -450,14 +481,18 @@ func (c *Client) SubmitCSR(req *CSRRequest) (*CSRResponse, error) {
 	}
 
 	if csrResp.Code != 1 {
-		return nil, fmt.Errorf("API 错误: %s", csrResp.Msg)
+		return nil, &APIError{
+			StatusCode: resp.StatusCode,
+			Code:       csrResp.Code,
+			Message:    csrResp.Msg,
+		}
 	}
 
 	return &csrResp, nil
 }
 
 // GetCertByOrderID 按订单 ID 查询证书
-func (c *Client) GetCertByOrderID(orderID int) (*CertData, error) {
+func (c *Client) GetCertByOrderID(ctx context.Context, orderID int) (*CertData, error) {
 	if c.BaseURL == "" {
 		return nil, fmt.Errorf("部署接口地址未配置")
 	}
@@ -476,7 +511,7 @@ func (c *Client) GetCertByOrderID(orderID int) (*CertData, error) {
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.doWithRetry(req)
+	resp, err := c.doWithRetry(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -488,22 +523,7 @@ func (c *Client) GetCertByOrderID(orderID int) (*CertData, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp struct {
-			Code int    `json:"code"`
-			Msg  string `json:"msg"`
-		}
-		if json.Unmarshal(body, &errResp) == nil && errResp.Msg != "" {
-			return nil, &APIError{
-				StatusCode: resp.StatusCode,
-				Code:       errResp.Code,
-				Message:    errResp.Msg,
-			}
-		}
-		return nil, &APIError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("HTTP %d: 接口请求失败", resp.StatusCode),
-			RawBody:    string(body),
-		}
+		return nil, handleHTTPError(resp.StatusCode, body)
 	}
 
 	certResp, err := parseAPIResponse(body, resp.StatusCode)
@@ -511,12 +531,8 @@ func (c *Client) GetCertByOrderID(orderID int) (*CertData, error) {
 		return nil, err
 	}
 
-	if certResp.Code != 1 {
-		return nil, &APIError{
-			StatusCode: resp.StatusCode,
-			Code:       certResp.Code,
-			Message:    certResp.Msg,
-		}
+	if err := checkAPICode(certResp, resp.StatusCode); err != nil {
+		return nil, err
 	}
 
 	if len(certResp.Data) == 0 {

@@ -1,6 +1,8 @@
 package deploy
 
 import (
+	"context"
+
 	"sslctlw/api"
 	"sslctlw/cert"
 	"sslctlw/config"
@@ -8,22 +10,22 @@ import (
 
 // MockAPIClient 模拟 API 客户端
 type MockAPIClient struct {
-	GetCertByOrderIDFunc func(orderID int) (*api.CertData, error)
-	ListCertsByDomainFunc func(domain string) ([]api.CertData, error)
-	SubmitCSRFunc        func(req *api.CSRRequest) (*api.CSRResponse, error)
-	CallbackFunc         func(req *api.CallbackRequest) error
+	GetCertByOrderIDFunc  func(ctx context.Context, orderID int) (*api.CertData, error)
+	ListCertsByDomainFunc func(ctx context.Context, domain string) ([]api.CertData, error)
+	SubmitCSRFunc         func(req *api.CSRRequest) (*api.CSRResponse, error)
+	CallbackFunc          func(req *api.CallbackRequest) error
 }
 
-func (m *MockAPIClient) GetCertByOrderID(orderID int) (*api.CertData, error) {
+func (m *MockAPIClient) GetCertByOrderID(ctx context.Context, orderID int) (*api.CertData, error) {
 	if m.GetCertByOrderIDFunc != nil {
-		return m.GetCertByOrderIDFunc(orderID)
+		return m.GetCertByOrderIDFunc(ctx, orderID)
 	}
 	return nil, nil
 }
 
-func (m *MockAPIClient) ListCertsByDomain(domain string) ([]api.CertData, error) {
+func (m *MockAPIClient) ListCertsByDomain(ctx context.Context, domain string) ([]api.CertData, error) {
 	if m.ListCertsByDomainFunc != nil {
-		return m.ListCertsByDomainFunc(domain)
+		return m.ListCertsByDomainFunc(ctx, domain)
 	}
 	return nil, nil
 }

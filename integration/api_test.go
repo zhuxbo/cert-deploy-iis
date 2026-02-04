@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"context"
 	"testing"
 
 	"sslctlw/api"
@@ -13,7 +14,7 @@ func TestAPIConnection(t *testing.T) {
 	client := api.NewClient(TestAPIBaseURL, TestToken)
 
 	t.Run("ListCerts", func(t *testing.T) {
-		certs, err := client.ListCertsByDomain("")
+		certs, err := client.ListCertsByDomain(context.Background(), "")
 		if err != nil {
 			t.Fatalf("获取证书列表失败: %v", err)
 		}
@@ -35,7 +36,7 @@ func TestAPIConnection(t *testing.T) {
 
 	t.Run("GetCertByDomain", func(t *testing.T) {
 		// 先获取列表，找一个有效的域名
-		certs, err := client.ListCertsByDomain("")
+		certs, err := client.ListCertsByDomain(context.Background(), "")
 		if err != nil {
 			t.Fatalf("获取证书列表失败: %v", err)
 		}
@@ -57,7 +58,7 @@ func TestAPIConnection(t *testing.T) {
 			t.Skip("没有 active 状态的证书")
 		}
 
-		cert, err := client.GetCertByDomain(testDomain)
+		cert, err := client.GetCertByDomain(context.Background(), testDomain)
 		if err != nil {
 			t.Fatalf("按域名获取证书失败: %v", err)
 		}
@@ -75,7 +76,7 @@ func TestAPIConnection(t *testing.T) {
 
 	t.Run("GetCertByOrderID", func(t *testing.T) {
 		// 先获取列表，找一个有效的订单 ID
-		certs, err := client.ListCertsByDomain("")
+		certs, err := client.ListCertsByDomain(context.Background(), "")
 		if err != nil {
 			t.Fatalf("获取证书列表失败: %v", err)
 		}
@@ -86,7 +87,7 @@ func TestAPIConnection(t *testing.T) {
 
 		testOrderID := certs[0].OrderID
 
-		cert, err := client.GetCertByOrderID(testOrderID)
+		cert, err := client.GetCertByOrderID(context.Background(), testOrderID)
 		if err != nil {
 			t.Fatalf("按订单ID获取证书失败: %v", err)
 		}
@@ -104,7 +105,7 @@ func TestAPIConnection(t *testing.T) {
 func TestAPIValidation(t *testing.T) {
 	t.Run("EmptyBaseURL", func(t *testing.T) {
 		client := api.NewClient("", TestToken)
-		_, err := client.ListCertsByDomain("")
+		_, err := client.ListCertsByDomain(context.Background(), "")
 		if err == nil {
 			t.Error("期望返回错误，但没有")
 		}
@@ -113,7 +114,7 @@ func TestAPIValidation(t *testing.T) {
 
 	t.Run("EmptyToken", func(t *testing.T) {
 		client := api.NewClient(TestAPIBaseURL, "")
-		_, err := client.ListCertsByDomain("")
+		_, err := client.ListCertsByDomain(context.Background(), "")
 		if err == nil {
 			t.Error("期望返回错误，但没有")
 		}
@@ -122,7 +123,7 @@ func TestAPIValidation(t *testing.T) {
 
 	t.Run("InvalidToken", func(t *testing.T) {
 		client := api.NewClient(TestAPIBaseURL, "invalid-token")
-		_, err := client.ListCertsByDomain("")
+		_, err := client.ListCertsByDomain(context.Background(), "")
 		if err == nil {
 			t.Error("期望返回错误，但没有")
 		}

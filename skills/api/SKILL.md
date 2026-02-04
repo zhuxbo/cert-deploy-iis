@@ -135,12 +135,16 @@ func matchesDomain(pattern, target string) bool {
 
 ```go
 client := api.NewClient(baseURL, token)
+ctx := context.Background()
 
 // 查询并选择最佳证书
-cert, err := client.GetCertByDomain("example.com")
+cert, err := client.GetCertByDomain(ctx, "example.com")
 
 // 查询证书列表
-certs, err := client.ListCertsByDomain("example.com")
+certs, err := client.ListCertsByDomain(ctx, "example.com")
+
+// 按订单 ID 查询
+cert, err := client.GetCertByOrderID(ctx, orderID)
 
 // 部署回调
 client.Callback(&api.CallbackRequest{
