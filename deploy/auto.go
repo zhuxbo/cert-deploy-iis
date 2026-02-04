@@ -91,7 +91,9 @@ func AutoDeploy(cfg *config.Config, store *cert.OrderStore) []Result {
 		} else {
 			// 拉取模式：到期前 < RenewDaysFetch 天开始拉取
 			// 目的：等服务端自动续签（14天）完成后再拉取
-			certData, err = client.GetCertByOrderID(context.Background(), certCfg.OrderID)
+			ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
+			certData, err = client.GetCertByOrderID(ctx, certCfg.OrderID)
+			cancel()
 			if err != nil {
 				log.Printf("获取证书失败: %v", err)
 				results = append(results, Result{
@@ -368,7 +370,9 @@ func submitNewCSR(client *api.Client, certCfg *config.CertConfig, store *cert.Or
 		ValidationMethod: certCfg.ValidationMethod,
 	}
 
-	csrResp, err := client.SubmitCSR(csrReq)
+	ctx, cancel := context.WithTimeout(context.Background(), api.APISubmitTimeout)
+	defer cancel()
+	csrResp, err := client.SubmitCSR(ctx, csrReq)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("提交 CSR 失败: %w", err)
 	}
@@ -382,7 +386,9 @@ func submitNewCSR(client *api.Client, certCfg *config.CertConfig, store *cert.Or
 	log.Printf("CSR 已提交，订单 ID: %d，状态: %s", newOrderID, csrResp.Data.Status)
 
 	if csrResp.Data.Status == "active" {
-		certData, err := client.GetCertByOrderID(context.Background(), newOrderID)
+		queryCtx, queryCancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
+		certData, err := client.GetCertByOrderID(queryCtx, newOrderID)
+		queryCancel()
 		if err == nil && certData.Status == "active" {
 			if err := store.SaveCertificate(newOrderID, certData.Certificate, certData.CACert); err != nil {
 				log.Printf("警告: 保存证书失败: %v", err)
@@ -407,7 +413,9 @@ func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig, renewDay
 
 	// 2. 检查现有订单
 	if certCfg.OrderID > 0 {
-		certData, err := client.GetCertByOrderID(context.Background(), certCfg.OrderID)
+		ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
+		certData, err := client.GetCertByOrderID(ctx, certCfg.OrderID)
+		cancel()
 		if err != nil {
 			log.Printf("获取订单 %d 证书失败: %v", certCfg.OrderID, err)
 		} else if certData.Status == "processing" {
@@ -573,7 +581,7 @@ func sendCallback(client *api.Client, orderID int, domain string, success bool, 
 				}
 			}
 
-			if err := client.Callback(req); err == nil {
+			if err := client.Callback(ctx, req); err == nil {
 				return
 			} else {
 				lastErr = err

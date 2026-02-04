@@ -8,9 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
-	"unsafe"
 
 	"sslctlw/cert"
 	"sslctlw/config"
@@ -19,7 +17,6 @@ import (
 
 	"github.com/rodrigocfd/windigo/co"
 	"github.com/rodrigocfd/windigo/ui"
-	"github.com/rodrigocfd/windigo/win"
 )
 
 // 调试模式
@@ -88,7 +85,9 @@ type AppWindow struct {
 	statusIndicator *StatusIndicator // 状态指示器
 
 	// 日志缓存
-	logLines []string
+	logLines   []string
+	logBuffer  *LogBuffer      // 新增: 日志缓存组件
+	toolbarBtns *ButtonGroup   // 新增: 工具栏按钮组
 }
 
 // getCerts 安全获取证书列表副本
@@ -245,6 +244,12 @@ func RunApp() {
 
 	// 窗口创建完成后初始化
 	app.mainWnd.On().WmCreate(func(_ ui.WmCreate) int {
+		// 初始化工具栏按钮组
+		app.toolbarBtns = NewButtonGroup(app.btnRefresh, app.btnBind, app.btnInstall, app.btnAPI)
+
+		// 初始化日志缓存
+		app.logBuffer = NewLogBuffer(app.txtTaskLog, 100)
+
 		// 添加列
 		app.siteList.Cols.Add("站点名称", ui.DpiX(150))
 		app.siteList.Cols.Add("状态", ui.DpiX(60))
@@ -612,24 +617,9 @@ func (app *AppWindow) updateTaskStatus() {
 
 // appendTaskLog 追加任务日志
 func (app *AppWindow) appendTaskLog(text string) {
-	const maxLogLines = 100
-
-	timestamp := time.Now().Format("15:04:05")
-	logLine := fmt.Sprintf("[%s] %s", timestamp, text)
-
-	app.logLines = append(app.logLines, logLine)
-	if len(app.logLines) > maxLogLines {
-		app.logLines = app.logLines[len(app.logLines)-maxLogLines:]
-		app.txtTaskLog.SetText(strings.Join(app.logLines, "\r\n") + "\r\n")
-	} else {
-		textLen, _ := app.txtTaskLog.Hwnd().SendMessage(co.WM_GETTEXTLENGTH, 0, 0)
-		app.txtTaskLog.Hwnd().SendMessage(0x00B1, win.WPARAM(textLen), win.LPARAM(textLen)) // EM_SETSEL
-		newText := logLine + "\r\n"
-		ptr, _ := syscall.UTF16PtrFromString(newText)
-		app.txtTaskLog.Hwnd().SendMessage(0x00C2, 0, win.LPARAM(unsafe.Pointer(ptr))) // EM_REPLACESEL
+	if app.logBuffer != nil {
+		app.logBuffer.Append(text)
 	}
-
-	app.txtTaskLog.Hwnd().SendMessage(0x00B6, 0, 0xFFFF) // EM_LINESCROLL
 }
 
 // doLoadDataAsync 异步加载数据
@@ -728,17 +718,8 @@ func (app *AppWindow) doLoadDataAsync(onComplete func()) {
 
 // setButtonsEnabled 设置按钮启用状态
 func (app *AppWindow) setButtonsEnabled(enabled bool) {
-	if app.btnRefresh != nil {
-		app.btnRefresh.Hwnd().EnableWindow(enabled)
-	}
-	if app.btnBind != nil {
-		app.btnBind.Hwnd().EnableWindow(enabled)
-	}
-	if app.btnInstall != nil {
-		app.btnInstall.Hwnd().EnableWindow(enabled)
-	}
-	if app.btnAPI != nil {
-		app.btnAPI.Hwnd().EnableWindow(enabled)
+	if app.toolbarBtns != nil {
+		app.toolbarBtns.SetEnabled(enabled)
 	}
 }
 

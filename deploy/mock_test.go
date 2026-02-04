@@ -6,14 +6,15 @@ import (
 	"sslctlw/api"
 	"sslctlw/cert"
 	"sslctlw/config"
+	"sslctlw/iis"
 )
 
 // MockAPIClient 模拟 API 客户端
 type MockAPIClient struct {
 	GetCertByOrderIDFunc  func(ctx context.Context, orderID int) (*api.CertData, error)
 	ListCertsByDomainFunc func(ctx context.Context, domain string) ([]api.CertData, error)
-	SubmitCSRFunc         func(req *api.CSRRequest) (*api.CSRResponse, error)
-	CallbackFunc          func(req *api.CallbackRequest) error
+	SubmitCSRFunc         func(ctx context.Context, req *api.CSRRequest) (*api.CSRResponse, error)
+	CallbackFunc          func(ctx context.Context, req *api.CallbackRequest) error
 }
 
 func (m *MockAPIClient) GetCertByOrderID(ctx context.Context, orderID int) (*api.CertData, error) {
@@ -30,16 +31,16 @@ func (m *MockAPIClient) ListCertsByDomain(ctx context.Context, domain string) ([
 	return nil, nil
 }
 
-func (m *MockAPIClient) SubmitCSR(req *api.CSRRequest) (*api.CSRResponse, error) {
+func (m *MockAPIClient) SubmitCSR(ctx context.Context, req *api.CSRRequest) (*api.CSRResponse, error) {
 	if m.SubmitCSRFunc != nil {
-		return m.SubmitCSRFunc(req)
+		return m.SubmitCSRFunc(ctx, req)
 	}
 	return nil, nil
 }
 
-func (m *MockAPIClient) Callback(req *api.CallbackRequest) error {
+func (m *MockAPIClient) Callback(ctx context.Context, req *api.CallbackRequest) error {
 	if m.CallbackFunc != nil {
-		return m.CallbackFunc(req)
+		return m.CallbackFunc(ctx, req)
 	}
 	return nil
 }
@@ -147,3 +148,85 @@ const testCACertPEM = `-----BEGIN CERTIFICATE-----
 MIICpDCCAYwCCQDU+pQ4P4KCATANBGKQHKIG9W0BAQUFADAUMRIWGAYDVQQDDALB
 DGFHDHZDQHAEHCNMDQWMTAWMDAWMFOCHMTUWMTAWMDAWMFOWFDESJHDGA1U
 -----END CERTIFICATE-----`
+
+// MockCertConverter 模拟证书转换器
+type MockCertConverter struct {
+	PEMToPFXFunc func(certPEM, keyPEM, intermediatePEM, password string) (string, error)
+}
+
+func (m *MockCertConverter) PEMToPFX(certPEM, keyPEM, intermediatePEM, password string) (string, error) {
+	if m.PEMToPFXFunc != nil {
+		return m.PEMToPFXFunc(certPEM, keyPEM, intermediatePEM, password)
+	}
+	return "/tmp/test.pfx", nil
+}
+
+// MockCertInstaller 模拟证书安装器
+type MockCertInstaller struct {
+	InstallPFXFunc      func(pfxPath, password string) (*cert.InstallResult, error)
+	SetFriendlyNameFunc func(thumbprint, friendlyName string) error
+}
+
+func (m *MockCertInstaller) InstallPFX(pfxPath, password string) (*cert.InstallResult, error) {
+	if m.InstallPFXFunc != nil {
+		return m.InstallPFXFunc(pfxPath, password)
+	}
+	return &cert.InstallResult{
+		Success:    true,
+		Thumbprint: "ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234",
+	}, nil
+}
+
+func (m *MockCertInstaller) SetFriendlyName(thumbprint, friendlyName string) error {
+	if m.SetFriendlyNameFunc != nil {
+		return m.SetFriendlyNameFunc(thumbprint, friendlyName)
+	}
+	return nil
+}
+
+// MockIISBinder 模拟 IIS 绑定器
+type MockIISBinder struct {
+	BindCertificateFunc       func(hostname string, port int, certHash string) error
+	BindCertificateByIPFunc   func(ip string, port int, certHash string) error
+	FindBindingsForDomainsFunc func(domains []string) (map[string]*iis.SSLBinding, error)
+	IsIIS7Func                func() bool
+}
+
+func (m *MockIISBinder) BindCertificate(hostname string, port int, certHash string) error {
+	if m.BindCertificateFunc != nil {
+		return m.BindCertificateFunc(hostname, port, certHash)
+	}
+	return nil
+}
+
+func (m *MockIISBinder) BindCertificateByIP(ip string, port int, certHash string) error {
+	if m.BindCertificateByIPFunc != nil {
+		return m.BindCertificateByIPFunc(ip, port, certHash)
+	}
+	return nil
+}
+
+func (m *MockIISBinder) FindBindingsForDomains(domains []string) (map[string]*iis.SSLBinding, error) {
+	if m.FindBindingsForDomainsFunc != nil {
+		return m.FindBindingsForDomainsFunc(domains)
+	}
+	return make(map[string]*iis.SSLBinding), nil
+}
+
+func (m *MockIISBinder) IsIIS7() bool {
+	if m.IsIIS7Func != nil {
+		return m.IsIIS7Func()
+	}
+	return false
+}
+
+// NewMockDeployer 创建用于测试的 Mock 部署器
+func NewMockDeployer() *Deployer {
+	return &Deployer{
+		Converter: &MockCertConverter{},
+		Installer: &MockCertInstaller{},
+		Binder:    &MockIISBinder{},
+		Client:    &MockAPIClient{},
+		Store:     &MockOrderStore{},
+	}
+}

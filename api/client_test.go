@@ -427,7 +427,7 @@ func TestCallback_MockServer(t *testing.T) {
 
 	client := NewClient(server.URL, "test-token")
 
-	err := client.Callback(&CallbackRequest{
+	err := client.Callback(context.Background(), &CallbackRequest{
 		OrderID:    123,
 		Domain:     "example.com",
 		Status:     "success",
@@ -529,7 +529,7 @@ func TestSubmitCSR_MockServer(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	resp, err := client.SubmitCSR(&CSRRequest{
+	resp, err := client.SubmitCSR(context.Background(), &CSRRequest{
 		Domain: "example.com",
 		CSR:    "-----BEGIN CERTIFICATE REQUEST-----\ntest\n-----END CERTIFICATE REQUEST-----",
 	})
@@ -557,7 +557,7 @@ func TestSubmitCSR_APIError(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.SubmitCSR(&CSRRequest{
+	_, err := client.SubmitCSR(context.Background(), &CSRRequest{
 		Domain: "invalid",
 		CSR:    "test",
 	})

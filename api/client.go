@@ -65,19 +65,31 @@ type Client struct {
 
 // API 客户端配置常量
 const (
-	// DefaultHTTPTimeout HTTP 请求默认超时时间
-	DefaultHTTPTimeout = 30 * time.Second
 	// MaxRetries 最大重试次数
 	MaxRetries = 3
+	// APIQueryTimeout 查询类 API 超时时间
+	APIQueryTimeout = 30 * time.Second
+	// APISubmitTimeout 提交类 API 超时时间
+	APISubmitTimeout = 60 * time.Second
+	// APICallbackTimeout 回调类 API 超时时间
+	APICallbackTimeout = 60 * time.Second
 )
 
 // NewClient 创建新的 API 客户端
 func NewClient(baseURL, token string) *Client {
+	maxTimeout := APIQueryTimeout
+	if APISubmitTimeout > maxTimeout {
+		maxTimeout = APISubmitTimeout
+	}
+	if APICallbackTimeout > maxTimeout {
+		maxTimeout = APICallbackTimeout
+	}
+
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Token:   token,
 		HTTPClient: &http.Client{
-			Timeout: DefaultHTTPTimeout,
+			Timeout: maxTimeout,
 		},
 	}
 }
@@ -392,7 +404,7 @@ type CallbackRequest struct {
 }
 
 // Callback 部署回调
-func (c *Client) Callback(req *CallbackRequest) error {
+func (c *Client) Callback(ctx context.Context, req *CallbackRequest) error {
 	apiURL := c.BaseURL + "/callback"
 
 	data, err := json.Marshal(req)
@@ -408,7 +420,7 @@ func (c *Client) Callback(req *CallbackRequest) error {
 	httpReq.Header.Set("Authorization", "Bearer "+c.Token)
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.doWithRetry(context.Background(), httpReq)
+	resp, err := c.doWithRetry(ctx, httpReq)
 	if err != nil {
 		return err
 	}
@@ -444,7 +456,7 @@ type CSRResponse struct {
 }
 
 // SubmitCSR 提交 CSR 请求签发/重签证书
-func (c *Client) SubmitCSR(req *CSRRequest) (*CSRResponse, error) {
+func (c *Client) SubmitCSR(ctx context.Context, req *CSRRequest) (*CSRResponse, error) {
 	apiURL := c.BaseURL
 
 	data, err := json.Marshal(req)
@@ -460,7 +472,7 @@ func (c *Client) SubmitCSR(req *CSRRequest) (*CSRResponse, error) {
 	httpReq.Header.Set("Authorization", "Bearer "+c.Token)
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.doWithRetry(context.Background(), httpReq)
+	resp, err := c.doWithRetry(ctx, httpReq)
 	if err != nil {
 		return nil, err
 	}

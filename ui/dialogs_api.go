@@ -376,7 +376,9 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 				}
 			}()
 
-			certList, err := client.ListCertsByDomain(context.Background(), domain)
+			ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
+			certList, err := client.ListCertsByDomain(ctx, domain)
+			cancel()
 
 			// 在 UI 线程更新
 			dlg.UiThread(func() {

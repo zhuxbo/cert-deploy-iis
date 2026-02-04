@@ -255,7 +255,9 @@ func CheckCertExpiry(cfg *config.Config) []CertExpiryInfo {
 			continue
 		}
 
-		certData, err := client.GetCertByOrderID(context.Background(), certCfg.OrderID)
+		ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
+		certData, err := client.GetCertByOrderID(ctx, certCfg.OrderID)
+		cancel()
 		if err != nil {
 			results = append(results, CertExpiryInfo{
 				Domain: certCfg.Domain,
