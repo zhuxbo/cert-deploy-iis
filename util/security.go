@@ -319,6 +319,43 @@ func evalSymlinksPartial(path string) (string, error) {
 	return realDir, nil
 }
 
+// MatchDomain 检查绑定域名是否匹配证书域名（支持通配符）
+// bindingHost: IIS 绑定的域名 (如 www.example.com)
+// certDomain: 证书的域名 (如 *.example.com 或 www.example.com)
+// 返回 true 表示匹配成功
+//
+// 匹配规则：
+//   - 精确匹配: www.example.com 匹配 www.example.com
+//   - 通配符匹配: *.example.com 匹配 www.example.com, api.example.com
+//   - 通配符只匹配单级子域名: *.example.com 不匹配 a.b.example.com
+func MatchDomain(bindingHost, certDomain string) bool {
+	bindingHost = strings.ToLower(strings.TrimSpace(bindingHost))
+	certDomain = strings.ToLower(strings.TrimSpace(certDomain))
+
+	if bindingHost == "" || certDomain == "" {
+		return false
+	}
+
+	// 精确匹配
+	if bindingHost == certDomain {
+		return true
+	}
+
+	// 通配符证书匹配: *.example.com 匹配 www.example.com
+	if strings.HasPrefix(certDomain, "*.") {
+		suffix := certDomain[1:] // ".example.com"
+		if strings.HasSuffix(bindingHost, suffix) {
+			// 确保只有一级子域名 (www.example.com 匹配，但 a.b.example.com 不匹配)
+			prefix := bindingHost[:len(bindingHost)-len(suffix)]
+			if !strings.Contains(prefix, ".") && prefix != "" {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // IsPathWithinBase 检查目标路径是否在基础路径内
 func IsPathWithinBase(basePath, targetPath string) bool {
 	// 规范化路径

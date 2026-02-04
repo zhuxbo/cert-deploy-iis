@@ -116,16 +116,16 @@ func (s *OrderStore) SaveCertificate(orderID int, certPEM, chainPEM string) erro
 	}
 	orderPath := s.GetOrderPath(orderID)
 
-	// 保存证书
+	// 保存证书（权限 0600 - 仅所有者可读写）
 	certPath := filepath.Join(orderPath, "cert.pem")
-	if err := os.WriteFile(certPath, []byte(certPEM), 0644); err != nil {
+	if err := os.WriteFile(certPath, []byte(certPEM), 0600); err != nil {
 		return fmt.Errorf("保存证书失败: %w", err)
 	}
 
 	// 保存证书链（如果有）
 	if chainPEM != "" {
 		chainPath := filepath.Join(orderPath, "chain.pem")
-		if err := os.WriteFile(chainPath, []byte(chainPEM), 0644); err != nil {
+		if err := os.WriteFile(chainPath, []byte(chainPEM), 0600); err != nil {
 			return fmt.Errorf("保存证书链失败: %w", err)
 		}
 	}
@@ -165,7 +165,7 @@ func (s *OrderStore) SaveMeta(orderID int, meta *OrderMeta) error {
 		return fmt.Errorf("序列化元数据失败: %w", err)
 	}
 
-	return os.WriteFile(metaPath, data, 0644)
+	return os.WriteFile(metaPath, data, 0600) // 权限 0600 - 仅所有者可读写
 }
 
 // LoadMeta 加载订单元数据

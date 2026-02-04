@@ -398,7 +398,9 @@ func GetSitePhysicalPath(siteName string) (string, error) {
 	}
 
 	// 转义 PowerShell 字符串
-	escapedSiteName := util.EscapePowerShellString(siteName)
+	// 双引号字符串使用双引号转义，单引号字符串使用单引号转义
+	escapedForDouble := util.EscapePowerShellDoubleQuoteString(siteName)
+	escapedForSingle := util.EscapePowerShellString(siteName)
 
 	// 使用 PowerShell 获取站点的物理路径
 	script := fmt.Sprintf(`
@@ -412,7 +414,7 @@ if ($site) {
         $site.physicalPath
     }
 }
-`, escapedSiteName, escapedSiteName)
+`, escapedForDouble, escapedForSingle)
 
 	output, err := util.RunPowerShell(script)
 	if err != nil {
@@ -526,30 +528,7 @@ func GetSitePhysicalPathByDomain(domain string) (string, string, error) {
 // MatchDomainForBinding 检查绑定域名是否匹配证书域名
 // bindingHost: IIS 绑定的域名 (如 www.example.com)
 // certDomain: 证书的域名 (如 *.example.com 或 www.example.com)
+// 已迁移到 util.MatchDomain，此处保留兼容性包装
 func MatchDomainForBinding(bindingHost, certDomain string) bool {
-	bindingHost = strings.ToLower(strings.TrimSpace(bindingHost))
-	certDomain = strings.ToLower(strings.TrimSpace(certDomain))
-
-	if bindingHost == "" || certDomain == "" {
-		return false
-	}
-
-	// 精确匹配
-	if bindingHost == certDomain {
-		return true
-	}
-
-	// 通配符证书匹配: *.example.com 匹配 www.example.com, api.example.com 等
-	if strings.HasPrefix(certDomain, "*.") {
-		suffix := certDomain[1:] // ".example.com"
-		if strings.HasSuffix(bindingHost, suffix) {
-			// 确保只有一级子域名 (www.example.com 匹配，但 a.b.example.com 不匹配)
-			prefix := bindingHost[:len(bindingHost)-len(suffix)]
-			if !strings.Contains(prefix, ".") && prefix != "" {
-				return true
-			}
-		}
-	}
-
-	return false
+	return util.MatchDomain(bindingHost, certDomain)
 }

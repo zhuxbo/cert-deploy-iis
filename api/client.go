@@ -62,24 +62,30 @@ type Client struct {
 	HTTPClient *http.Client
 }
 
+// API 客户端配置常量
+const (
+	// DefaultHTTPTimeout HTTP 请求默认超时时间
+	DefaultHTTPTimeout = 30 * time.Second
+	// MaxRetries 最大重试次数
+	MaxRetries = 3
+)
+
 // NewClient 创建新的 API 客户端
 func NewClient(baseURL, token string) *Client {
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Token:   token,
 		HTTPClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: DefaultHTTPTimeout,
 		},
 	}
 }
-
-const maxRetries = 3
 
 // doWithRetry 执行带重试的 HTTP 请求
 func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 	var lastErr error
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for attempt := 0; attempt <= MaxRetries; attempt++ {
 		if attempt > 0 {
 			time.Sleep(time.Duration(attempt) * time.Second)
 			// 重置 Body（如果有）
@@ -96,8 +102,8 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 		}
 
 		// 5xx 错误时关闭响应体并重试
-		if resp.StatusCode >= 500 && attempt < maxRetries {
-			io.Copy(io.Discard, resp.Body)
+		if resp.StatusCode >= 500 && attempt < MaxRetries {
+			_, _ = io.Copy(io.Discard, resp.Body) // 忽略丢弃数据时的错误
 			resp.Body.Close()
 			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
 			continue
@@ -106,7 +112,7 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 		return resp, nil
 	}
 
-	return nil, fmt.Errorf("请求失败（重试 %d 次）: %w", maxRetries, lastErr)
+	return nil, fmt.Errorf("请求失败（重试 %d 次）: %w", MaxRetries, lastErr)
 }
 
 // Error 实现 error 接口
@@ -302,7 +308,10 @@ func selectBestCert(certs []CertData, targetDomain string) *CertData {
 // matchesDomain 检查模式是否匹配目标域名（支持通配符）
 // pattern: *.example.com 匹配 www.example.com, api.example.com
 // pattern: example.com 只匹配 example.com（精确匹配）
+// 注意：此函数与 util.MatchDomain 参数顺序不同（pattern 在前，target 在后）
 func matchesDomain(pattern, target string) bool {
+	// util.MatchDomain(bindingHost, certDomain)
+	// 这里 target 是 bindingHost，pattern 是 certDomain
 	if pattern == target {
 		return true // 精确匹配
 	}
@@ -375,7 +384,10 @@ func (c *Client) Callback(req *CallbackRequest) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("回调失败: HTTP %d (读取响应失败: %v)", resp.StatusCode, err)
+		}
 		return fmt.Errorf("回调失败: %d - %s", resp.StatusCode, string(body))
 	}
 

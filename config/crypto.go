@@ -11,6 +11,12 @@ import (
 // EncryptionPrefix 加密版本前缀
 const EncryptionPrefix = "v1:"
 
+// DPAPI 标志常量
+const (
+	// CRYPTPROTECT_UI_FORBIDDEN 禁止在加密/解密过程中显示 UI
+	cryptprotectUIForbidden = 0x1
+)
+
 var (
 	dllCrypt32  = syscall.NewLazyDLL("Crypt32.dll")
 	dllKernel32 = syscall.NewLazyDLL("Kernel32.dll")
@@ -40,8 +46,11 @@ func EncryptToken(plaintext string) (string, error) {
 	var outputBlob dataBlob
 	r, _, err := procEncryptData.Call(
 		uintptr(unsafe.Pointer(&inputBlob)),
-		0, 0, 0, 0,
-		0,
+		0,                           // szDataDescr (可选描述)
+		0,                           // pOptionalEntropy (可选熵)
+		0,                           // pvReserved (保留)
+		0,                           // pPromptStruct (提示结构)
+		cryptprotectUIForbidden,     // dwFlags - 禁止 UI 弹窗
 		uintptr(unsafe.Pointer(&outputBlob)),
 	)
 	if r == 0 {
@@ -79,7 +88,11 @@ func DecryptToken(encrypted string) (string, error) {
 	var outputBlob dataBlob
 	r, _, err := procDecryptData.Call(
 		uintptr(unsafe.Pointer(&inputBlob)),
-		0, 0, 0, 0, 0,
+		0,                           // ppszDataDescr (输出描述)
+		0,                           // pOptionalEntropy (可选熵)
+		0,                           // pvReserved (保留)
+		0,                           // pPromptStruct (提示结构)
+		cryptprotectUIForbidden,     // dwFlags - 禁止 UI 弹窗
 		uintptr(unsafe.Pointer(&outputBlob)),
 	)
 	if r == 0 {

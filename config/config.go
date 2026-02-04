@@ -12,8 +12,23 @@ import (
 // configMu 保护配置文件读写的全局互斥锁
 var configMu sync.Mutex
 
-// DataDirName 数据目录名称
-const DataDirName = "sslctlw"
+// 配置常量
+const (
+	// DataDirName 数据目录名称
+	DataDirName = "sslctlw"
+
+	// DefaultRenewDaysLocal 本地私钥模式：到期前多少天发起续签
+	DefaultRenewDaysLocal = 15
+
+	// DefaultRenewDaysFetch 拉取模式：到期前多少天开始拉取
+	DefaultRenewDaysFetch = 13
+
+	// DefaultCheckInterval 默认检测间隔（小时）
+	DefaultCheckInterval = 6
+
+	// DefaultTaskName 默认任务计划名称
+	DefaultTaskName = "SSLCtlW"
+)
 
 // BindRule 绑定规则
 type BindRule struct {
@@ -79,11 +94,11 @@ func DefaultConfig() *Config {
 		APIBaseURL:       "",
 		Token:            "",
 		Certificates:     []CertConfig{},
-		RenewDaysLocal:   15, // 本地私钥模式：到期前15天发起续签
-		RenewDaysFetch:   13, // 拉取模式：到期前13天开始拉取
+		RenewDaysLocal:   DefaultRenewDaysLocal,
+		RenewDaysFetch:   DefaultRenewDaysFetch,
 		AutoCheckEnabled: false,
-		CheckInterval:    6,
-		TaskName:         "SSLCtlW",
+		CheckInterval:    DefaultCheckInterval,
+		TaskName:         DefaultTaskName,
 		IIS7Mode:         false,
 	}
 }
@@ -98,7 +113,10 @@ func GetDataDir() string {
 	dataDir := filepath.Join(filepath.Dir(exe), DataDirName)
 
 	// 确保目录存在（使用更严格的权限）
-	os.MkdirAll(dataDir, 0700)
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		// 目录创建失败时记录日志，但不中断程序
+		fmt.Printf("警告: 创建数据目录失败 %s: %v\n", dataDir, err)
+	}
 
 	return dataDir
 }
@@ -111,7 +129,10 @@ func GetConfigPath() string {
 // GetLogDir 获取日志目录
 func GetLogDir() string {
 	logDir := filepath.Join(GetDataDir(), "logs")
-	os.MkdirAll(logDir, 0700)
+	if err := os.MkdirAll(logDir, 0700); err != nil {
+		// 目录创建失败时记录日志，但不中断程序
+		fmt.Printf("警告: 创建日志目录失败 %s: %v\n", logDir, err)
+	}
 	return logDir
 }
 
@@ -137,16 +158,16 @@ func Load() (*Config, error) {
 
 	// 设置默认值（不设置 APIBaseURL 和 Token 的默认值，由用户配置）
 	if cfg.RenewDaysLocal == 0 {
-		cfg.RenewDaysLocal = 15 // 本地私钥模式：到期前15天发起续签
+		cfg.RenewDaysLocal = DefaultRenewDaysLocal
 	}
 	if cfg.RenewDaysFetch == 0 {
-		cfg.RenewDaysFetch = 13 // 拉取模式：到期前13天开始拉取
+		cfg.RenewDaysFetch = DefaultRenewDaysFetch
 	}
 	if cfg.CheckInterval == 0 {
-		cfg.CheckInterval = 6
+		cfg.CheckInterval = DefaultCheckInterval
 	}
 	if cfg.TaskName == "" {
-		cfg.TaskName = "SSLCtlW"
+		cfg.TaskName = DefaultTaskName
 	}
 
 	return &cfg, nil

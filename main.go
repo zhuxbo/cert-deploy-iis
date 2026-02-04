@@ -52,9 +52,9 @@ func main() {
 
 // runAutoDeploy 运行自动部署
 func runAutoDeploy() {
-	// 设置日志到配置目录
+	// 设置日志到配置目录（权限 0600 - 仅所有者可读写）
 	logPath := filepath.Join(config.GetLogDir(), "deploy.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err == nil {
 		// 如果是新文件，写入 UTF-8 BOM
 		info, _ := logFile.Stat()

@@ -353,7 +353,7 @@ func FindBindingsForDomains(domains []string) (map[string]*SSLBinding, error) {
 		}
 		// 检查绑定域名是否匹配任意证书域名（支持通配符匹配）
 		for _, certDomain := range domains {
-			if matchDomain(host, certDomain) {
+			if util.MatchDomain(host, certDomain) {
 				result[host] = &bindings[i]
 				break
 			}
@@ -386,26 +386,7 @@ func ParsePortFromBinding(hostnamePort string) int {
 }
 
 // matchDomain 检查绑定是否匹配域名（支持通配符）
+// 已迁移到 util.MatchDomain，此处保留兼容性包装
 func matchDomain(bindingHost, certDomain string) bool {
-	bindingHost = strings.ToLower(bindingHost)
-	certDomain = strings.ToLower(certDomain)
-
-	// 精确匹配
-	if bindingHost == certDomain {
-		return true
-	}
-
-	// 通配符证书匹配: *.example.com 匹配 www.example.com
-	if strings.HasPrefix(certDomain, "*.") {
-		suffix := certDomain[1:] // ".example.com"
-		if strings.HasSuffix(bindingHost, suffix) {
-			// 确保只有一级子域名，且前缀不为空
-			prefix := bindingHost[:len(bindingHost)-len(suffix)]
-			if !strings.Contains(prefix, ".") && prefix != "" {
-				return true
-			}
-		}
-	}
-
-	return false
+	return util.MatchDomain(bindingHost, certDomain)
 }

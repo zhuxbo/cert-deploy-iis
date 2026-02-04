@@ -108,7 +108,12 @@ func installPEMWithGo(certPath, keyPath, password string) (*InstallResult, error
 			ErrorMessage: fmt.Sprintf("convert pem to pfx failed: %v", err),
 		}, nil
 	}
-	defer os.Remove(pfxPath)
+	defer func() {
+		if err := os.Remove(pfxPath); err != nil && !os.IsNotExist(err) {
+			// 记录临时文件清理失败，但不影响主流程
+			fmt.Printf("警告: 清理临时 PFX 文件失败 %s: %v\n", pfxPath, err)
+		}
+	}()
 
 	return InstallPFX(pfxPath, password)
 }

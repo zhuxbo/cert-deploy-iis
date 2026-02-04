@@ -120,7 +120,7 @@ func AutoDeploy(cfg *config.Config) []Result {
 			// 拉取模式：检查是否到了拉取时间
 			expiresAt, err := time.Parse("2006-01-02", certData.ExpiresAt)
 			if err != nil {
-				log.Printf("解析过期时间失败: %v", err)
+				log.Printf("解析证书 %s (订单 %d) 过期时间失败（值: %q）: %v", certData.Domain, certData.OrderID, certData.ExpiresAt, err)
 				continue
 			}
 
@@ -185,7 +185,11 @@ func deployCertWithRules(certData *api.CertData, privateKey string, certCfg conf
 		}
 		return results
 	}
-	defer os.Remove(pfxPath)
+	defer func() {
+		if err := os.Remove(pfxPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("警告: 清理临时 PFX 文件失败 %s: %v", pfxPath, err)
+		}
+	}()
 
 	// 安装证书
 	installResult, err := cert.InstallPFX(pfxPath, "")
@@ -510,15 +514,19 @@ func sendCallback(client *api.Client, orderID int, domain string, success bool, 
 			Message:    message,
 		}
 
+		var lastErr error
 		for attempt := 0; attempt < 3; attempt++ {
 			if attempt > 0 {
 				time.Sleep(time.Duration(attempt*10) * time.Second)
 			}
 			if err := client.Callback(req); err == nil {
 				return
+			} else {
+				lastErr = err
+				log.Printf("回调重试 %d/3 失败 (%s): %v", attempt+1, domain, err)
 			}
 		}
-		log.Printf("回调最终失败: %s", domain)
+		log.Printf("回调最终失败 (%s): %v", domain, lastErr)
 	}()
 }
 
@@ -567,7 +575,11 @@ func deployCertAutoMode(certData *api.CertData, privateKey string, certCfg confi
 		log.Printf("转换 PFX 失败: %v", err)
 		return []Result{{Domain: certCfg.Domain, Success: false, Message: fmt.Sprintf("转换 PFX 失败: %v", err), OrderID: certData.OrderID}}
 	}
-	defer os.Remove(pfxPath)
+	defer func() {
+		if err := os.Remove(pfxPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("警告: 清理临时 PFX 文件失败 %s: %v", pfxPath, err)
+		}
+	}()
 
 	installResult, err := cert.InstallPFX(pfxPath, "")
 	if err != nil || !installResult.Success {
@@ -689,11 +701,15 @@ func handleFileValidation(domain string, file *api.FileValidation) error {
 	realPath, err := filepath.EvalSymlinks(fullPath)
 	if err != nil {
 		// 如果解析失败，删除已写入的文件
-		os.Remove(fullPath)
+		if rmErr := os.Remove(fullPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.Printf("警告: 清理验证文件失败 %s: %v", fullPath, rmErr)
+		}
 		return fmt.Errorf("验证文件路径失败: %w", err)
 	}
 	if !util.IsPathWithinBase(sitePath, realPath) {
-		os.Remove(fullPath)
+		if rmErr := os.Remove(fullPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.Printf("警告: 清理验证文件失败 %s: %v", fullPath, rmErr)
+		}
 		return fmt.Errorf("文件写入位置超出站点目录范围")
 	}
 

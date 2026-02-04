@@ -342,6 +342,16 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 		txtCertInfo.SetText("正在绑定证书...")
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					dlg.UiThread(func() {
+						btnBind.Hwnd().EnableWindow(true)
+						btnCancel.Hwnd().EnableWindow(true)
+						txtCertInfo.SetText(fmt.Sprintf("操作异常: %v", r))
+					})
+				}
+			}()
+
 			// 检查站点是否有对应的 https 绑定，如果没有则创建
 			hasBinding := false
 			for _, b := range site.Bindings {
@@ -542,6 +552,17 @@ func ShowInstallDialog(owner ui.Parent, onSuccess func()) {
 		btnBrowse.Hwnd().EnableWindow(false)
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					dlg.UiThread(func() {
+						btnInstall.Hwnd().EnableWindow(true)
+						btnCancel.Hwnd().EnableWindow(true)
+						btnBrowse.Hwnd().EnableWindow(true)
+						ui.MsgError(dlg, "错误", "操作异常", fmt.Sprintf("%v", r))
+					})
+				}
+			}()
+
 			result, err := cert.InstallPFX(pfxPath, password)
 
 			dlg.UiThread(func() {
@@ -916,6 +937,15 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 
 		// 异步获取
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					dlg.UiThread(func() {
+						btnFetch.Hwnd().EnableWindow(true)
+						txtDetail.SetText(fmt.Sprintf("操作异常: %v", r))
+					})
+				}
+			}()
+
 			certList, err := client.ListCertsByDomain(domain)
 
 			// 在 UI 线程更新
@@ -1012,6 +1042,18 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 		validationMethodCopy := validationMethod
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					dlg.UiThread(func() {
+						btnInstall.Hwnd().EnableWindow(true)
+						btnFetch.Hwnd().EnableWindow(true)
+						btnSelectAll.Hwnd().EnableWindow(true)
+						btnDeselectAll.Hwnd().EnableWindow(true)
+						txtDetail.SetText(fmt.Sprintf("操作异常: %v", r))
+					})
+				}
+			}()
+
 			var results []string
 			successCount := 0
 			skipCount := 0

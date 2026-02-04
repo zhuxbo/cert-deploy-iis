@@ -764,3 +764,85 @@ func TestValidatePort_AllRanges(t *testing.T) {
 		})
 	}
 }
+
+// TestMatchDomain 测试域名匹配
+func TestMatchDomain(t *testing.T) {
+	tests := []struct {
+		name        string
+		bindingHost string
+		certDomain  string
+		want        bool
+	}{
+		// 精确匹配
+		{"精确匹配", "www.example.com", "www.example.com", true},
+		{"精确匹配-大小写", "WWW.EXAMPLE.COM", "www.example.com", true},
+		{"精确匹配-带空格", " www.example.com ", "www.example.com", true},
+		{"不匹配-不同域名", "www.example.com", "www.other.com", false},
+
+		// 通配符匹配
+		{"通配符匹配-单级子域名", "www.example.com", "*.example.com", true},
+		{"通配符匹配-api子域名", "api.example.com", "*.example.com", true},
+		{"通配符匹配-任意子域名", "anything.example.com", "*.example.com", true},
+		{"通配符不匹配-多级子域名", "a.b.example.com", "*.example.com", false},
+		{"通配符不匹配-根域名", "example.com", "*.example.com", false},
+		{"通配符不匹配-空前缀", ".example.com", "*.example.com", false},
+
+		// 边界情况
+		{"空绑定域名", "", "*.example.com", false},
+		{"空证书域名", "www.example.com", "", false},
+		{"两者都空", "", "", false},
+		{"绑定域名是通配符", "*.example.com", "*.example.com", true},
+
+		// 特殊情况
+		{"不同后缀", "www.example.org", "*.example.com", false},
+		{"相似但不匹配", "wwwexample.com", "*.example.com", false},
+		{"子域名包含点的模式", "sub.www.example.com", "*.example.com", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MatchDomain(tt.bindingHost, tt.certDomain)
+			if got != tt.want {
+				t.Errorf("MatchDomain(%q, %q) = %v, want %v",
+					tt.bindingHost, tt.certDomain, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMatchDomain_MoreCases 更多域名匹配测试
+func TestMatchDomain_MoreCases(t *testing.T) {
+	tests := []struct {
+		name        string
+		bindingHost string
+		certDomain  string
+		want        bool
+	}{
+		// 多级通配符（只支持单级）
+		{"多级子域名不匹配", "a.b.c.example.com", "*.example.com", false},
+		{"二级子域名不匹配", "sub.www.example.com", "*.example.com", false},
+
+		// 大小写混合
+		{"大小写混合-绑定", "Www.Example.Com", "*.example.com", true},
+		{"大小写混合-证书", "www.example.com", "*.EXAMPLE.COM", true},
+		{"大小写混合-两者", "WWW.Example.COM", "*.example.COM", true},
+
+		// 特殊字符
+		{"带连字符的子域名", "my-site.example.com", "*.example.com", true},
+		{"带数字的子域名", "site123.example.com", "*.example.com", true},
+
+		// 边界情况
+		{"只有一个点", "a.b", "*.b", true},
+		{"长子域名", "verylongsubdomainname.example.com", "*.example.com", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MatchDomain(tt.bindingHost, tt.certDomain)
+			if got != tt.want {
+				t.Errorf("MatchDomain(%q, %q) = %v, want %v",
+					tt.bindingHost, tt.certDomain, got, tt.want)
+			}
+		})
+	}
+}
