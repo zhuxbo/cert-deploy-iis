@@ -327,7 +327,7 @@ btn.Hwnd().EnableWindow(true)   // 启用
 运行程序时添加 `-debug` 参数启用调试模式，会输出详细日志到 `debug.log`：
 
 ```
-certdeploy.exe -debug
+sslctlw.exe -debug
 ```
 
 ### Static 没有 SetText

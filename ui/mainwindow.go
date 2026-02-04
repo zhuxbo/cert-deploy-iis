@@ -12,10 +12,10 @@ import (
 	"time"
 	"unsafe"
 
-	"cert-deploy/cert"
-	"cert-deploy/config"
-	"cert-deploy/iis"
-	"cert-deploy/util"
+	"sslctlw/cert"
+	"sslctlw/config"
+	"sslctlw/iis"
+	"sslctlw/util"
 
 	"github.com/rodrigocfd/windigo/co"
 	"github.com/rodrigocfd/windigo/ui"

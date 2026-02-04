@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"cert-deploy/api"
-	"cert-deploy/cert"
-	"cert-deploy/iis"
+	"sslctlw/api"
+	"sslctlw/cert"
+	"sslctlw/iis"
 )
 
 // TestFullDeployFlow 测试完整的部署流程

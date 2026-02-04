@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"cert-deploy/api"
-	"cert-deploy/cert"
-	"cert-deploy/iis"
+	"sslctlw/api"
+	"sslctlw/cert"
+	"sslctlw/iis"
 )
 
 // TestSSLBinding 测试 SSL 绑定

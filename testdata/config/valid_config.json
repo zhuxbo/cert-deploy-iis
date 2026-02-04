@@ -21,6 +21,6 @@
   "last_check": "2024-01-01 00:00:00",
   "auto_check_enabled": false,
   "check_interval": 6,
-  "task_name": "CertDeployIIS",
+  "task_name": "SSLCtlW",
   "iis7_mode": false
 }

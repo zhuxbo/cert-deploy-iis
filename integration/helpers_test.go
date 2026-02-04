@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"cert-deploy/cert"
-	"cert-deploy/iis"
+	"sslctlw/cert"
+	"sslctlw/iis"
 )
 
 // isAdmin 检测是否以管理员权限运行

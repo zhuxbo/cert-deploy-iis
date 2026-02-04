@@ -20,7 +20,7 @@
 
 ### 基本使用
 
-1. 以管理员身份运行 `certdeploy.exe`
+1. 以管理员身份运行 `sslctlw.exe`
 2. 程序自动扫描 IIS 站点和已安装的证书
 3. 选择站点，点击"绑定证书"进行 SSL 配置
 4. 或点击"安装证书"导入新的 PFX 证书
@@ -60,10 +60,10 @@
 go mod download
 
 # 开发构建
-go build -o certdeploy.exe
+go build -o sslctlw.exe
 
 # 发布构建 (隐藏控制台窗口)
-go build -ldflags="-s -w -H windowsgui" -o certdeploy.exe
+go build -ldflags="-s -w -H windowsgui" -o sslctlw.exe
 ```
 
 ### 生成 Windows 资源 (可选)
@@ -89,7 +89,7 @@ rsrc -manifest main.manifest -o rsrc.syso
 ## 项目结构
 
 ```
-cert-deploy-iis/
+sslctlw/
 ├── main.go           # 入口
 ├── ui/               # GUI 界面
 ├── iis/              # IIS 操作 (appcmd/netsh)

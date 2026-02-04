@@ -6,8 +6,8 @@ import (
 	"os"
 	"testing"
 
-	"cert-deploy/api"
-	"cert-deploy/cert"
+	"sslctlw/api"
+	"sslctlw/cert"
 )
 
 // TestCertInstall 测试证书安装

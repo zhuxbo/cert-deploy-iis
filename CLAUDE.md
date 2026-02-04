@@ -1,4 +1,4 @@
-# cert-deploy-iis
+# sslctlw
 
 IIS SSL 证书部署工具，Go + windigo，单文件 exe。
 
@@ -23,7 +23,7 @@ integration/  # 端到端集成测试
 ## 构建
 
 ```bash
-go build -ldflags="-s -w -H windowsgui" -o certdeploy.exe
+go build -ldflags="-s -w -H windowsgui" -o sslctlw.exe
 ```
 
 ## 测试

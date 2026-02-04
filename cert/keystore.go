@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"cert-deploy/config"
+	"sslctlw/config"
 )
 
 // KeyEncryptionPrefix 私钥加密版本前缀

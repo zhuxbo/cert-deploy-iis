@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"cert-deploy/util"
+	"sslctlw/util"
 )
 
 // validateBindingParams 验证绑定参数

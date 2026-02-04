@@ -64,8 +64,8 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("CheckInterval = %d, want 6", cfg.CheckInterval)
 	}
 
-	if cfg.TaskName != "CertDeployIIS" {
-		t.Errorf("TaskName = %q, want %q", cfg.TaskName, "CertDeployIIS")
+	if cfg.TaskName != "SSLCtlW" {
+		t.Errorf("TaskName = %q, want %q", cfg.TaskName, "SSLCtlW")
 	}
 
 	if cfg.AutoCheckEnabled {
@@ -375,8 +375,8 @@ func TestValidationMethodConstants(t *testing.T) {
 }
 
 func TestDataDirName(t *testing.T) {
-	if DataDirName != "CertDeploy" {
-		t.Errorf("DataDirName = %q, want %q", DataDirName, "CertDeploy")
+	if DataDirName != "sslctlw" {
+		t.Errorf("DataDirName = %q, want %q", DataDirName, "sslctlw")
 	}
 }
 
@@ -386,7 +386,7 @@ func TestGetDataDir(t *testing.T) {
 	if dir == "" {
 		t.Error("GetDataDir() 返回空字符串")
 	}
-	// 应该包含 CertDeploy
+	// 应该包含 sslctlw
 	if !containsString(dir, DataDirName) {
 		t.Errorf("GetDataDir() = %q, 应该包含 %q", dir, DataDirName)
 	}

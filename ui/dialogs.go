@@ -7,10 +7,10 @@ import (
 	"syscall"
 	"unsafe"
 
-	"cert-deploy/api"
-	"cert-deploy/cert"
-	"cert-deploy/config"
-	"cert-deploy/iis"
+	"sslctlw/api"
+	"sslctlw/cert"
+	"sslctlw/config"
+	"sslctlw/iis"
 
 	"github.com/rodrigocfd/windigo/co"
 	"github.com/rodrigocfd/windigo/ui"

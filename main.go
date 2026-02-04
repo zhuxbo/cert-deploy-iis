@@ -7,9 +7,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"cert-deploy/config"
-	"cert-deploy/deploy"
-	"cert-deploy/ui"
+	"sslctlw/config"
+	"sslctlw/deploy"
+	"sslctlw/ui"
 )
 
 var (
@@ -26,7 +26,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("certdeploy v%s\n", version)
+		fmt.Printf("sslctlw v%s\n", version)
 		return
 	}
 
@@ -80,7 +80,7 @@ func printUsage() {
 	fmt.Printf(`IIS 证书部署工具 v%s
 
 用法:
-  certdeploy.exe [选项]
+  sslctlw.exe [选项]
 
 选项:
   -auto      自动部署模式（用于计划任务）
@@ -89,10 +89,10 @@ func printUsage() {
   -help      显示帮助
 
 GUI 模式:
-  直接运行 certdeploy.exe 进入图形界面
+  直接运行 sslctlw.exe 进入图形界面
 
 自动部署模式:
-  certdeploy.exe -auto
+  sslctlw.exe -auto
 
   自动部署模式会读取配置文件，检查所有启用的站点：
   - 如果证书在配置的天数内过期，自动从部署接口获取新证书并部署
@@ -101,12 +101,12 @@ GUI 模式:
   可配合 Windows 任务计划程序定时执行
 
 配置目录:
-  程序同目录下的 CertDeploy 文件夹
-  - 配置文件: CertDeploy/config.json
-  - 日志目录: CertDeploy/logs/
+  程序同目录下的 sslctlw 文件夹
+  - 配置文件: sslctlw/config.json
+  - 日志目录: sslctlw/logs/
 
 创建计划任务:
-  schtasks /create /tn "CertDeploy" /tr "C:\path\to\certdeploy.exe -auto" /sc daily /st 03:00 /ru SYSTEM
+  schtasks /create /tn "SSLCtlW" /tr "C:\path\to\sslctlw.exe -auto" /sc daily /st 03:00 /ru SYSTEM
 
 `, version)
 }

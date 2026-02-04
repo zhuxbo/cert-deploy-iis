@@ -3,7 +3,7 @@
 ## 项目结构
 
 ```
-cert-deploy-iis/
+sslctlw/
 ├── main.go              # 入口
 ├── go.mod
 ├── main.manifest        # 管理员权限

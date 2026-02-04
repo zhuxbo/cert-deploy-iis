@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"cert-deploy/config"
+	"sslctlw/config"
 )
 
 func TestCheckDomainConflicts(t *testing.T) {

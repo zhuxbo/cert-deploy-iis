@@ -4,10 +4,10 @@
 
 ```bash
 # 开发
-go build -o certdeploy.exe
+go build -o sslctlw.exe
 
 # 发布（隐藏控制台 + 优化体积）
-go build -ldflags="-s -w -H windowsgui" -o certdeploy.exe
+go build -ldflags="-s -w -H windowsgui" -o sslctlw.exe
 ```
 
 | 参数 | 作用 |

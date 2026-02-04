@@ -1,9 +1,9 @@
 package deploy
 
 import (
-	"cert-deploy/api"
-	"cert-deploy/cert"
-	"cert-deploy/config"
+	"sslctlw/api"
+	"sslctlw/cert"
+	"sslctlw/config"
 )
 
 // MockAPIClient 模拟 API 客户端

@@ -354,7 +354,7 @@ func TestValidateTaskName(t *testing.T) {
 		wantErr  bool
 	}{
 		// 有效的任务名称
-		{"简单名称", "CertDeployIIS", false},
+		{"简单名称", "SSLCtlW", false},
 		{"带数字", "Task123", false},
 		{"带连字符", "my-task", false},
 		{"带下划线", "my_task", false},

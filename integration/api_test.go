@@ -5,7 +5,7 @@ package integration
 import (
 	"testing"
 
-	"cert-deploy/api"
+	"sslctlw/api"
 )
 
 // TestAPIConnection 测试 API 连接

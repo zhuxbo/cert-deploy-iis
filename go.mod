@@ -1,4 +1,4 @@
-module cert-deploy
+module sslctlw
 
 go 1.24.0
 

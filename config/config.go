@@ -13,7 +13,7 @@ import (
 var configMu sync.Mutex
 
 // DataDirName 数据目录名称
-const DataDirName = "CertDeploy"
+const DataDirName = "sslctlw"
 
 // BindRule 绑定规则
 type BindRule struct {
@@ -83,12 +83,12 @@ func DefaultConfig() *Config {
 		RenewDaysFetch:   13, // 拉取模式：到期前13天开始拉取
 		AutoCheckEnabled: false,
 		CheckInterval:    6,
-		TaskName:         "CertDeployIIS",
+		TaskName:         "SSLCtlW",
 		IIS7Mode:         false,
 	}
 }
 
-// GetDataDir 获取数据目录（程序同目录下的 CertDeploy 文件夹）
+// GetDataDir 获取数据目录（程序同目录下的 sslctlw 文件夹）
 func GetDataDir() string {
 	exe, err := os.Executable()
 	if err != nil {
@@ -146,7 +146,7 @@ func Load() (*Config, error) {
 		cfg.CheckInterval = 6
 	}
 	if cfg.TaskName == "" {
-		cfg.TaskName = "CertDeployIIS"
+		cfg.TaskName = "SSLCtlW"
 	}
 
 	return &cfg, nil

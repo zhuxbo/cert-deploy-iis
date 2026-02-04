@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-const DefaultTaskName = "CertDeployIIS"
+const DefaultTaskName = "SSLCtlW"
 
 // IsTaskExists 检查任务是否存在
 func IsTaskExists(taskName string) bool {
