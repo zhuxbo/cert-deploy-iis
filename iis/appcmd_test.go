@@ -2,6 +2,8 @@ package iis
 
 import (
 	"testing"
+
+	"sslctlw/util"
 )
 
 func TestParseBindings(t *testing.T) {
@@ -111,7 +113,7 @@ func TestMatchDomainForBinding(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := MatchDomainForBinding(tt.bindingHost, tt.certDomain)
+			got := util.MatchDomain(tt.bindingHost, tt.certDomain)
 			if got != tt.want {
 				t.Errorf("MatchDomainForBinding(%q, %q) = %v, want %v", tt.bindingHost, tt.certDomain, got, tt.want)
 			}
@@ -364,7 +366,7 @@ func TestMatchDomainForBinding_MoreCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := MatchDomainForBinding(tt.bindingHost, tt.certDomain)
+			got := util.MatchDomain(tt.bindingHost, tt.certDomain)
 			if got != tt.want {
 				t.Errorf("MatchDomainForBinding(%q, %q) = %v, want %v",
 					tt.bindingHost, tt.certDomain, got, tt.want)

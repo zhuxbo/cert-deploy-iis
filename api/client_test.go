@@ -3,9 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"sslctlw/util"
 )
 
 func TestNewClient(t *testing.T) {
@@ -86,10 +91,10 @@ func TestAPIError_Error(t *testing.T) {
 
 func TestMatchesDomain(t *testing.T) {
 	tests := []struct {
-		name    string
-		pattern string
-		target  string
-		want    bool
+		name       string
+		certDomain string
+		target     string
+		want       bool
 	}{
 		// 精确匹配
 		{"精确匹配", "example.com", "example.com", true},
@@ -109,9 +114,9 @@ func TestMatchesDomain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := matchesDomain(tt.pattern, tt.target)
+			got := util.MatchDomain(tt.target, tt.certDomain)
 			if got != tt.want {
-				t.Errorf("matchesDomain(%q, %q) = %v, want %v", tt.pattern, tt.target, got, tt.want)
+				t.Errorf("util.MatchDomain(%q, %q) = %v, want %v", tt.target, tt.certDomain, got, tt.want)
 			}
 		})
 	}
@@ -848,4 +853,102 @@ func TestSelectBestCert_DomainsField(t *testing.T) {
 	if best.OrderID != 100 {
 		t.Errorf("OrderID = %d, want 100", best.OrderID)
 	}
+}
+
+func TestDoWithRetry_ContextCancelled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	req, _ := http.NewRequest("GET", server.URL, nil)
+	_, err := client.doWithRetry(ctx, req)
+	if err == nil {
+		t.Error("doWithRetry() should return error with cancelled context")
+	}
+}
+
+func TestDoWithRetry_GetBodyError(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		// First request returns 500 to trigger retry
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+
+	req, _ := http.NewRequest("POST", server.URL, strings.NewReader("body"))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return nil, errors.New("GetBody failed")
+	}
+
+	_, err := client.doWithRetry(context.Background(), req)
+	if err == nil {
+		t.Error("doWithRetry() should return error when GetBody fails")
+	}
+	if !strings.Contains(err.Error(), "重置请求体失败") {
+		t.Errorf("error should contain '重置请求体失败', got: %v", err)
+	}
+}
+
+func TestSelectBestCert_CaseInsensitive(t *testing.T) {
+	certs := []CertData{
+		{OrderID: 100, Domain: "*.Example.COM", Status: "active", ExpiresAt: "2025-01-01"},
+	}
+
+	// util.MatchDomain normalizes to lowercase, so "www.example.com" should match "*.Example.COM"
+	best := selectBestCert(certs, "www.example.com")
+	if best == nil {
+		t.Fatal("selectBestCert() should match case-insensitively")
+	}
+	if best.OrderID != 100 {
+		t.Errorf("OrderID = %d, want 100", best.OrderID)
+	}
+}
+
+func TestDoWithRetry_5xxAllFail(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	_, err := client.ListCertsByDomain(context.Background(), "example.com")
+	if err == nil {
+		t.Error("应该在所有重试失败后返回错误")
+	}
+	// MaxRetries is 3, so total calls = initial + 3 retries = 4
+	if callCount != 4 {
+		t.Errorf("请求次数 = %d, want 4 (1 + MaxRetries)", callCount)
+	}
+}
+
+func TestHandleHTTPError(t *testing.T) {
+	t.Run("JSON 错误响应", func(t *testing.T) {
+		body := []byte(`{"code":0,"msg":"Token 无效"}`)
+		err := handleHTTPError(401, body)
+		if err.Message != "Token 无效" {
+			t.Errorf("Message = %q, want 'Token 无效'", err.Message)
+		}
+		if err.StatusCode != 401 {
+			t.Errorf("StatusCode = %d, want 401", err.StatusCode)
+		}
+	})
+
+	t.Run("非 JSON 响应", func(t *testing.T) {
+		body := []byte("Internal Server Error")
+		err := handleHTTPError(500, body)
+		if err.StatusCode != 500 {
+			t.Errorf("StatusCode = %d, want 500", err.StatusCode)
+		}
+	})
 }

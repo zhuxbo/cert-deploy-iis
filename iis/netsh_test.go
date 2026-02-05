@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"sslctlw/util"
 )
 
 func TestParseSSLBindings_English(t *testing.T) {
@@ -143,7 +145,7 @@ func TestMatchDomain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := matchDomain(tt.bindingHost, tt.certDomain)
+			got := util.MatchDomain(tt.bindingHost, tt.certDomain)
 			if got != tt.want {
 				t.Errorf("matchDomain(%q, %q) = %v, want %v", tt.bindingHost, tt.certDomain, got, tt.want)
 			}
@@ -359,7 +361,7 @@ func TestMatchDomain_MoreCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := matchDomain(tt.bindingHost, tt.certDomain)
+			got := util.MatchDomain(tt.bindingHost, tt.certDomain)
 			if got != tt.want {
 				t.Errorf("matchDomain(%q, %q) = %v, want %v",
 					tt.bindingHost, tt.certDomain, got, tt.want)

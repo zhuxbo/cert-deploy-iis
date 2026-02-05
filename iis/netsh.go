@@ -385,8 +385,3 @@ func ParsePortFromBinding(hostnamePort string) int {
 	return 443
 }
 
-// matchDomain 检查绑定是否匹配域名（支持通配符）
-// 已迁移到 util.MatchDomain，此处保留兼容性包装
-func matchDomain(bindingHost, certDomain string) bool {
-	return util.MatchDomain(bindingHost, certDomain)
-}

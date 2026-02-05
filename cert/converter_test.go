@@ -1,7 +1,16 @@
 package cert
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"os"
 	"testing"
+	"time"
 )
 
 func TestGenerateRandomString(t *testing.T) {
@@ -95,8 +104,81 @@ func TestPEMToPFX_InvalidCert(t *testing.T) {
 	}
 }
 
-// TestPEMToPFX_Valid 需要有效的证书和私钥对
-// 跳过：需要有效的测试证书
 func TestPEMToPFX_Valid(t *testing.T) {
-	t.Skip("跳过：需要有效的测试证书和私钥对")
+	certPEM, keyPEM := generateTestCertAndKey()
+
+	pfxPath, err := PEMToPFX(certPEM, keyPEM, "", "testpassword")
+	if err != nil {
+		t.Fatalf("PEMToPFX() 返回错误: %v", err)
+	}
+	defer os.Remove(pfxPath)
+
+	// 验证 PFX 文件存在且非空
+	info, err := os.Stat(pfxPath)
+	if err != nil {
+		t.Fatalf("PFX 文件不存在: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Error("PFX 文件为空")
+	}
+}
+
+func TestPEMToPFX_WithIntermediateChain(t *testing.T) {
+	// 生成 CA 证书
+	caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	caTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(100),
+		Subject:               pkix.Name{CommonName: "Test CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caCertDER, _ := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	caCert, _ := x509.ParseCertificate(caCertDER)
+	caCertPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCertDER}))
+
+	// 生成终端实体证书，由 CA 签名
+	eeKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	eeTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(200),
+		Subject:      pkix.Name{CommonName: "ee.example.com"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		DNSNames:     []string{"ee.example.com"},
+	}
+	eeCertDER, _ := x509.CreateCertificate(rand.Reader, eeTemplate, caCert, &eeKey.PublicKey, caKey)
+	eeCertPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: eeCertDER}))
+
+	eeKeyDER, _ := x509.MarshalECPrivateKey(eeKey)
+	eeKeyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: eeKeyDER}))
+
+	// 转换为 PFX，包含中间证书链
+	pfxPath, err := PEMToPFX(eeCertPEM, eeKeyPEM, caCertPEM, "testpassword")
+	if err != nil {
+		t.Fatalf("PEMToPFX() 返回错误: %v", err)
+	}
+	defer os.Remove(pfxPath)
+
+	info, err := os.Stat(pfxPath)
+	if err != nil {
+		t.Fatalf("PFX 文件不存在: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Error("PFX 文件为空")
+	}
+}
+
+func TestPEMToPFX_InvalidKey(t *testing.T) {
+	certPEM, _ := generateTestCertAndKey()
+
+	// 使用损坏的密钥 PEM（有效的 PEM 头，但内容被篡改）
+	corruptedKeyPEM := "-----BEGIN EC PRIVATE KEY-----\nYWJjZGVmZw==\n-----END EC PRIVATE KEY-----"
+
+	_, err := PEMToPFX(certPEM, corruptedKeyPEM, "", "testpassword")
+	if err == nil {
+		t.Error("PEMToPFX() 应该对损坏的密钥返回错误")
+	}
 }

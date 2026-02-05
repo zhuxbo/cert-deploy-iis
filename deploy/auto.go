@@ -26,7 +26,7 @@ type Result struct {
 }
 
 // AutoDeploy 自动部署证书（证书维度）
-func AutoDeploy(cfg *config.Config, store *cert.OrderStore) []Result {
+func AutoDeploy(cfg *config.Config, d *Deployer) []Result {
 	results := make([]Result, 0)
 
 	if len(cfg.Certificates) == 0 {
@@ -39,10 +39,8 @@ func AutoDeploy(cfg *config.Config, store *cert.OrderStore) []Result {
 		return results
 	}
 
-	client := api.NewClient(cfg.APIBaseURL, cfg.GetToken())
-
 	// 检测 IIS 版本
-	isIIS7 := iis.IsIIS7() || cfg.IIS7Mode
+	isIIS7 := d.Binder.IsIIS7()
 	if isIIS7 {
 		log.Println("检测到 IIS7 兼容模式")
 	}
@@ -71,7 +69,7 @@ func AutoDeploy(cfg *config.Config, store *cert.OrderStore) []Result {
 			// 本地私钥模式：到期前 > RenewDaysLocal 天发起续签
 			// 目的：抢在服务端自动续签（14天）之前，由本地发起 CSR
 			var reason string
-			certData, privateKey, reason, err = handleLocalKeyMode(client, &cfg.Certificates[i], cfg.RenewDaysLocal, store)
+			certData, privateKey, reason, err = handleLocalKeyMode(d, &cfg.Certificates[i], cfg.RenewDaysLocal)
 			if err != nil {
 				log.Printf("本地私钥模式处理失败: %v", err)
 				results = append(results, Result{
@@ -92,7 +90,7 @@ func AutoDeploy(cfg *config.Config, store *cert.OrderStore) []Result {
 			// 拉取模式：到期前 < RenewDaysFetch 天开始拉取
 			// 目的：等服务端自动续签（14天）完成后再拉取
 			ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
-			certData, err = client.GetCertByOrderID(ctx, certCfg.OrderID)
+			certData, err = d.Client.GetCertByOrderID(ctx, certCfg.OrderID)
 			cancel()
 			if err != nil {
 				log.Printf("获取证书失败: %v", err)
@@ -140,10 +138,10 @@ func AutoDeploy(cfg *config.Config, store *cert.OrderStore) []Result {
 		var deployResults []Result
 		if certCfg.AutoBindMode {
 			// 自动绑定模式：按已有绑定更换证书
-			deployResults = deployCertAutoMode(certData, privateKey, certCfg, client, isIIS7)
+			deployResults = deployCertAutoMode(d, certData, privateKey, certCfg)
 		} else {
 			// 规则绑定模式：按配置的绑定规则部署
-			deployResults = deployCertWithRules(certData, privateKey, certCfg, client, isIIS7, conflicts, cfg.Certificates)
+			deployResults = deployCertWithRules(d, certData, privateKey, certCfg, conflicts, cfg.Certificates)
 		}
 		results = append(results, deployResults...)
 
@@ -163,11 +161,11 @@ func AutoDeploy(cfg *config.Config, store *cert.OrderStore) []Result {
 }
 
 // deployCertWithRules 使用绑定规则部署证书
-func deployCertWithRules(certData *api.CertData, privateKey string, certCfg config.CertConfig, client *api.Client, isIIS7 bool, conflicts map[string][]int, allCerts []config.CertConfig) []Result {
+func deployCertWithRules(d *Deployer, certData *api.CertData, privateKey string, certCfg config.CertConfig, conflicts map[string][]int, allCerts []config.CertConfig) []Result {
 	results := make([]Result, 0)
 
 	// 转换 PEM 到 PFX
-	pfxPath, err := cert.PEMToPFX(
+	pfxPath, err := d.Converter.PEMToPFX(
 		certData.Certificate,
 		privateKey,
 		certData.CACert,
@@ -185,14 +183,10 @@ func deployCertWithRules(certData *api.CertData, privateKey string, certCfg conf
 		}
 		return results
 	}
-	defer func() {
-		if err := os.Remove(pfxPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("警告: 清理临时 PFX 文件失败 %s: %v", pfxPath, err)
-		}
-	}()
+	defer removeTempFile(pfxPath)
 
 	// 安装证书
-	installResult, err := cert.InstallPFX(pfxPath, "")
+	installResult, err := d.Installer.InstallPFX(pfxPath, "")
 	if err != nil || !installResult.Success {
 		errMsg := ""
 		if err != nil {
@@ -216,9 +210,10 @@ func deployCertWithRules(certData *api.CertData, privateKey string, certCfg conf
 	log.Printf("证书安装成功: %s", thumbprint)
 
 	// IIS7 处理：修改友好名称
+	isIIS7 := d.Binder.IsIIS7()
 	if isIIS7 && len(certCfg.BindRules) > 0 {
 		wildcardName := cert.GetWildcardName(certCfg.Domain)
-		if err := cert.SetFriendlyName(thumbprint, wildcardName); err != nil {
+		if err := d.Installer.SetFriendlyName(thumbprint, wildcardName); err != nil {
 			log.Printf("设置友好名称失败: %v", err)
 		} else {
 			log.Printf("已设置友好名称: %s", wildcardName)
@@ -246,10 +241,10 @@ func deployCertWithRules(certData *api.CertData, privateKey string, certCfg conf
 		var bindErr error
 		if isIIS7 {
 			// IIS7 使用 IP:Port 绑定
-			bindErr = iis.BindCertificateByIP("0.0.0.0", port, thumbprint)
+			bindErr = d.Binder.BindCertificateByIP("0.0.0.0", port, thumbprint)
 		} else {
 			// IIS8+ 使用 SNI 绑定
-			bindErr = iis.BindCertificate(rule.Domain, port, thumbprint)
+			bindErr = d.Binder.BindCertificate(rule.Domain, port, thumbprint)
 		}
 
 		if bindErr != nil {
@@ -261,7 +256,7 @@ func deployCertWithRules(certData *api.CertData, privateKey string, certCfg conf
 				Thumbprint: thumbprint,
 				OrderID:    certData.OrderID,
 			})
-			sendCallback(client, certData.OrderID, rule.Domain, false, "绑定失败: "+bindErr.Error())
+			sendCallback(d, certData.OrderID, rule.Domain, false, "绑定失败: "+bindErr.Error())
 		} else {
 			log.Printf("绑定成功: %s", rule.Domain)
 			results = append(results, Result{
@@ -271,7 +266,7 @@ func deployCertWithRules(certData *api.CertData, privateKey string, certCfg conf
 				Thumbprint: thumbprint,
 				OrderID:    certData.OrderID,
 			})
-			sendCallback(client, certData.OrderID, rule.Domain, true, "")
+			sendCallback(d, certData.OrderID, rule.Domain, true, "")
 		}
 	}
 
@@ -328,11 +323,11 @@ func checkRenewalNeeded(certData *api.CertData, renewDays int) (bool, string) {
 
 // tryUseLocalKey 尝试使用本地私钥
 // 返回: 证书数据, 私钥, 是否成功
-func tryUseLocalKey(certData *api.CertData, orderID int, store *cert.OrderStore) (*api.CertData, string, bool) {
-	if !store.HasPrivateKey(orderID) {
+func tryUseLocalKey(d *Deployer, certData *api.CertData, orderID int) (*api.CertData, string, bool) {
+	if !d.Store.HasPrivateKey(orderID) {
 		return nil, "", false
 	}
-	localKey, err := store.LoadPrivateKey(orderID)
+	localKey, err := d.Store.LoadPrivateKey(orderID)
 	if err != nil {
 		log.Printf("加载本地私钥失败: %v", err)
 		return nil, "", false
@@ -344,19 +339,19 @@ func tryUseLocalKey(certData *api.CertData, orderID int, store *cert.OrderStore)
 	}
 	if !matched {
 		log.Printf("本地私钥与证书不匹配，需要重新生成 CSR")
-		store.DeleteOrder(orderID)
+		d.Store.DeleteOrder(orderID)
 		return nil, "", false
 	}
 	log.Printf("使用本地私钥（订单 %d）", orderID)
-	if err := store.SaveCertificate(orderID, certData.Certificate, certData.CACert); err != nil {
+	if err := d.Store.SaveCertificate(orderID, certData.Certificate, certData.CACert); err != nil {
 		log.Printf("警告: 保存证书失败: %v", err)
 	}
-	updateOrderMeta(orderID, certData, store)
+	updateOrderMeta(orderID, certData, d.Store)
 	return certData, localKey, true
 }
 
 // submitNewCSR 生成并提交新的 CSR
-func submitNewCSR(client *api.Client, certCfg *config.CertConfig, store *cert.OrderStore) (*api.CertData, string, string, error) {
+func submitNewCSR(d *Deployer, certCfg *config.CertConfig) (*api.CertData, string, string, error) {
 	log.Printf("生成新的 CSR")
 	keyPEM, csrPEM, err := cert.GenerateCSR(certCfg.Domain, certCfg.Domains)
 	if err != nil {
@@ -372,13 +367,13 @@ func submitNewCSR(client *api.Client, certCfg *config.CertConfig, store *cert.Or
 
 	ctx, cancel := context.WithTimeout(context.Background(), api.APISubmitTimeout)
 	defer cancel()
-	csrResp, err := client.SubmitCSR(ctx, csrReq)
+	csrResp, err := d.Client.SubmitCSR(ctx, csrReq)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("提交 CSR 失败: %w", err)
 	}
 
 	newOrderID := csrResp.Data.OrderID
-	if err := store.SavePrivateKey(newOrderID, keyPEM); err != nil {
+	if err := d.Store.SavePrivateKey(newOrderID, keyPEM); err != nil {
 		return nil, "", "", fmt.Errorf("保存私钥失败: %w", err)
 	}
 
@@ -387,13 +382,13 @@ func submitNewCSR(client *api.Client, certCfg *config.CertConfig, store *cert.Or
 
 	if csrResp.Data.Status == "active" {
 		queryCtx, queryCancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
-		certData, err := client.GetCertByOrderID(queryCtx, newOrderID)
+		certData, err := d.Client.GetCertByOrderID(queryCtx, newOrderID)
 		queryCancel()
 		if err == nil && certData.Status == "active" {
-			if err := store.SaveCertificate(newOrderID, certData.Certificate, certData.CACert); err != nil {
+			if err := d.Store.SaveCertificate(newOrderID, certData.Certificate, certData.CACert); err != nil {
 				log.Printf("警告: 保存证书失败: %v", err)
 			}
-			updateOrderMeta(newOrderID, certData, store)
+			updateOrderMeta(newOrderID, certData, d.Store)
 			return certData, keyPEM, "", nil
 		}
 	}
@@ -405,7 +400,7 @@ func submitNewCSR(client *api.Client, certCfg *config.CertConfig, store *cert.Or
 // renewDays: 到期前多少天发起续签（默认15天，需大于服务端自动续签的14天）
 // 返回: 证书数据, 私钥, 跳过原因, 错误
 // 当返回 certData=nil 且 error=nil 时，reason 说明跳过原因
-func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig, renewDays int, store *cert.OrderStore) (*api.CertData, string, string, error) {
+func handleLocalKeyMode(d *Deployer, certCfg *config.CertConfig, renewDays int) (*api.CertData, string, string, error) {
 	// 1. 校验配置
 	if err := validateCertConfig(certCfg); err != nil {
 		return nil, "", "", err
@@ -414,7 +409,7 @@ func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig, renewDay
 	// 2. 检查现有订单
 	if certCfg.OrderID > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
-		certData, err := client.GetCertByOrderID(ctx, certCfg.OrderID)
+		certData, err := d.Client.GetCertByOrderID(ctx, certCfg.OrderID)
 		cancel()
 		if err != nil {
 			log.Printf("获取订单 %d 证书失败: %v", certCfg.OrderID, err)
@@ -429,7 +424,7 @@ func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig, renewDay
 			}
 
 			// 尝试使用本地私钥
-			if cd, pk, ok := tryUseLocalKey(certData, certCfg.OrderID, store); ok {
+			if cd, pk, ok := tryUseLocalKey(d, certData, certCfg.OrderID); ok {
 				return cd, pk, "", nil
 			}
 
@@ -442,7 +437,7 @@ func handleLocalKeyMode(client *api.Client, certCfg *config.CertConfig, renewDay
 	}
 
 	// 3. 提交新的 CSR
-	return submitNewCSR(client, certCfg, store)
+	return submitNewCSR(d, certCfg)
 }
 
 // checkDomainConflicts 检查域名冲突（同一域名配置在多个证书中）
@@ -523,7 +518,8 @@ func parseCertExpiry(value string) (time.Time, bool) {
 	}
 	return parsed, true
 }
-func updateOrderMeta(orderID int, certData *api.CertData, store *cert.OrderStore) {
+
+func updateOrderMeta(orderID int, certData *api.CertData, store OrderStore) {
 	meta := &cert.OrderMeta{
 		OrderID:      orderID,
 		Domain:       certData.Domain,
@@ -542,7 +538,7 @@ func updateOrderMeta(orderID int, certData *api.CertData, store *cert.OrderStore
 const CallbackTimeout = 60 * time.Second
 
 // sendCallback 发送部署回调（异步，带超时控制，最多重试3次）
-func sendCallback(client *api.Client, orderID int, domain string, success bool, message string) {
+func sendCallback(d *Deployer, orderID int, domain string, success bool, message string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), CallbackTimeout)
 		defer cancel()
@@ -581,7 +577,7 @@ func sendCallback(client *api.Client, orderID int, domain string, success bool, 
 				}
 			}
 
-			if err := client.Callback(ctx, req); err == nil {
+			if err := d.Client.Callback(ctx, req); err == nil {
 				return
 			} else {
 				lastErr = err
@@ -604,7 +600,7 @@ func CheckAndDeploy() error {
 	}
 
 	store := cert.NewOrderStore()
-	results := AutoDeploy(cfg, store)
+	results := AutoDeploy(cfg, DefaultDeployer(cfg, store))
 
 	successCount := 0
 	failCount := 0
@@ -629,22 +625,18 @@ func CheckAndDeploy() error {
 
 // deployCertAutoMode 自动绑定模式部署
 // 查找 IIS 中已有的 SSL 绑定，更换证书
-func deployCertAutoMode(certData *api.CertData, privateKey string, certCfg config.CertConfig, client *api.Client, isIIS7 bool) []Result {
+func deployCertAutoMode(d *Deployer, certData *api.CertData, privateKey string, certCfg config.CertConfig) []Result {
 	results := make([]Result, 0)
 
 	// 1. 转换并安装证书
-	pfxPath, err := cert.PEMToPFX(certData.Certificate, privateKey, certData.CACert, "")
+	pfxPath, err := d.Converter.PEMToPFX(certData.Certificate, privateKey, certData.CACert, "")
 	if err != nil {
 		log.Printf("转换 PFX 失败: %v", err)
 		return []Result{{Domain: certCfg.Domain, Success: false, Message: fmt.Sprintf("转换 PFX 失败: %v", err), OrderID: certData.OrderID}}
 	}
-	defer func() {
-		if err := os.Remove(pfxPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("警告: 清理临时 PFX 文件失败 %s: %v", pfxPath, err)
-		}
-	}()
+	defer removeTempFile(pfxPath)
 
-	installResult, err := cert.InstallPFX(pfxPath, "")
+	installResult, err := d.Installer.InstallPFX(pfxPath, "")
 	if err != nil || !installResult.Success {
 		errMsg := "安装失败"
 		if err != nil {
@@ -664,7 +656,7 @@ func deployCertAutoMode(certData *api.CertData, privateKey string, certCfg confi
 		allDomains = []string{certCfg.Domain}
 	}
 
-	matchedBindings, err := iis.FindBindingsForDomains(allDomains)
+	matchedBindings, err := d.Binder.FindBindingsForDomains(allDomains)
 	if err != nil {
 		log.Printf("查找 IIS 绑定失败: %v", err)
 	}
@@ -675,6 +667,7 @@ func deployCertAutoMode(certData *api.CertData, privateKey string, certCfg confi
 	}
 
 	// 3. 更新匹配的绑定
+	isIIS7 := d.Binder.IsIIS7()
 	for domain, binding := range matchedBindings {
 		host := iis.ParseHostFromBinding(binding.HostnamePort)
 		port := iis.ParsePortFromBinding(binding.HostnamePort)
@@ -683,19 +676,19 @@ func deployCertAutoMode(certData *api.CertData, privateKey string, certCfg confi
 
 		var bindErr error
 		if isIIS7 || isIPBinding(binding.HostnamePort) {
-			bindErr = iis.BindCertificateByIP(host, port, thumbprint)
+			bindErr = d.Binder.BindCertificateByIP(host, port, thumbprint)
 		} else {
-			bindErr = iis.BindCertificate(host, port, thumbprint)
+			bindErr = d.Binder.BindCertificate(host, port, thumbprint)
 		}
 
 		if bindErr != nil {
 			log.Printf("绑定失败: %v", bindErr)
 			results = append(results, Result{Domain: domain, Success: false, Message: bindErr.Error(), Thumbprint: thumbprint, OrderID: certData.OrderID})
-			sendCallback(client, certData.OrderID, domain, false, bindErr.Error())
+			sendCallback(d, certData.OrderID, domain, false, bindErr.Error())
 		} else {
 			log.Printf("绑定成功: %s", domain)
 			results = append(results, Result{Domain: domain, Success: true, Message: "部署成功", Thumbprint: thumbprint, OrderID: certData.OrderID})
-			sendCallback(client, certData.OrderID, domain, true, "")
+			sendCallback(d, certData.OrderID, domain, true, "")
 		}
 	}
 
@@ -811,3 +804,9 @@ func isIPBinding(hostnamePort string) bool {
 	return true
 }
 
+// removeTempFile 清理临时文件
+func removeTempFile(path string) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.Printf("警告: 清理临时文件失败 %s: %v", path, err)
+	}
+}

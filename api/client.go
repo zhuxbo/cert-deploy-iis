@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"sslctlw/util"
 )
 
 // CertListResponse 证书列表响应
@@ -118,7 +120,10 @@ func (c *Client) doWithRetry(ctx context.Context, req *http.Request) (*http.Resp
 			}
 			// 重置 Body（如果有）
 			if req.GetBody != nil {
-				body, _ := req.GetBody()
+				body, err := req.GetBody()
+			if err != nil {
+				return nil, fmt.Errorf("重置请求体失败: %w", err)
+			}
 				req.Body = body
 			}
 		}
@@ -327,8 +332,8 @@ func selectBestCert(certs []CertData, targetDomain string) *CertData {
 		}
 
 		// 其次是通配符匹配
-		iMatch := containsDomain(certs[i].Domains, targetDomain) || matchesDomain(certs[i].Domain, targetDomain)
-		jMatch := containsDomain(certs[j].Domains, targetDomain) || matchesDomain(certs[j].Domain, targetDomain)
+		iMatch := containsDomain(certs[i].Domains, targetDomain) || util.MatchDomain(targetDomain, certs[i].Domain)
+		jMatch := containsDomain(certs[j].Domains, targetDomain) || util.MatchDomain(targetDomain, certs[j].Domain)
 		if iMatch && !jMatch {
 			return true
 		}
@@ -348,35 +353,10 @@ func selectBestCert(certs []CertData, targetDomain string) *CertData {
 	return nil
 }
 
-// matchesDomain 检查模式是否匹配目标域名（支持通配符）
-// pattern: *.example.com 匹配 www.example.com, api.example.com
-// pattern: example.com 只匹配 example.com（精确匹配）
-// 注意：此函数与 util.MatchDomain 参数顺序不同（pattern 在前，target 在后）
-func matchesDomain(pattern, target string) bool {
-	// util.MatchDomain(bindingHost, certDomain)
-	// 这里 target 是 bindingHost，pattern 是 certDomain
-	if pattern == target {
-		return true // 精确匹配
-	}
-	// 通配符匹配：*.example.com 匹配 www.example.com
-	if strings.HasPrefix(pattern, "*.") {
-		suffix := pattern[1:] // ".example.com"
-		// 目标域名必须以 suffix 结尾，且前面只有一级子域名
-		if strings.HasSuffix(target, suffix) {
-			prefix := target[:len(target)-len(suffix)]
-			// 前缀不能包含点（即只能是单级子域名）
-			if !strings.Contains(prefix, ".") && len(prefix) > 0 {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // containsDomain 检查域名列表是否包含目标域名（支持通配符）
 func containsDomain(domains string, target string) bool {
 	for _, d := range strings.Split(domains, ",") {
-		if matchesDomain(strings.TrimSpace(d), target) {
+		if util.MatchDomain(target, strings.TrimSpace(d)) {
 			return true
 		}
 	}

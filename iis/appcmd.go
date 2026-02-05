@@ -340,7 +340,7 @@ func FindMatchingBindings(certDomains []string) (httpsMatches []HttpBindingMatch
 			// 检查绑定的域名是否匹配证书的任意域名
 			matchedDomain := ""
 			for _, certDomain := range certDomains {
-				if MatchDomainForBinding(binding.Host, certDomain) {
+				if util.MatchDomain(binding.Host, certDomain) {
 					matchedDomain = certDomain
 					break
 				}
@@ -525,10 +525,3 @@ func GetSitePhysicalPathByDomain(domain string) (string, string, error) {
 	return "", "", fmt.Errorf("未找到域名 %s 对应的站点", domain)
 }
 
-// MatchDomainForBinding 检查绑定域名是否匹配证书域名
-// bindingHost: IIS 绑定的域名 (如 www.example.com)
-// certDomain: 证书的域名 (如 *.example.com 或 www.example.com)
-// 已迁移到 util.MatchDomain，此处保留兼容性包装
-func MatchDomainForBinding(bindingHost, certDomain string) bool {
-	return util.MatchDomain(bindingHost, certDomain)
-}

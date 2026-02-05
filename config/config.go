@@ -10,7 +10,7 @@ import (
 )
 
 // configMu 保护配置文件读写的全局互斥锁
-var configMu sync.Mutex
+var configMu sync.RWMutex
 
 // 配置常量
 const (
@@ -138,8 +138,8 @@ func GetLogDir() string {
 
 // Load 加载配置（线程安全）
 func Load() (*Config, error) {
-	configMu.Lock()
-	defer configMu.Unlock()
+	configMu.RLock()
+	defer configMu.RUnlock()
 
 	path := GetConfigPath()
 
@@ -192,17 +192,26 @@ func (c *Config) Save() error {
 		return fmt.Errorf("写入临时文件失败: %w", err)
 	}
 
-	// 3. 原子重命名（Windows 需要先删除目标文件）
+	// 3. 安全替换（Windows 需要先删除目标文件）
+	bakPath := path + ".bak"
 	if _, err := os.Stat(path); err == nil {
-		if err := os.Remove(path); err != nil {
+		// 先备份旧文件
+		if err := os.Rename(path, bakPath); err != nil {
 			os.Remove(tmpPath) // 清理临时文件
-			return fmt.Errorf("删除旧配置失败: %w", err)
+			return fmt.Errorf("备份旧配置失败: %w", err)
 		}
 	}
 
 	if err := os.Rename(tmpPath, path); err != nil {
+		// 重命名失败，从备份恢复
+		if _, bakErr := os.Stat(bakPath); bakErr == nil {
+			os.Rename(bakPath, path)
+		}
 		return fmt.Errorf("重命名配置文件失败: %w", err)
 	}
+
+	// 删除备份文件
+	os.Remove(bakPath)
 
 	return nil
 }

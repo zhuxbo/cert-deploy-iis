@@ -29,7 +29,7 @@ var (
 // EnableDebugMode 启用调试模式
 func EnableDebugMode() {
 	debugMode = true
-	f, err := os.OpenFile("debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	f, err := os.OpenFile("debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return
 	}

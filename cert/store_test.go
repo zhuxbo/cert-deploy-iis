@@ -3,6 +3,8 @@ package cert
 import (
 	"testing"
 	"time"
+
+	"sslctlw/util"
 )
 
 func TestMatchDomain(t *testing.T) {
@@ -33,9 +35,10 @@ func TestMatchDomain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := matchDomain(tt.certDomain, tt.targetDomain)
+			// util.MatchDomain(bindingHost, certDomain) - targetDomain is bindingHost
+			got := util.MatchDomain(tt.targetDomain, tt.certDomain)
 			if got != tt.want {
-				t.Errorf("matchDomain(%q, %q) = %v, want %v", tt.certDomain, tt.targetDomain, got, tt.want)
+				t.Errorf("util.MatchDomain(%q, %q) = %v, want %v", tt.targetDomain, tt.certDomain, got, tt.want)
 			}
 		})
 	}
@@ -533,16 +536,16 @@ func TestMatchDomain_EdgeCases(t *testing.T) {
 		{"两个空字符串", "", "", false},
 		{"证书域名空", "", "example.com", false},
 		{"目标域名空", "example.com", "", false},
-		{"空格", " ", " ", true},  // 精确匹配
+		{"空格", " ", " ", false}, // util.MatchDomain trims spaces, so " " becomes ""
 		{"只有点", ".", ".", true}, // 精确匹配
 		{"只有星号", "*", "*", true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := matchDomain(tt.certDomain, tt.targetDomain)
+			got := util.MatchDomain(tt.targetDomain, tt.certDomain)
 			if got != tt.want {
-				t.Errorf("matchDomain(%q, %q) = %v, want %v", tt.certDomain, tt.targetDomain, got, tt.want)
+				t.Errorf("util.MatchDomain(%q, %q) = %v, want %v", tt.targetDomain, tt.certDomain, got, tt.want)
 			}
 		})
 	}

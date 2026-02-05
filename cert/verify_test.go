@@ -1,8 +1,39 @@
 package cert
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"regexp"
 	"testing"
+	"time"
 )
+
+// generateTestCertAndKey 生成自签名测试证书和私钥 PEM
+func generateTestCertAndKey() (certPEM, keyPEM string) {
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "test.example.com"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		DNSNames:     []string{"test.example.com", "www.test.example.com"},
+	}
+
+	certDER, _ := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+
+	certBlock := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyDER, _ := x509.MarshalECPrivateKey(key)
+	keyBlock := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	return string(certBlock), string(keyBlock)
+}
 
 func TestNormalizeSerialNumber(t *testing.T) {
 	tests := []struct {
@@ -74,12 +105,16 @@ func TestVerifyKeyPair_Invalid(t *testing.T) {
 	}
 }
 
-// 使用有效的测试证书进行完整测试
-// 跳过：需要有效的测试证书
 func TestVerifyKeyPair_Valid(t *testing.T) {
-	// 由于生成有效的测试证书比较复杂，这里跳过此测试
-	// 实际的证书验证功能在集成测试中验证
-	t.Skip("跳过：需要有效的测试证书")
+	certPEM, keyPEM := generateTestCertAndKey()
+
+	match, err := VerifyKeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("VerifyKeyPair() 返回错误: %v", err)
+	}
+	if !match {
+		t.Error("VerifyKeyPair() 应该返回 true，匹配的证书和密钥对返回了 false")
+	}
 }
 
 func TestGetCertThumbprint_Invalid(t *testing.T) {
@@ -96,27 +131,65 @@ func TestGetCertSerialNumber_Invalid(t *testing.T) {
 	}
 }
 
-// 注意：有效证书测试需要真实的证书，这里跳过
-// 因为生成自签名证书比较复杂，而且会增加测试的复杂性
-
 func TestParseCertificate_Valid(t *testing.T) {
-	// 跳过：需要有效的测试证书
-	t.Skip("跳过：生成有效测试证书过于复杂")
+	certPEM, _ := generateTestCertAndKey()
+
+	cert, err := ParseCertificate(certPEM)
+	if err != nil {
+		t.Fatalf("ParseCertificate() 返回错误: %v", err)
+	}
+	if cert.Subject.CommonName != "test.example.com" {
+		t.Errorf("ParseCertificate() CN = %q, want %q", cert.Subject.CommonName, "test.example.com")
+	}
+	if len(cert.DNSNames) != 2 {
+		t.Errorf("ParseCertificate() DNSNames 数量 = %d, want 2", len(cert.DNSNames))
+	}
 }
 
 func TestGetCertThumbprint_Valid(t *testing.T) {
-	// 跳过：需要有效的测试证书
-	t.Skip("跳过：生成有效测试证书过于复杂")
+	certPEM, _ := generateTestCertAndKey()
+
+	thumbprint, err := GetCertThumbprint(certPEM)
+	if err != nil {
+		t.Fatalf("GetCertThumbprint() 返回错误: %v", err)
+	}
+	// SHA1 指纹应该是 40 个十六进制字符（大写）
+	if len(thumbprint) != 40 {
+		t.Errorf("GetCertThumbprint() 长度 = %d, want 40", len(thumbprint))
+	}
+	matched, _ := regexp.MatchString("^[0-9A-F]{40}$", thumbprint)
+	if !matched {
+		t.Errorf("GetCertThumbprint() = %q, 不是有效的大写十六进制字符串", thumbprint)
+	}
 }
 
 func TestGetCertSerialNumber_Valid(t *testing.T) {
-	// 跳过：需要有效的测试证书
-	t.Skip("跳过：生成有效测试证书过于复杂")
+	certPEM, _ := generateTestCertAndKey()
+
+	serial, err := GetCertSerialNumber(certPEM)
+	if err != nil {
+		t.Fatalf("GetCertSerialNumber() 返回错误: %v", err)
+	}
+	if serial == "" {
+		t.Error("GetCertSerialNumber() 返回空字符串")
+	}
+	// 模板中设置的 SerialNumber 是 big.NewInt(1)，十六进制为 "1"
+	if serial != "1" {
+		t.Errorf("GetCertSerialNumber() = %q, want %q", serial, "1")
+	}
 }
 
 func TestVerifyKeyPair_Mismatch(t *testing.T) {
-	// 跳过：需要有效的测试证书和密钥对
-	t.Skip("跳过：生成有效测试证书过于复杂")
+	certPEM1, _ := generateTestCertAndKey()
+	_, keyPEM2 := generateTestCertAndKey()
+
+	match, err := VerifyKeyPair(certPEM1, keyPEM2)
+	if err != nil {
+		t.Fatalf("VerifyKeyPair() 返回错误: %v", err)
+	}
+	if match {
+		t.Error("VerifyKeyPair() 应该返回 false，不匹配的证书和密钥对返回了 true")
+	}
 }
 
 func TestNormalizeSerialNumber_MoreCases(t *testing.T) {

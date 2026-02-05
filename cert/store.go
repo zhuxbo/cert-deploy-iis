@@ -184,47 +184,16 @@ func GetCertStatus(cert *CertInfo) string {
 
 // MatchesDomain 检查证书是否匹配指定域名
 func (c *CertInfo) MatchesDomain(domain string) bool {
-	domain = strings.ToLower(domain)
-
 	// 检查 CN
-	cn := strings.ToLower(extractCN(c.Subject))
-	if matchDomain(cn, domain) {
+	cn := extractCN(c.Subject)
+	if util.MatchDomain(domain, cn) {
 		return true
 	}
 
 	// 检查 SAN DNS 名称
 	for _, dns := range c.DNSNames {
-		if matchDomain(strings.ToLower(dns), domain) {
+		if util.MatchDomain(domain, dns) {
 			return true
-		}
-	}
-
-	return false
-}
-
-// matchDomain 检查证书域名是否匹配目标域名（支持通配符）
-// 通配符只向上匹配一级子域名，例如 *.example.com 匹配 www.example.com，
-// 但不匹配 a.b.example.com。根域名匹配依赖证书 SAN 中的精确域名。
-func matchDomain(certDomain, targetDomain string) bool {
-	if certDomain == "" || targetDomain == "" {
-		return false
-	}
-
-	// 精确匹配
-	if certDomain == targetDomain {
-		return true
-	}
-
-	// 通配符匹配 (*.example.com)
-	if strings.HasPrefix(certDomain, "*.") {
-		suffix := certDomain[1:] // .example.com
-		// 匹配 sub.example.com（只匹配一级子域名）
-		if strings.HasSuffix(targetDomain, suffix) {
-			prefix := targetDomain[:len(targetDomain)-len(suffix)]
-			// 前缀不能包含点（即只能是单级子域名），且前缀不能为空
-			if !strings.Contains(prefix, ".") && len(prefix) > 0 {
-				return true
-			}
 		}
 	}
 
