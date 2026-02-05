@@ -2,7 +2,21 @@ package util
 
 import (
 	"testing"
+	"time"
 )
+
+func TestCmdTimeout(t *testing.T) {
+	// 临时设置较短的超时
+	oldTimeout := DefaultCmdTimeout
+	DefaultCmdTimeout = 1 * time.Second
+	defer func() { DefaultCmdTimeout = oldTimeout }()
+
+	// 执行一个会超时的命令（ping -n 100 等待很长时间）
+	_, err := RunCmd("cmd", "/c", "ping", "-n", "100", "127.0.0.1")
+	if err == nil {
+		t.Error("RunCmd() 应该因超时而返回错误")
+	}
+}
 
 func TestGBKToUTF8_ValidUTF8(t *testing.T) {
 	// 已经是有效的 UTF-8 且包含中文

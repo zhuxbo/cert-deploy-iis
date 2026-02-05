@@ -66,7 +66,7 @@ if ($cert) {
 		return &InstallResult{
 			Success:      false,
 			ErrorMessage: "导入成功但未能获取证书指纹",
-		}, nil
+		}, fmt.Errorf("导入成功但未能获取证书指纹")
 	}
 
 	return &InstallResult{

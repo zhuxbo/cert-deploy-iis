@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -318,7 +319,10 @@ func CheckLocalCerts() []LocalCertInfo {
 		return results
 	}
 
-	sslBindings, _ := iis.ListSSLBindings()
+	sslBindings, sslErr := iis.ListSSLBindings()
+	if sslErr != nil {
+		log.Printf("警告: 加载 SSL 绑定列表失败: %v", sslErr)
+	}
 	boundCerts := make(map[string]bool)
 	for _, b := range sslBindings {
 		boundCerts[b.CertHash] = true

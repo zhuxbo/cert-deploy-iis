@@ -570,8 +570,10 @@ func TestIsPathWithinBase_MoreCases(t *testing.T) {
 		{"路径遍历-简单", "C:\\test", "C:\\test\\..\\other", false},
 		{"路径遍历-复杂", "C:\\test", "C:\\test\\sub\\..\\..\\other", false},
 
-		// 大小写（Windows 实际上区分大小写的比较）
+		// 大小写（Windows 大小写不敏感）
 		{"大小写差异", "C:\\Test", "C:\\Test\\sub", true},
+		{"大小写不同-子目录", "C:\\TEST", "C:\\test\\sub", true},
+		{"大小写不同-相同路径", "C:\\Test", "C:\\test", true},
 
 		// 相对路径
 		{"相对路径", "test", "test\\sub", true},
@@ -805,6 +807,122 @@ func TestMatchDomain(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("MatchDomain(%q, %q) = %v, want %v",
 					tt.bindingHost, tt.certDomain, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNormalizeDomain 测试域名规范化
+func TestNormalizeDomain(t *testing.T) {
+	tests := []struct {
+		name   string
+		domain string
+		want   string
+	}{
+		// ASCII 直通
+		{"ASCII 小写", "example.com", "example.com"},
+		{"ASCII 大写转小写", "EXAMPLE.COM", "example.com"},
+		{"ASCII 混合大小写", "Www.Example.Com", "www.example.com"},
+		{"空字符串", "", ""},
+		{"带空格", " example.com ", "example.com"},
+
+		// 中文域名转 Punycode
+		{"中文域名", "中文.com", "xn--fiq228c.com"},
+		{"中文子域名", "www.中文.com", "www.xn--fiq228c.com"},
+		{"纯中文域名", "测试.中国", "xn--0zwm56d.xn--fiqs8s"},
+
+		// 通配符处理
+		{"通配符 ASCII", "*.example.com", "*.example.com"},
+		{"通配符中文", "*.中文.com", "*.xn--fiq228c.com"},
+
+		// 已编码 Punycode 直通
+		{"已编码 Punycode", "xn--fiq228c.com", "xn--fiq228c.com"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := NormalizeDomain(tt.domain)
+			if got != tt.want {
+				t.Errorf("NormalizeDomain(%q) = %q, want %q", tt.domain, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMatchDomain_IDN 测试 IDN 域名匹配
+func TestMatchDomain_IDN(t *testing.T) {
+	tests := []struct {
+		name        string
+		bindingHost string
+		certDomain  string
+		want        bool
+	}{
+		// Unicode ↔ Punycode 交叉匹配
+		{"Unicode 绑定 vs Punycode 证书", "中文.com", "xn--fiq228c.com", true},
+		{"Punycode 绑定 vs Unicode 证书", "xn--fiq228c.com", "中文.com", true},
+		{"两者都是 Unicode", "中文.com", "中文.com", true},
+		{"两者都是 Punycode", "xn--fiq228c.com", "xn--fiq228c.com", true},
+
+		// 中文通配符匹配
+		{"中文通配符匹配 Unicode", "www.中文.com", "*.中文.com", true},
+		{"中文通配符匹配 Punycode 绑定", "www.xn--fiq228c.com", "*.中文.com", true},
+		{"Punycode 通配符匹配 Unicode 绑定", "www.中文.com", "*.xn--fiq228c.com", true},
+
+		// 不同中文域名不匹配
+		{"不同中文域名", "中文.com", "测试.com", false},
+		{"中文多级子域名不匹配通配符", "a.b.中文.com", "*.中文.com", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MatchDomain(tt.bindingHost, tt.certDomain)
+			if got != tt.want {
+				t.Errorf("MatchDomain(%q, %q) = %v, want %v",
+					tt.bindingHost, tt.certDomain, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestValidateHostname_IDN 测试中文域名验证
+func TestValidateHostname_IDN(t *testing.T) {
+	tests := []struct {
+		name     string
+		hostname string
+		wantErr  bool
+	}{
+		{"中文域名", "中文.com", false},
+		{"中文子域名", "www.中文.com", false},
+		{"纯中文域名", "测试.中国", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateHostname(tt.hostname)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateHostname(%q) error = %v, wantErr %v", tt.hostname, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestValidateDomain_IDN 测试中文域名验证
+func TestValidateDomain_IDN(t *testing.T) {
+	tests := []struct {
+		name    string
+		domain  string
+		wantErr bool
+	}{
+		{"中文域名", "中文.com", false},
+		{"中文通配符", "*.中文.com", false},
+		{"中文子域名", "www.测试.中国", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateDomain(tt.domain)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateDomain(%q) error = %v, wantErr %v", tt.domain, err, tt.wantErr)
 			}
 		})
 	}

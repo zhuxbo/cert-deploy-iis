@@ -29,6 +29,9 @@ var (
 // EnableDebugMode 启用调试模式
 func EnableDebugMode() {
 	debugMode = true
+	if debugLogFile != nil {
+		debugLogFile.Close()
+	}
 	f, err := os.OpenFile("debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return
@@ -84,9 +87,7 @@ type AppWindow struct {
 	txtTaskLog      *ui.Edit
 	statusIndicator *StatusIndicator // 状态指示器
 
-	// 日志缓存
-	logLines   []string
-	logBuffer  *LogBuffer      // 新增: 日志缓存组件
+	logBuffer  *LogBuffer      // 日志缓存组件
 	toolbarBtns *ButtonGroup   // 新增: 工具栏按钮组
 }
 

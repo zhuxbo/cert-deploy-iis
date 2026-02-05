@@ -2,21 +2,38 @@ package util
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 	"unicode/utf8"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
 )
 
+// 默认命令超时
+var (
+	DefaultCmdTimeout        = 2 * time.Minute
+	DefaultPowerShellTimeout = 5 * time.Minute
+)
+
+// newCmdContext 创建带超时的命令，返回 cmd 和 cancel 函数
+// 调用方必须在命令执行完毕后调用 cancel 释放资源
+func newCmdContext(timeout time.Duration, name string, args ...string) (*exec.Cmd, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	cmd := exec.CommandContext(ctx, name, args...)
+	return cmd, cancel
+}
+
 // RunPowerShell 执行 PowerShell 命令（隐藏窗口，UTF-8 输出）
 func RunPowerShell(script string) (string, error) {
 	// 在脚本开头设置 UTF-8 输出编码
 	fullScript := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + script
 
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
+	cmd, cancel := newCmdContext(DefaultPowerShellTimeout, "powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
+	defer cancel()
 
 	// 隐藏窗口
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -36,7 +53,8 @@ func RunPowerShell(script string) (string, error) {
 func RunPowerShellCombined(script string) (string, error) {
 	fullScript := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + script
 
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
+	cmd, cancel := newCmdContext(DefaultPowerShellTimeout, "powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
+	defer cancel()
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,
@@ -55,7 +73,8 @@ func RunPowerShellCombined(script string) (string, error) {
 func RunPowerShellWithEnv(script string, env map[string]string) (string, error) {
 	fullScript := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + script
 
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
+	cmd, cancel := newCmdContext(DefaultPowerShellTimeout, "powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
+	defer cancel()
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,
@@ -78,7 +97,8 @@ func RunPowerShellWithEnv(script string, env map[string]string) (string, error) 
 
 // RunCmd 执行普通命令（隐藏窗口）
 func RunCmd(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+	cmd, cancel := newCmdContext(DefaultCmdTimeout, name, args...)
+	defer cancel()
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,
@@ -101,7 +121,8 @@ func RunCmd(name string, args ...string) (string, error) {
 
 // RunCmdCombined 执行普通命令，返回 stdout + stderr
 func RunCmdCombined(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+	cmd, cancel := newCmdContext(DefaultCmdTimeout, name, args...)
+	defer cancel()
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,
@@ -151,7 +172,8 @@ func containsChineseUTF8(data []byte) bool {
 // RunCmdDirect 直接执行命令（不经过 shell 解析，更安全）
 // 适用于执行外部程序时需要防止命令注入的场景
 func RunCmdDirect(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+	cmd, cancel := newCmdContext(DefaultCmdTimeout, name, args...)
+	defer cancel()
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,
@@ -174,7 +196,8 @@ func RunCmdDirect(name string, args ...string) (string, error) {
 
 // RunCmdDirectCombined 直接执行命令，返回 stdout + stderr
 func RunCmdDirectCombined(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+	cmd, cancel := newCmdContext(DefaultCmdTimeout, name, args...)
+	defer cancel()
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,

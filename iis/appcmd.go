@@ -3,6 +3,7 @@ package iis
 import (
 	"encoding/xml"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -107,7 +108,10 @@ func ScanSites() ([]SiteInfo, error) {
 
 	sites := make([]SiteInfo, 0, len(result.Sites))
 	for _, s := range result.Sites {
-		id, _ := strconv.ParseInt(s.ID, 10, 64)
+		id, parseErr := strconv.ParseInt(s.ID, 10, 64)
+		if parseErr != nil {
+			log.Printf("警告: 站点 %s 的 ID %q 解析失败: %v", s.Name, s.ID, parseErr)
+		}
 		site := SiteInfo{
 			ID:       id,
 			Name:     s.Name,
@@ -155,7 +159,11 @@ func parseBindings(bindingsStr string) []BindingInfo {
 			ip = "0.0.0.0"
 		}
 
-		port, _ := strconv.Atoi(colonParts[1])
+		port, parseErr := strconv.Atoi(colonParts[1])
+		if parseErr != nil {
+			log.Printf("警告: 绑定端口 %q 解析失败: %v", colonParts[1], parseErr)
+			continue
+		}
 
 		host := ""
 		if len(colonParts) > 2 {
@@ -472,11 +480,11 @@ func GetSitePhysicalPathByDomain(domain string) (string, string, error) {
 		return "", "", err
 	}
 
-	domain = strings.ToLower(strings.TrimSpace(domain))
+	normalizedDomain := util.NormalizeDomain(domain)
 
 	for _, site := range sites {
 		for _, binding := range site.Bindings {
-			if strings.EqualFold(binding.Host, domain) {
+			if util.NormalizeDomain(binding.Host) == normalizedDomain {
 				path, err := GetSitePhysicalPath(site.Name)
 				if err != nil {
 					continue

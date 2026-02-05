@@ -69,17 +69,16 @@ func BindCertificate(hostname string, port int, certHash string) error {
 	// 验证绑定是否真正成功
 	binding, verifyErr := GetBindingForHost(hostname, port)
 	if verifyErr != nil {
-		// 验证失败但命令成功，给出警告而非错误
 		if isSuccess {
 			log.Printf("警告: SNI 绑定 %s:%d 命令成功但验证查询失败: %v", hostname, port, verifyErr)
-			return nil // 命令报告成功，信任它
+			return fmt.Errorf("绑定命令成功但验证查询失败: %v", verifyErr)
 		}
 		return fmt.Errorf("绑定后验证失败: %v", verifyErr)
 	}
 	if binding == nil {
 		if isSuccess {
 			log.Printf("警告: SNI 绑定 %s:%d 命令成功但未找到绑定记录", hostname, port)
-			return nil // 命令报告成功，可能是解析问题
+			return fmt.Errorf("绑定命令成功但未找到绑定记录（可能是解析问题）")
 		}
 		return fmt.Errorf("绑定未生效: 未找到绑定记录，输出: %s", output)
 	}
@@ -141,14 +140,14 @@ func BindCertificateByIP(ip string, port int, certHash string) error {
 	if verifyErr != nil {
 		if isSuccess {
 			log.Printf("警告: IP 绑定 %s:%d 命令成功但验证查询失败: %v", ip, port, verifyErr)
-			return nil
+			return fmt.Errorf("绑定命令成功但验证查询失败: %v", verifyErr)
 		}
 		return fmt.Errorf("绑定后验证失败: %v", verifyErr)
 	}
 	if binding == nil {
 		if isSuccess {
 			log.Printf("警告: IP 绑定 %s:%d 命令成功但未找到绑定记录", ip, port)
-			return nil
+			return fmt.Errorf("绑定命令成功但未找到绑定记录（可能是解析问题）")
 		}
 		return fmt.Errorf("绑定未生效: 未找到绑定记录，输出: %s", output)
 	}

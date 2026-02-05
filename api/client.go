@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -61,9 +60,10 @@ func (c *CertData) GetDomainList() []string {
 
 // Client API 客户端
 type Client struct {
-	BaseURL    string
-	Token      string
-	HTTPClient *http.Client
+	BaseURL     string
+	Token       string
+	HTTPClient  *http.Client
+	insecureURL bool // 非 HTTPS 且非本地地址
 }
 
 // API 客户端配置常量
@@ -82,24 +82,30 @@ const (
 
 // NewClient 创建新的 API 客户端
 func NewClient(baseURL, token string) *Client {
-	// 检查 HTTPS 安全性
-	if baseURL != "" && !strings.HasPrefix(baseURL, "https://") &&
-		!strings.HasPrefix(baseURL, "http://localhost") &&
-		!strings.HasPrefix(baseURL, "http://127.0.0.1") {
-		log.Printf("警告: API 接口地址 %q 未使用 HTTPS，数据传输可能不安全", baseURL)
-	}
-
-	return &Client{
+	c := &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Token:   token,
 		HTTPClient: &http.Client{
 			Timeout: 120 * time.Second, // 兜底超时，实际超时由调用方 context 控制
 		},
 	}
+
+	// 检查 HTTPS 安全性：非 HTTPS 且非本地地址时标记为不安全
+	if baseURL != "" && !strings.HasPrefix(baseURL, "https://") &&
+		!strings.HasPrefix(baseURL, "http://localhost") &&
+		!strings.HasPrefix(baseURL, "http://127.0.0.1") {
+		c.insecureURL = true
+	}
+
+	return c
 }
 
 // doWithRetry 执行带重试的 HTTP 请求，支持 context 取消
 func (c *Client) doWithRetry(ctx context.Context, req *http.Request) (*http.Response, error) {
+	if c.insecureURL {
+		return nil, fmt.Errorf("API 地址必须使用 HTTPS（localhost/127.0.0.1 除外）: %s", c.BaseURL)
+	}
+
 	var lastErr error
 
 	// 将 context 添加到请求
@@ -118,7 +124,7 @@ func (c *Client) doWithRetry(ctx context.Context, req *http.Request) (*http.Resp
 			select {
 			case <-ctx.Done():
 				return nil, fmt.Errorf("请求被取消: %w", ctx.Err())
-			case <-time.After(time.Duration(attempt) * time.Second):
+			case <-time.After(time.Duration(1<<uint(attempt-1)) * time.Second):
 			}
 			// 重置 Body（如果有）
 			if req.GetBody != nil {
@@ -313,6 +319,8 @@ func selectBestCert(certs []CertData, targetDomain string) *CertData {
 		return nil
 	}
 
+	targetDomain = util.NormalizeDomain(targetDomain)
+
 	// 按优先级排序
 	sort.Slice(certs, func(i, j int) bool {
 		// 优先 active 状态
@@ -324,8 +332,8 @@ func selectBestCert(certs []CertData, targetDomain string) *CertData {
 		}
 
 		// 优先精确匹配（不含通配符）
-		iExact := certs[i].Domain == targetDomain || isExactMatch(certs[i].Domains, targetDomain)
-		jExact := certs[j].Domain == targetDomain || isExactMatch(certs[j].Domains, targetDomain)
+		iExact := util.NormalizeDomain(certs[i].Domain) == targetDomain || isExactMatch(certs[i].Domains, targetDomain)
+		jExact := util.NormalizeDomain(certs[j].Domain) == targetDomain || isExactMatch(certs[j].Domains, targetDomain)
 		if iExact && !jExact {
 			return true
 		}
@@ -368,7 +376,7 @@ func containsDomain(domains string, target string) bool {
 // isExactMatch 检查是否精确匹配（不使用通配符）
 func isExactMatch(domains string, target string) bool {
 	for _, d := range strings.Split(domains, ",") {
-		if strings.TrimSpace(d) == target {
+		if util.NormalizeDomain(d) == target {
 			return true
 		}
 	}

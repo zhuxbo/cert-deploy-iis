@@ -353,7 +353,7 @@ func tryUseLocalKey(d *Deployer, certData *api.CertData, orderID int) (*api.Cert
 // submitNewCSR 生成并提交新的 CSR
 func submitNewCSR(d *Deployer, certCfg *config.CertConfig) (*api.CertData, string, string, error) {
 	log.Printf("生成新的 CSR")
-	keyPEM, csrPEM, err := cert.GenerateCSR(certCfg.Domain, certCfg.Domains)
+	keyPEM, csrPEM, err := cert.GenerateCSR(certCfg.Domain)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("生成 CSR 失败: %w", err)
 	}
@@ -811,9 +811,7 @@ func isIPBinding(hostnamePort string) bool {
 	return true
 }
 
-// removeTempFile 清理临时文件
+// removeTempFile 清理临时文件（带重试）
 func removeTempFile(path string) {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		log.Printf("警告: 清理临时文件失败 %s: %v", path, err)
-	}
+	util.CleanupTempFileSync(path)
 }

@@ -106,10 +106,10 @@ func ShowInstallDialog(owner ui.Parent, onSuccess func()) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					if dlgCtx.Err() != nil {
-						return
-					}
 					dlg.UiThread(func() {
+						if dlgCtx.Err() != nil {
+							return
+						}
 						btnInstall.Hwnd().EnableWindow(true)
 						btnCancel.Hwnd().EnableWindow(true)
 						btnBrowse.Hwnd().EnableWindow(true)
@@ -124,6 +124,9 @@ func ShowInstallDialog(owner ui.Parent, onSuccess func()) {
 				return
 			}
 			dlg.UiThread(func() {
+				if dlgCtx.Err() != nil {
+					return
+				}
 				btnInstall.Hwnd().EnableWindow(true)
 				btnCancel.Hwnd().EnableWindow(true)
 				btnBrowse.Hwnd().EnableWindow(true)

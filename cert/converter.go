@@ -38,6 +38,7 @@ func PEMToPFX(certPEM, keyPEM, intermediatePEM, password string) (string, error)
 	if intermediatePEM != "" {
 		remaining := []byte(intermediatePEM)
 		certIndex := 0
+		parseErrors := 0
 		for {
 			block, rest := pem.Decode(remaining)
 			if block == nil {
@@ -49,11 +50,16 @@ func PEMToPFX(certPEM, keyPEM, intermediatePEM, password string) (string, error)
 				if err != nil {
 					// 记录警告但继续处理其他证书
 					log.Printf("警告: 无法解析证书链中的第 %d 个证书: %v\n", certIndex, err)
+					parseErrors++
 				} else {
 					caCerts = append(caCerts, caCert)
 				}
 			}
 			remaining = rest
+		}
+		// 如果有证书块但全部解析失败，返回错误
+		if certIndex > 0 && len(caCerts) == 0 {
+			return "", fmt.Errorf("证书链中的 %d 个证书全部解析失败", certIndex)
 		}
 	}
 

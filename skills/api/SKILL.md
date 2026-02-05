@@ -52,6 +52,8 @@ GET /api/deploy/cert?order_id=123
 
 ### 提交 CSR（本地私钥模式）
 
+CSR 只需要 CommonName（主域名），不需要 SAN。服务端根据订单配置自动添加 SAN。
+
 ```
 POST /api/deploy/csr
 Content-Type: application/json

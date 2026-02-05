@@ -372,10 +372,10 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					if dlgCtx.Err() != nil {
-						return
-					}
 					dlg.UiThread(func() {
+						if dlgCtx.Err() != nil {
+							return
+						}
 						btnFetch.Hwnd().EnableWindow(true)
 						txtDetail.SetText(fmt.Sprintf("操作异常: %v", r))
 					})
@@ -392,6 +392,9 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 
 			// 在 UI 线程更新
 			dlg.UiThread(func() {
+				if dlgCtx.Err() != nil {
+					return
+				}
 				btnFetch.Hwnd().EnableWindow(true)
 
 				if err != nil {
@@ -486,10 +489,10 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					if dlgCtx.Err() != nil {
-						return
-					}
 					dlg.UiThread(func() {
+						if dlgCtx.Err() != nil {
+							return
+						}
 						btnInstall.Hwnd().EnableWindow(true)
 						btnFetch.Hwnd().EnableWindow(true)
 						btnSelectAll.Hwnd().EnableWindow(true)
@@ -519,6 +522,9 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 					break
 				}
 				dlg.UiThread(func() {
+					if dlgCtx.Err() != nil {
+						return
+					}
 					txtDetail.SetText(fmt.Sprintf("正在处理 (%d/%d): %s", i+1, len(certsToInstall), certToInstall.Domain))
 				})
 
@@ -712,6 +718,9 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 				return
 			}
 			dlg.UiThread(func() {
+				if dlgCtx.Err() != nil {
+					return
+				}
 				btnInstall.Hwnd().EnableWindow(true)
 				btnFetch.Hwnd().EnableWindow(true)
 				btnSelectAll.Hwnd().EnableWindow(true)

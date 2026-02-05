@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"golang.org/x/net/idna"
 )
 
 // ===== PowerShell 转义 =====
@@ -25,6 +27,40 @@ func EscapePowerShellDoubleQuoteString(s string) string {
 	s = strings.ReplaceAll(s, "$", "`$")
 	s = strings.ReplaceAll(s, "\"", "`\"")
 	return s
+}
+
+// ===== 域名规范化 =====
+
+// isASCII 检查字符串是否全部为 ASCII 字符
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] > 127 {
+			return false
+		}
+	}
+	return true
+}
+
+// NormalizeDomain 将域名规范化为小写 ASCII (Punycode) 形式
+// 纯 ASCII 直通；非 ASCII 尝试转 Punycode，失败则 fallback 到小写原串
+func NormalizeDomain(domain string) string {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return domain
+	}
+	if isASCII(domain) {
+		return strings.ToLower(domain)
+	}
+
+	prefix, rest := "", domain
+	if strings.HasPrefix(domain, "*.") {
+		prefix, rest = "*.", domain[2:]
+	}
+	ascii, err := idna.Lookup.ToASCII(rest)
+	if err != nil {
+		return strings.ToLower(domain)
+	}
+	return prefix + strings.ToLower(ascii)
 }
 
 // ===== 验证函数 =====
@@ -66,10 +102,11 @@ func ValidateHostname(hostname string) error {
 	if hostname == "" {
 		return fmt.Errorf("主机名不能为空")
 	}
-	if len(hostname) > 253 {
+	normalized := NormalizeDomain(hostname)
+	if len(normalized) > 253 {
 		return fmt.Errorf("主机名长度不能超过253个字符")
 	}
-	if !hostnameRegex.MatchString(hostname) {
+	if !hostnameRegex.MatchString(normalized) {
 		return fmt.Errorf("主机名格式无效")
 	}
 	return nil
@@ -83,10 +120,11 @@ func ValidateDomain(domain string) error {
 	if domain == "" {
 		return fmt.Errorf("域名不能为空")
 	}
-	if len(domain) > 253 {
+	normalized := NormalizeDomain(domain)
+	if len(normalized) > 253 {
 		return fmt.Errorf("域名长度不能超过253个字符")
 	}
-	if !domainRegex.MatchString(domain) {
+	if !domainRegex.MatchString(normalized) {
 		return fmt.Errorf("域名格式无效")
 	}
 	return nil
@@ -329,8 +367,8 @@ func evalSymlinksPartial(path string) (string, error) {
 //   - 通配符匹配: *.example.com 匹配 www.example.com, api.example.com
 //   - 通配符只匹配单级子域名: *.example.com 不匹配 a.b.example.com
 func MatchDomain(bindingHost, certDomain string) bool {
-	bindingHost = strings.ToLower(strings.TrimSpace(bindingHost))
-	certDomain = strings.ToLower(strings.TrimSpace(certDomain))
+	bindingHost = NormalizeDomain(bindingHost)
+	certDomain = NormalizeDomain(certDomain)
 
 	if bindingHost == "" || certDomain == "" {
 		return false
@@ -344,6 +382,10 @@ func MatchDomain(bindingHost, certDomain string) bool {
 	// 通配符证书匹配: *.example.com 匹配 www.example.com
 	if strings.HasPrefix(certDomain, "*.") {
 		suffix := certDomain[1:] // ".example.com"
+		// 校验通配符格式：后缀至少有 ".x" 且不含连续点
+		if len(suffix) < 2 || strings.Contains(suffix[1:], "..") {
+			return false
+		}
 		if strings.HasSuffix(bindingHost, suffix) {
 			// 确保只有一级子域名 (www.example.com 匹配，但 a.b.example.com 不匹配)
 			prefix := bindingHost[:len(bindingHost)-len(suffix)]
@@ -373,7 +415,11 @@ func IsPathWithinBase(basePath, targetPath string) bool {
 		absBase += string(filepath.Separator)
 	}
 
+	// Windows 路径大小写不敏感
+	absBaseLower := strings.ToLower(absBase)
+	absTargetLower := strings.ToLower(absTarget)
+
 	// 检查目标路径是否以基础路径为前缀
-	return strings.HasPrefix(absTarget+string(filepath.Separator), absBase) ||
-		strings.HasPrefix(absTarget, absBase)
+	return strings.HasPrefix(absTargetLower+string(filepath.Separator), absBaseLower) ||
+		strings.HasPrefix(absTargetLower, absBaseLower)
 }

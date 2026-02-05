@@ -336,10 +336,10 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					if dlgCtx.Err() != nil {
-						return
-					}
 					dlg.UiThread(func() {
+						if dlgCtx.Err() != nil {
+							return
+						}
 						btnBind.Hwnd().EnableWindow(true)
 						btnCancel.Hwnd().EnableWindow(true)
 						txtCertInfo.SetText(fmt.Sprintf("操作异常: %v", r))
@@ -364,6 +364,9 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 				// 创建 https 绑定（启用 SNI）
 				if err := iis.AddHttpsBinding(siteName, domain, port); err != nil {
 					dlg.UiThread(func() {
+						if dlgCtx.Err() != nil {
+							return
+						}
 						btnBind.Hwnd().EnableWindow(true)
 						btnCancel.Hwnd().EnableWindow(true)
 						txtCertInfo.SetText(fmt.Sprintf("创建 HTTPS 绑定失败: %v", err))
@@ -377,6 +380,9 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 			err := iis.BindCertificate(domain, port, selectedCert.Thumbprint)
 
 			dlg.UiThread(func() {
+				if dlgCtx.Err() != nil {
+					return
+				}
 				btnBind.Hwnd().EnableWindow(true)
 				btnCancel.Hwnd().EnableWindow(true)
 
