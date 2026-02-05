@@ -266,6 +266,18 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 - 仅对**网络错误**重试，业务错误不重试
 - 重试间隔递增：1秒、2秒、3秒
 
+### HTTPS 强制
+
+`api.NewClient` 会检查 BaseURL 是否使用 HTTPS。非 HTTPS 且非 localhost 的 URL 会输出警告日志。生产环境应始终使用 HTTPS 传输 Token 和证书私钥。
+
+### 响应体大小限制
+
+所有 HTTP 响应读取使用 `io.LimitReader` 限制为 10MB（`maxResponseSize`），防止异常响应耗尽内存。超过限制时 `io.ReadAll` 会截断。
+
+### sendCallback goroutine 生命周期
+
+`deploy/auto.go` 中的 `sendCallback` 在 goroutine 中执行回调请求。`Deployer` 使用 `callbackWg sync.WaitGroup` 跟踪所有活跃的回调 goroutine。`CheckAndDeploy` 在统计结果前调用 `deployer.WaitCallbacks()` 确保所有回调完成，避免 `-auto` 模式下 `os.Exit` 截断未完成的回调。
+
 ### 定时任务重试（延迟）
 
 定时任务每 `CheckInterval`（默认 6）小时运行一次，失败的证书下次自动重试：

@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"sync"
 
 	"sslctlw/api"
 	"sslctlw/cert"
@@ -65,9 +66,15 @@ type OrderStore interface {
 
 // Deployer 部署器，聚合所有依赖
 type Deployer struct {
-	Converter CertConverter
-	Installer CertInstaller
-	Binder    IISBinder
-	Client    APIClient
-	Store     OrderStore
+	Converter  CertConverter
+	Installer  CertInstaller
+	Binder     IISBinder
+	Client     APIClient
+	Store      OrderStore
+	callbackWg sync.WaitGroup
+}
+
+// WaitCallbacks 等待所有回调 goroutine 完成
+func (d *Deployer) WaitCallbacks() {
+	d.callbackWg.Wait()
 }

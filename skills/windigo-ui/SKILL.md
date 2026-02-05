@@ -405,6 +405,74 @@ cmbDomain.On().CbnEditChange(func() {
 
 **适用场景**: 仅影响 `CBS_DROPDOWN`（可编辑）样式。`CBS_DROPDOWNLIST`（只读）通常不受影响，但建议也使用索引方式。
 
+### Dialog 级别 Context 取消模式
+
+对话框中启动的 goroutine 必须在对话框关闭时终止，否则会在关闭后继续运行（访问已释放的 UI 控件导致崩溃）。
+
+```go
+func ShowDialog(owner ui.Parent) {
+    dlgCtx, dlgCancel := context.WithCancel(context.Background())
+
+    dlg := ui.NewModal(owner, ...)
+
+    dlg.On().WmDestroy(func() {
+        dlgCancel() // 关闭时取消所有 goroutine
+    })
+
+    go func() {
+        result, err := apiClient.Fetch(dlgCtx, ...) // 传入 dlgCtx
+        if dlgCtx.Err() != nil {
+            return // 对话框已关闭，不再更新 UI
+        }
+        dlg.UiThread(func() {
+            // 更新 UI...
+        })
+    }()
+
+    dlg.ShowModal()
+}
+```
+
+**适用文件**: `dialogs_api.go`、`dialogs_bind.go`、`dialogs_install.go`
+
+### SetOnUpdate(nil) 必须使用 defer
+
+暂停后台任务回调后，必须用 `defer` 确保恢复，否则异常路径会永久禁用回调：
+
+```go
+// ✓ 正确：使用 withPausedTaskUpdate 辅助方法
+func (app *AppWindow) withPausedTaskUpdate(fn func()) {
+    app.bgTask.SetOnUpdate(nil)
+    defer app.bgTask.SetOnUpdate(func() {
+        app.mainWnd.UiThread(func() { app.updateTaskStatus() })
+    })
+    fn()
+}
+
+// ❌ 错误：手动恢复，对话框 panic 时不会执行
+app.bgTask.SetOnUpdate(nil)
+ShowDialog(...)
+app.bgTask.SetOnUpdate(callback) // 如果 ShowDialog panic，这行不执行
+```
+
+### LogBuffer 线程安全要求
+
+`LogBuffer` 的 `Append`/`Clear`/`GetLines` 等方法会被 goroutine 和 UI 线程同时调用，必须使用 `sync.Mutex` 保护。注意 UI 操作（`SendMessage`）必须放在锁外，避免死锁。
+
+### doLoadDataAsync onComplete 回调契约
+
+`doLoadDataAsync` 的 `onComplete` 回调**必须在所有路径上调用**，包括 `loading == true` 提前返回的路径。否则调用方的按钮可能永久禁用：
+
+```go
+if app.loading {
+    app.loadingMu.Unlock()
+    if onComplete != nil {
+        onComplete() // 即使跳过加载，也要通知调用方
+    }
+    return
+}
+```
+
 ### ComboBox 下拉列表刷新问题
 
 **问题**: 动态更新 ComboBox 项目后，下拉列表可能显示旧内容。

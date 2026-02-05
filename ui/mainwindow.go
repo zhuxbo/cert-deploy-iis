@@ -374,35 +374,23 @@ func RunApp() {
 	})
 
 	app.btnBind.On().BnClicked(func() {
-		app.bgTask.SetOnUpdate(nil)
-		app.onBindCert()
-		app.bgTask.SetOnUpdate(func() {
-			app.mainWnd.UiThread(func() {
-				app.updateTaskStatus()
-			})
+		app.withPausedTaskUpdate(func() {
+			app.onBindCert()
 		})
 	})
 
 	app.btnInstall.On().BnClicked(func() {
-		app.bgTask.SetOnUpdate(nil)
-		ShowInstallDialog(app.mainWnd, func() {
-			app.doLoadDataAsync(nil)
-		})
-		app.bgTask.SetOnUpdate(func() {
-			app.mainWnd.UiThread(func() {
-				app.updateTaskStatus()
+		app.withPausedTaskUpdate(func() {
+			ShowInstallDialog(app.mainWnd, func() {
+				app.doLoadDataAsync(nil)
 			})
 		})
 	})
 
 	app.btnAPI.On().BnClicked(func() {
-		app.bgTask.SetOnUpdate(nil)
-		ShowAPIDialog(app.mainWnd, func() {
-			app.doLoadDataAsync(nil)
-		})
-		app.bgTask.SetOnUpdate(func() {
-			app.mainWnd.UiThread(func() {
-				app.updateTaskStatus()
+		app.withPausedTaskUpdate(func() {
+			ShowAPIDialog(app.mainWnd, func() {
+				app.doLoadDataAsync(nil)
 			})
 		})
 	})
@@ -417,17 +405,13 @@ func RunApp() {
 	})
 
 	app.btnConfig.On().BnClicked(func() {
-		app.bgTask.SetOnUpdate(nil)
-		ShowCertManagerDialog(app.mainWnd, func() {
-			go func() {
-				app.mainWnd.UiThread(func() {
-					app.appendTaskLog("配置已更新")
-				})
-			}()
-		})
-		app.bgTask.SetOnUpdate(func() {
-			app.mainWnd.UiThread(func() {
-				app.updateTaskStatus()
+		app.withPausedTaskUpdate(func() {
+			ShowCertManagerDialog(app.mainWnd, func() {
+				go func() {
+					app.mainWnd.UiThread(func() {
+						app.appendTaskLog("配置已更新")
+					})
+				}()
 			})
 		})
 	})
@@ -627,6 +611,9 @@ func (app *AppWindow) doLoadDataAsync(onComplete func()) {
 	app.loadingMu.Lock()
 	if app.loading {
 		app.loadingMu.Unlock()
+		if onComplete != nil {
+			onComplete()
+		}
 		return
 	}
 	app.loading = true
@@ -789,6 +776,17 @@ func (app *AppWindow) onBindCert() {
 	ShowBindDialog(app.mainWnd, &site, certs, func() {
 		app.doLoadDataAsync(nil)
 	})
+}
+
+// withPausedTaskUpdate 暂停后台任务更新回调执行 fn，结束后用 defer 恢复
+func (app *AppWindow) withPausedTaskUpdate(fn func()) {
+	app.bgTask.SetOnUpdate(nil)
+	defer app.bgTask.SetOnUpdate(func() {
+		app.mainWnd.UiThread(func() {
+			app.updateTaskStatus()
+		})
+	})
+	fn()
 }
 
 // setStatus 设置状态栏

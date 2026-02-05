@@ -33,6 +33,7 @@ type BackgroundTask struct {
 	interval     time.Duration
 	running      bool
 	stopChan     chan struct{}
+	resetChan    chan struct{} // 通知 runLoop 重建 ticker
 	onUpdate     func()
 	results      []deploy.Result
 	checkEnabled bool
@@ -45,6 +46,7 @@ func NewBackgroundTask() *BackgroundTask {
 		message:      "未启动",
 		interval:     1 * time.Hour, // 默认每小时检查一次
 		stopChan:     make(chan struct{}),
+		resetChan:    make(chan struct{}, 1),
 		checkEnabled: false,
 	}
 }
@@ -52,10 +54,18 @@ func NewBackgroundTask() *BackgroundTask {
 // SetInterval 设置检查间隔
 func (t *BackgroundTask) SetInterval(d time.Duration) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.interval = d
-	if t.running {
+	running := t.running
+	if running {
 		t.nextRun = time.Now().Add(d)
+	}
+	t.mu.Unlock()
+	// 通知 runLoop 重建 ticker
+	if running {
+		select {
+		case t.resetChan <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -76,6 +86,7 @@ func (t *BackgroundTask) Start() {
 	t.running = true
 	t.checkEnabled = true
 	t.stopChan = make(chan struct{})
+	t.resetChan = make(chan struct{}, 1)
 	t.mu.Unlock()
 
 	go t.runLoop()
@@ -167,6 +178,13 @@ func (t *BackgroundTask) runLoop() {
 		select {
 		case <-t.stopChan:
 			return
+		case <-t.resetChan:
+			// 间隔已变更，重建 ticker
+			ticker.Stop()
+			t.mu.Lock()
+			interval = t.interval
+			t.mu.Unlock()
+			ticker = time.NewTicker(interval)
 		case <-ticker.C:
 			t.doCheck()
 			t.mu.Lock()

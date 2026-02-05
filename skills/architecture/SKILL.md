@@ -234,6 +234,32 @@ result, err := client.GetCertByOrderID(ctx, orderID)
 | cert/ | 文件系统测试 | 70%+ |
 | config/ | 序列化/反序列化测试 | 90%+ |
 
+## 已知限制和设计假设
+
+### 单实例假设
+
+程序假设同一时间只有一个实例运行，没有进程互斥锁。多实例并发运行可能导致：
+- 配置文件读写冲突
+- 证书重复安装
+- 回调重复发送
+
+### Windows 文件权限位
+
+`os.WriteFile(path, data, 0600)` 中的 Unix 权限位（0600）在 Windows 上**不生效**。Windows 使用 ACL 控制文件访问权限。当前代码中的权限位仅作为文档用途，实际安全依赖 Windows NTFS 权限。
+
+### GetWildcardName 域名处理规则
+
+`GetWildcardName` 只替换第一级子域名为通配符：
+- `www.example.com` → `*.example.com`
+- `a.b.example.com` → `*.b.example.com`（不是 `*.example.com`）
+- `example.com`（根域名）→ `*.example.com`
+
+这意味着 IIS7 兼容模式下，多级子域名的证书会绑定到其上一级通配符，而非根域名通配符。
+
+### DPAPI 加密绑定到当前用户/机器
+
+私钥使用 Windows DPAPI 加密存储。DPAPI 加密数据绑定到当前 Windows 用户和机器，迁移到其他用户或机器后无法解密。
+
 ## 扩展点
 
 1. **新验证方法**: 修改 `config.ValidateValidationMethod()` 和 API 调用

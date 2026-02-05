@@ -199,8 +199,8 @@ func AddHttpsBinding(siteName, host string, port int) error {
 	return nil
 }
 
-// AddHttpsBindingWithCert 添加 HTTPS 绑定并绑定证书（启用 SNI）
-func AddHttpsBindingWithCert(siteName, host string, port int, certHash string) error {
+// AddHttpsBindingIfNotExists 添加 HTTPS 绑定（启用 SNI），若已存在则忽略
+func AddHttpsBindingIfNotExists(siteName, host string, port int) error {
 	if port == 0 {
 		port = 443
 	}
@@ -209,13 +209,6 @@ func AddHttpsBindingWithCert(siteName, host string, port int, certHash string) e
 	if err := validateBindingParams(siteName, host, port); err != nil {
 		return err
 	}
-	if err := util.ValidateThumbprint(certHash); err != nil {
-		return fmt.Errorf("无效的证书指纹: %w", err)
-	}
-
-	// 清理证书哈希
-	certHash = strings.ReplaceAll(certHash, " ", "")
-	certHash = strings.ReplaceAll(certHash, "-", "")
 
 	bindingInfo := fmt.Sprintf("*:%d:%s", port, host)
 	// sslFlags=1 表示启用 SNI

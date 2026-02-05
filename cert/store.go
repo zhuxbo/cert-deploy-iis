@@ -3,12 +3,37 @@ package cert
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"time"
 
 	"sslctlw/util"
 )
+
+// parseTimeMultiFormat 尝试多种日期格式解析时间字符串
+// 非英文 Windows 的 PowerShell 可能输出不同的日期格式
+func parseTimeMultiFormat(value string) time.Time {
+	formats := []string{
+		"2006-01-02 15:04:05",       // ISO 格式 (PowerShell ToString 指定)
+		"2006/01/02 15:04:05",       // 斜杠格式
+		"01/02/2006 15:04:05",       // US 格式 (MM/DD/YYYY)
+		"02/01/2006 15:04:05",       // GB 格式 (DD/MM/YYYY)
+		"1/2/2006 15:04:05",         // US 短格式
+		"2/1/2006 15:04:05",         // GB 短格式
+		"1/2/2006 3:04:05 PM",       // US 12小时格式
+		"2006-01-02T15:04:05",       // ISO 8601
+		"2006-01-02T15:04:05Z07:00", // ISO 8601 with timezone
+		"2006-01-02",                // 仅日期
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, value); err == nil {
+			return t
+		}
+	}
+	log.Printf("警告: 无法解析日期 %q，所有格式均失败", value)
+	return time.Time{}
+}
 
 // CertInfo 证书信息
 type CertInfo struct {
@@ -95,9 +120,9 @@ func parseCertList(output string) []CertInfo {
 			case "Issuer":
 				current.Issuer = value
 			case "NotBefore":
-				current.NotBefore, _ = time.Parse("2006-01-02 15:04:05", value)
+				current.NotBefore = parseTimeMultiFormat(value)
 			case "NotAfter":
-				current.NotAfter, _ = time.Parse("2006-01-02 15:04:05", value)
+				current.NotAfter = parseTimeMultiFormat(value)
 			case "FriendlyName":
 				current.FriendlyName = value
 			case "HasPrivateKey":
@@ -232,7 +257,7 @@ if ($cert) {
     Remove-Item -Path $cert.PSPath -Force
     Write-Output "OK"
 } else {
-    Write-Error "证书不存在"
+    throw "证书不存在"
 }
 `, escapedThumbprint)
 
@@ -287,12 +312,17 @@ func GetWildcardName(domain string) string {
 		return domain
 	}
 
-	// 提取根域名并转为通配符格式
-	parts := strings.Split(domain, ".")
-	if len(parts) >= 2 {
-		// 取最后两部分作为根域名
-		rootDomain := strings.Join(parts[len(parts)-2:], ".")
-		return "*." + rootDomain
+	// 去掉第一级子域名，替换为通配符
+	// a.b.example.com → *.b.example.com
+	// www.example.com → *.example.com
+	// example.com     → *.example.com（根域名保持完整）
+	parts := strings.SplitN(domain, ".", 2)
+	if len(parts) == 2 && parts[1] != "" {
+		// 根域名（只有两部分如 example.com）→ *.example.com
+		if !strings.Contains(parts[1], ".") {
+			return "*." + domain
+		}
+		return "*." + parts[1]
 	}
 
 	return domain

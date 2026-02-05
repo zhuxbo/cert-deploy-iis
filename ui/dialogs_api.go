@@ -55,6 +55,9 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 	)
 	logDebug("ShowAPIDialog: modal created")
 
+	// 对话框级 context，用于取消 goroutine
+	dlgCtx, dlgCancel := context.WithCancel(context.Background())
+
 	// 证书数据列表
 	var certDataList []api.CertData
 
@@ -369,6 +372,9 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
+					if dlgCtx.Err() != nil {
+						return
+					}
 					dlg.UiThread(func() {
 						btnFetch.Hwnd().EnableWindow(true)
 						txtDetail.SetText(fmt.Sprintf("操作异常: %v", r))
@@ -376,9 +382,13 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 				}
 			}()
 
-			ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
+			ctx, cancel := context.WithTimeout(dlgCtx, api.APIQueryTimeout)
 			certList, err := client.ListCertsByDomain(ctx, domain)
 			cancel()
+
+			if dlgCtx.Err() != nil {
+				return
+			}
 
 			// 在 UI 线程更新
 			dlg.UiThread(func() {
@@ -476,6 +486,9 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
+					if dlgCtx.Err() != nil {
+						return
+					}
 					dlg.UiThread(func() {
 						btnInstall.Hwnd().EnableWindow(true)
 						btnFetch.Hwnd().EnableWindow(true)
@@ -492,7 +505,19 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 			failCount := 0
 			manualBindCount := 0 // 需要手动绑定的数量
 
+			// 预加载配置（避免循环内重复加载）
+			var loopCfg *config.Config
+			loopCfgDirty := false
+			if autoUpdateEnabled {
+				loopCfg, _ = config.Load()
+				if loopCfg == nil {
+					loopCfg = config.DefaultConfig()
+				}
+			}
 			for i, certToInstall := range certsToInstall {
+				if dlgCtx.Err() != nil {
+					break
+				}
 				dlg.UiThread(func() {
 					txtDetail.SetText(fmt.Sprintf("正在处理 (%d/%d): %s", i+1, len(certsToInstall), certToInstall.Domain))
 				})
@@ -508,12 +533,8 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 						existingThumbprint = existingCert.Thumbprint
 
 						// 即使证书已存在，也检查并保存自动部署配置
-						if autoUpdateEnabled {
-							cfg, _ := config.Load()
-							if cfg == nil {
-								cfg = config.DefaultConfig()
-							}
-							existing := cfg.GetCertificateByOrderID(certToInstall.OrderID)
+						if autoUpdateEnabled && loopCfg != nil {
+							existing := loopCfg.GetCertificateByOrderID(certToInstall.OrderID)
 							if existing == nil {
 								certConfig := config.CertConfig{
 									OrderID:          certToInstall.OrderID,
@@ -527,8 +548,8 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 									AutoBindMode:     true,
 									BindRules:        []config.BindRule{},
 								}
-								cfg.AddCertificate(certConfig)
-								cfg.Save()
+								loopCfg.AddCertificate(certConfig)
+								loopCfgDirty = true
 								results = append(results, fmt.Sprintf("  → 已添加自动更新配置"))
 							}
 						}
@@ -660,18 +681,10 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 					results = append(results, fmt.Sprintf("  ! 未找到匹配的 IIS 绑定，请手动绑定"))
 					manualBindCount++
 				}
-
 				// 如果勾选了"自动更新"，保存证书配置
-				if autoUpdateEnabled {
-					cfg, _ := config.Load()
-					if cfg == nil {
-						cfg = config.DefaultConfig()
-					}
-
-					// 检查是否已存在（按 OrderID）
-					existing := cfg.GetCertificateByOrderID(certToInstall.OrderID)
+				if autoUpdateEnabled && loopCfg != nil {
+					existing := loopCfg.GetCertificateByOrderID(certToInstall.OrderID)
 					if existing == nil {
-						// 创建证书配置
 						certConfig := config.CertConfig{
 							OrderID:          certToInstall.OrderID,
 							Domain:           certToInstall.Domain,
@@ -684,12 +697,20 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 							AutoBindMode:     true,
 							BindRules:        []config.BindRule{},
 						}
-						cfg.AddCertificate(certConfig)
-						cfg.Save()
+						loopCfg.AddCertificate(certConfig)
+						loopCfgDirty = true
 					}
 				}
 			}
 
+
+			// 循环结束后统一保存配置
+			if loopCfgDirty && loopCfg != nil {
+				loopCfg.Save()
+			}
+			if dlgCtx.Err() != nil {
+				return
+			}
 			dlg.UiThread(func() {
 				btnInstall.Hwnd().EnableWindow(true)
 				btnFetch.Hwnd().EnableWindow(true)
@@ -736,6 +757,11 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 	// 取消按钮事件
 	btnCancel.On().BnClicked(func() {
 		dlg.Hwnd().SendMessage(co.WM_CLOSE, 0, 0)
+	})
+
+	// 对话框关闭时取消所有 goroutine
+	dlg.On().WmDestroy(func() {
+		dlgCancel()
 	})
 
 	dlg.ShowModal()

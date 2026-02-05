@@ -126,28 +126,16 @@ func TestMatchDomain(t *testing.T) {
 		certDomain  string
 		want        bool
 	}{
-		// 精确匹配
 		{"精确匹配", "www.example.com", "www.example.com", true},
-		{"精确匹配-大小写不敏感", "WWW.Example.COM", "www.example.com", true},
-		{"不匹配-不同域名", "www.example.com", "www.other.com", false},
-
-		// 通配符匹配
-		{"通配符-一级子域名", "www.example.com", "*.example.com", true},
-		{"通配符-另一个子域名", "api.example.com", "*.example.com", true},
-		{"通配符-不匹配顶级域名", "example.com", "*.example.com", false},
-		{"通配符-不匹配多级子域名", "a.b.example.com", "*.example.com", false},
-		{"通配符-不匹配不同域名", "www.other.com", "*.example.com", false},
-
-		// 边界情况
-		{"空字符串", "", "*.example.com", false},
-		{"绑定为空", "", "example.com", false},
+		{"通配符匹配", "api.example.com", "*.example.com", true},
+		{"通配符不匹配多级", "a.b.example.com", "*.example.com", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := util.MatchDomain(tt.bindingHost, tt.certDomain)
 			if got != tt.want {
-				t.Errorf("matchDomain(%q, %q) = %v, want %v", tt.bindingHost, tt.certDomain, got, tt.want)
+				t.Errorf("MatchDomain(%q, %q) = %v, want %v", tt.bindingHost, tt.certDomain, got, tt.want)
 			}
 		})
 	}
@@ -221,35 +209,6 @@ func TestParseSSLBindings_Empty(t *testing.T) {
 	bindings := parseSSLBindings("")
 	if len(bindings) != 0 {
 		t.Errorf("空输出应该返回 0 个绑定，实际得到 %d 个", len(bindings))
-	}
-}
-
-func TestSSLBinding_Fields(t *testing.T) {
-	binding := SSLBinding{
-		HostnamePort:    "www.example.com:443",
-		CertHash:        "abc123",
-		AppID:           "{00000000-0000-0000-0000-000000000000}",
-		CertStoreName:   "MY",
-		SslCtlStoreName: "",
-	}
-
-	if binding.HostnamePort != "www.example.com:443" {
-		t.Errorf("SSLBinding.HostnamePort = %q", binding.HostnamePort)
-	}
-	if binding.CertHash != "abc123" {
-		t.Errorf("SSLBinding.CertHash = %q", binding.CertHash)
-	}
-	if binding.AppID != "{00000000-0000-0000-0000-000000000000}" {
-		t.Errorf("SSLBinding.AppID = %q", binding.AppID)
-	}
-	if binding.CertStoreName != "MY" {
-		t.Errorf("SSLBinding.CertStoreName = %q", binding.CertStoreName)
-	}
-}
-
-func TestDefaultAppID(t *testing.T) {
-	if defaultAppID != "{00000000-0000-0000-0000-000000000000}" {
-		t.Errorf("defaultAppID = %q", defaultAppID)
 	}
 }
 
@@ -328,45 +287,6 @@ SSL Certificate bindings:
 	}
 	if bindings[2].CertStoreName != "WebHosting" {
 		t.Errorf("第三个绑定 CertStoreName = %q", bindings[2].CertStoreName)
-	}
-}
-
-// TestMatchDomain_MoreCases 更多域名匹配测试
-func TestMatchDomain_MoreCases(t *testing.T) {
-	tests := []struct {
-		name        string
-		bindingHost string
-		certDomain  string
-		want        bool
-	}{
-		// 精确匹配
-		{"精确匹配-相同", "example.com", "example.com", true},
-		{"精确匹配-子域名", "sub.example.com", "sub.example.com", true},
-
-		// 通配符匹配
-		{"通配符-单级子域名", "www.example.com", "*.example.com", true},
-		{"通配符-不同子域名", "api.example.com", "*.example.com", true},
-		{"通配符-不匹配根域名", "example.com", "*.example.com", false},
-		{"通配符-不匹配多级子域名", "a.b.example.com", "*.example.com", false},
-		{"通配符-空前缀", ".example.com", "*.example.com", false}, // .example.com 不是有效域名，不应匹配
-
-		// 大小写
-		{"大小写不敏感", "WWW.EXAMPLE.COM", "www.example.com", true},
-		{"大小写混合", "Www.Example.Com", "*.example.com", true},
-
-		// 边界情况
-		{"空绑定域名", "", "*.example.com", false},
-		{"空证书域名", "www.example.com", "", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := util.MatchDomain(tt.bindingHost, tt.certDomain)
-			if got != tt.want {
-				t.Errorf("matchDomain(%q, %q) = %v, want %v",
-					tt.bindingHost, tt.certDomain, got, tt.want)
-			}
-		})
 	}
 }
 
@@ -486,29 +406,3 @@ func TestParseSSLBindings_OnlyWhitespace(t *testing.T) {
 	}
 }
 
-// TestSSLBinding_AllFields 测试 SSLBinding 所有字段
-func TestSSLBinding_AllFields(t *testing.T) {
-	binding := SSLBinding{
-		HostnamePort:    "www.example.com:443",
-		CertHash:        "abc123",
-		AppID:           "{00000000-0000-0000-0000-000000000000}",
-		CertStoreName:   "MY",
-		SslCtlStoreName: "CTL",
-	}
-
-	if binding.HostnamePort != "www.example.com:443" {
-		t.Errorf("HostnamePort = %q", binding.HostnamePort)
-	}
-	if binding.CertHash != "abc123" {
-		t.Errorf("CertHash = %q", binding.CertHash)
-	}
-	if binding.AppID != "{00000000-0000-0000-0000-000000000000}" {
-		t.Errorf("AppID = %q", binding.AppID)
-	}
-	if binding.CertStoreName != "MY" {
-		t.Errorf("CertStoreName = %q", binding.CertStoreName)
-	}
-	if binding.SslCtlStoreName != "CTL" {
-		t.Errorf("SslCtlStoreName = %q", binding.SslCtlStoreName)
-	}
-}

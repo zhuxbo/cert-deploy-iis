@@ -4,39 +4,6 @@ import (
 	"fmt"
 )
 
-// 命令执行 mock 函数类型
-type RunCmdFunc func(name string, args ...string) (string, error)
-type RunCmdCombinedFunc func(name string, args ...string) (string, error)
-
-// MockRunCmd 用于测试的命令执行 mock
-var (
-	mockRunCmdFunc         RunCmdFunc
-	mockRunCmdCombinedFunc RunCmdCombinedFunc
-	mockEnabled            bool
-)
-
-// EnableMock 启用 mock 模式
-func EnableMock() {
-	mockEnabled = true
-}
-
-// DisableMock 禁用 mock 模式
-func DisableMock() {
-	mockEnabled = false
-	mockRunCmdFunc = nil
-	mockRunCmdCombinedFunc = nil
-}
-
-// SetMockRunCmd 设置 RunCmd 的 mock 函数
-func SetMockRunCmd(fn RunCmdFunc) {
-	mockRunCmdFunc = fn
-}
-
-// SetMockRunCmdCombined 设置 RunCmdCombined 的 mock 函数
-func SetMockRunCmdCombined(fn RunCmdCombinedFunc) {
-	mockRunCmdCombinedFunc = fn
-}
-
 // 测试用的 appcmd 输出
 const testAppcmdSiteListXML = `<?xml version="1.0" encoding="UTF-8"?>
 <appcmd>

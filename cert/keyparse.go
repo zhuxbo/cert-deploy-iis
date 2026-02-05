@@ -46,15 +46,19 @@ func parsePrivateKeyBlock(block *pem.Block, password string) (interface{}, error
 	}
 
 	der := block.Bytes
-	if x509.IsEncryptedPEMBlock(block) {
+	// 检测旧式 PEM 加密（通过 DEK-Info header，避免使用已弃用的 x509.IsEncryptedPEMBlock）
+	// 旧式加密格式（Proc-Type: 4,ENCRYPTED）与 PKCS#8 加密格式不同，
+	// 必须用 x509.DecryptPEMBlock 解密后再按 block.Type 解析
+	if _, hasEncryption := block.Headers["DEK-Info"]; hasEncryption {
 		if password == "" {
 			return nil, fmt.Errorf("私钥已加密，缺少密码")
 		}
-		var err error
-		der, err = x509.DecryptPEMBlock(block, []byte(password))
+		//nolint:staticcheck // x509.DecryptPEMBlock 已弃用但无替代，旧式 PEM 加密仍需要它
+		decrypted, err := x509.DecryptPEMBlock(block, []byte(password))
 		if err != nil {
 			return nil, fmt.Errorf("私钥解密失败: %w", err)
 		}
+		der = decrypted
 	}
 
 	switch block.Type {

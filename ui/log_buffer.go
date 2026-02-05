@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -14,6 +15,7 @@ import (
 
 // LogBuffer 日志缓存组件
 type LogBuffer struct {
+	mu       sync.Mutex
 	lines    []string
 	maxLines int
 	edit     *ui.Edit
@@ -40,12 +42,21 @@ func (lb *LogBuffer) Append(text string) {
 
 // AppendRaw 追加原始日志行（不带时间戳）
 func (lb *LogBuffer) AppendRaw(text string) {
+	lb.mu.Lock()
 	lb.lines = append(lb.lines, text)
-
-	if len(lb.lines) > lb.maxLines {
-		// 超过最大行数，重建整个文本
+	needRebuild := len(lb.lines) > lb.maxLines
+	if needRebuild {
 		lb.lines = lb.lines[len(lb.lines)-lb.maxLines:]
-		lb.edit.SetText(strings.Join(lb.lines, "\r\n") + "\r\n")
+	}
+	var fullText string
+	if needRebuild {
+		fullText = strings.Join(lb.lines, "\r\n") + "\r\n"
+	}
+	lb.mu.Unlock()
+
+	// UI 操作放在锁外避免死锁
+	if needRebuild {
+		lb.edit.SetText(fullText)
 	} else {
 		// 追加新行到末尾
 		textLen, _ := lb.edit.Hwnd().SendMessage(co.WM_GETTEXTLENGTH, 0, 0)
@@ -61,12 +72,16 @@ func (lb *LogBuffer) AppendRaw(text string) {
 
 // Clear 清空日志
 func (lb *LogBuffer) Clear() {
+	lb.mu.Lock()
 	lb.lines = lb.lines[:0]
+	lb.mu.Unlock()
 	lb.edit.SetText("")
 }
 
 // GetLines 获取所有日志行
 func (lb *LogBuffer) GetLines() []string {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
 	result := make([]string, len(lb.lines))
 	copy(result, lb.lines)
 	return result
@@ -74,17 +89,26 @@ func (lb *LogBuffer) GetLines() []string {
 
 // LineCount 返回当前日志行数
 func (lb *LogBuffer) LineCount() int {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
 	return len(lb.lines)
 }
 
 // SetMaxLines 设置最大行数
 func (lb *LogBuffer) SetMaxLines(max int) {
-	if max > 0 {
-		lb.maxLines = max
-		// 如果当前行数超过新限制，截断
-		if len(lb.lines) > max {
-			lb.lines = lb.lines[len(lb.lines)-max:]
-			lb.edit.SetText(strings.Join(lb.lines, "\r\n") + "\r\n")
-		}
+	if max <= 0 {
+		return
+	}
+	lb.mu.Lock()
+	lb.maxLines = max
+	var fullText string
+	needRebuild := len(lb.lines) > max
+	if needRebuild {
+		lb.lines = lb.lines[len(lb.lines)-max:]
+		fullText = strings.Join(lb.lines, "\r\n") + "\r\n"
+	}
+	lb.mu.Unlock()
+	if needRebuild {
+		lb.edit.SetText(fullText)
 	}
 }

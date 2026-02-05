@@ -3,6 +3,7 @@ package iis
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 
@@ -70,12 +71,14 @@ func BindCertificate(hostname string, port int, certHash string) error {
 	if verifyErr != nil {
 		// 验证失败但命令成功，给出警告而非错误
 		if isSuccess {
+			log.Printf("警告: SNI 绑定 %s:%d 命令成功但验证查询失败: %v", hostname, port, verifyErr)
 			return nil // 命令报告成功，信任它
 		}
 		return fmt.Errorf("绑定后验证失败: %v", verifyErr)
 	}
 	if binding == nil {
 		if isSuccess {
+			log.Printf("警告: SNI 绑定 %s:%d 命令成功但未找到绑定记录", hostname, port)
 			return nil // 命令报告成功，可能是解析问题
 		}
 		return fmt.Errorf("绑定未生效: 未找到绑定记录，输出: %s", output)
@@ -137,12 +140,14 @@ func BindCertificateByIP(ip string, port int, certHash string) error {
 	binding, verifyErr := GetBindingForIP(ip, port)
 	if verifyErr != nil {
 		if isSuccess {
+			log.Printf("警告: IP 绑定 %s:%d 命令成功但验证查询失败: %v", ip, port, verifyErr)
 			return nil
 		}
 		return fmt.Errorf("绑定后验证失败: %v", verifyErr)
 	}
 	if binding == nil {
 		if isSuccess {
+			log.Printf("警告: IP 绑定 %s:%d 命令成功但未找到绑定记录", ip, port)
 			return nil
 		}
 		return fmt.Errorf("绑定未生效: 未找到绑定记录，输出: %s", output)
@@ -329,6 +334,28 @@ func GetBindingForIP(ip string, port int) (*SSLBinding, error) {
 	return nil, nil // 未找到
 }
 
+// findBindingsFromList 从绑定列表中查找匹配指定域名的 SNI 绑定（纯函数，便于测试）
+func findBindingsFromList(bindings []SSLBinding, domains []string) map[string]*SSLBinding {
+	result := make(map[string]*SSLBinding)
+	for i, b := range bindings {
+		if b.IsIPBinding {
+			continue
+		}
+
+		host := ParseHostFromBinding(b.HostnamePort)
+		if host == "" {
+			continue
+		}
+		for _, certDomain := range domains {
+			if util.MatchDomain(host, certDomain) {
+				result[host] = &bindings[i]
+				break
+			}
+		}
+	}
+	return result
+}
+
 // FindBindingsForDomains 查找与指定域名匹配的 SNI 绑定
 // 返回: 绑定域名 -> SSLBinding 映射
 // 注意: 只匹配 SNI 绑定（Hostname:port），忽略 IP 绑定（空主机名）
@@ -338,28 +365,7 @@ func FindBindingsForDomains(domains []string) (map[string]*SSLBinding, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	result := make(map[string]*SSLBinding)
-	for i, b := range bindings {
-		// 忽略 IP 绑定（空主机名），只处理 SNI 绑定
-		if b.IsIPBinding {
-			continue
-		}
-
-		// SNI 绑定：按域名匹配
-		host := ParseHostFromBinding(b.HostnamePort)
-		if host == "" {
-			continue
-		}
-		// 检查绑定域名是否匹配任意证书域名（支持通配符匹配）
-		for _, certDomain := range domains {
-			if util.MatchDomain(host, certDomain) {
-				result[host] = &bindings[i]
-				break
-			}
-		}
-	}
-	return result, nil
+	return findBindingsFromList(bindings, domains), nil
 }
 
 // ParseHostFromBinding 从 "hostname:port" 提取主机名

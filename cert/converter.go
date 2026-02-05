@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -47,7 +48,7 @@ func PEMToPFX(certPEM, keyPEM, intermediatePEM, password string) (string, error)
 				caCert, err := x509.ParseCertificate(block.Bytes)
 				if err != nil {
 					// 记录警告但继续处理其他证书
-					fmt.Printf("警告: 无法解析证书链中的第 %d 个证书: %v\n", certIndex, err)
+					log.Printf("警告: 无法解析证书链中的第 %d 个证书: %v\n", certIndex, err)
 				} else {
 					caCerts = append(caCerts, caCert)
 				}
@@ -81,7 +82,7 @@ func generateRandomString(length int) string {
 	if _, err := rand.Read(b); err != nil {
 		// rand.Read 失败极为罕见（仅当系统熵源不可用时）
 		// 结合时间戳和进程 ID 确保唯一性，但安全性降低
-		fmt.Printf("警告: 加密随机数生成失败: %v，使用降级方案\n", err)
+		log.Printf("警告: 加密随机数生成失败: %v，使用降级方案\n", err)
 		return fmt.Sprintf("%d_%d", time.Now().UnixNano(), os.Getpid())
 	}
 	for i := range b {

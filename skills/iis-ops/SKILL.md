@@ -104,6 +104,28 @@ type SSLBinding struct {
 Get-ChildItem Cert:\LocalMachine\My
 ```
 
+## 注意事项
+
+### netsh 绑定验证
+
+`BindCertificate` 和 `BindCertificateByIP` 在执行绑定命令后会查询验证绑定是否生效。如果命令输出报告成功但验证查询失败，会记录警告日志但返回成功（信任命令输出）。这种情况可能由解析问题或权限差异导致。
+
+### AddHttpsBindingIfNotExists 只添加绑定不绑证书
+
+`AddHttpsBindingIfNotExists`（原 `AddHttpsBindingWithCert`）通过 appcmd 添加 HTTPS 绑定到 IIS 站点，但**不绑定证书**。证书绑定需要通过 netsh 单独完成。函数已移除未使用的 `certHash` 参数。
+
+### GetWildcardName 多级子域名处理
+
+`GetWildcardName` 将域名转为通配符格式，用于 IIS7 兼容模式。行为：
+
+| 输入 | 输出 | 说明 |
+|------|------|------|
+| `*.example.com` | `*.example.com` | 已是通配符，不变 |
+| `www.example.com` | `*.example.com` | 替换第一级子域名 |
+| `a.b.example.com` | `*.b.example.com` | 只替换第一级 |
+| `example.com` | `*.example.com` | 根域名加通配符前缀 |
+| `localhost` | `localhost` | 无点号，不变 |
+
 ## 常见问题
 
 **绑定失败**:

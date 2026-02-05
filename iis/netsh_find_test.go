@@ -4,327 +4,141 @@ import (
 	"testing"
 )
 
-// TestFindBindingsForDomains_NoBindings 测试无绑定情况
-func TestFindBindingsForDomains_NoBindings(t *testing.T) {
-	// 调用 FindBindingsForDomains
-	// 这会实际调用 ListSSLBindings
-	bindings, err := FindBindingsForDomains([]string{"nonexistent.domain.com"})
-	if err != nil {
-		// 可能会因为 netsh 调用失败而出错，这是正常的
-		t.Logf("FindBindingsForDomains 返回错误: %v (可能是预期的)", err)
-		return
+// TestFindBindingsFromList_Basic 测试基本域名匹配
+func TestFindBindingsFromList_Basic(t *testing.T) {
+	bindings := []SSLBinding{
+		{HostnamePort: "www.example.com:443", CertHash: "aaa", IsIPBinding: false},
+		{HostnamePort: "api.example.com:443", CertHash: "bbb", IsIPBinding: false},
+		{HostnamePort: "other.com:443", CertHash: "ccc", IsIPBinding: false},
 	}
 
-	// 对于不存在的域名，应该返回空映射
-	if len(bindings) > 0 {
-		// 只有在域名恰好匹配时才会有结果
-		t.Logf("找到 %d 个绑定（可能是系统已有绑定）", len(bindings))
-	}
-}
+	result := findBindingsFromList(bindings, []string{"*.example.com"})
 
-// TestFindBindingsForDomains_EmptyDomains 测试空域名列表
-func TestFindBindingsForDomains_EmptyDomains(t *testing.T) {
-	bindings, err := FindBindingsForDomains([]string{})
-	if err != nil {
-		t.Logf("空域名列表返回错误: %v", err)
-		return
+	if len(result) != 2 {
+		t.Fatalf("期望匹配 2 个绑定，得到 %d 个", len(result))
 	}
-
-	// 空域名列表应该返回空映射
-	if len(bindings) != 0 {
-		t.Errorf("空域名列表应该返回空映射，得到 %d 个绑定", len(bindings))
+	if result["www.example.com"] == nil {
+		t.Error("应该匹配 www.example.com")
+	}
+	if result["api.example.com"] == nil {
+		t.Error("应该匹配 api.example.com")
+	}
+	if result["other.com"] != nil {
+		t.Error("不应匹配 other.com")
 	}
 }
 
-// TestFindBindingsForDomains_NilDomains 测试 nil 域名列表
-func TestFindBindingsForDomains_NilDomains(t *testing.T) {
-	bindings, err := FindBindingsForDomains(nil)
-	if err != nil {
-		t.Logf("nil 域名列表返回错误: %v", err)
-		return
+// TestFindBindingsFromList_IgnoresIPBindings 测试忽略 IP 绑定
+func TestFindBindingsFromList_IgnoresIPBindings(t *testing.T) {
+	bindings := []SSLBinding{
+		{HostnamePort: "0.0.0.0:443", CertHash: "aaa", IsIPBinding: true},
+		{HostnamePort: "www.example.com:443", CertHash: "bbb", IsIPBinding: false},
 	}
 
-	// nil 域名列表应该返回空映射
-	if len(bindings) != 0 {
-		t.Errorf("nil 域名列表应该返回空映射，得到 %d 个绑定", len(bindings))
+	result := findBindingsFromList(bindings, []string{"*.example.com"})
+
+	if len(result) != 1 {
+		t.Fatalf("期望匹配 1 个绑定，得到 %d 个", len(result))
 	}
-}
-
-// TestFindBindingsForDomains_MultipleDomains 测试多域名搜索
-func TestFindBindingsForDomains_MultipleDomains(t *testing.T) {
-	domains := []string{
-		"www.example.com",
-		"api.example.com",
-		"*.example.com",
-	}
-
-	bindings, err := FindBindingsForDomains(domains)
-	if err != nil {
-		t.Logf("多域名搜索返回错误: %v", err)
-		return
-	}
-
-	// 结果取决于系统状态
-	t.Logf("多域名搜索找到 %d 个匹配绑定", len(bindings))
-}
-
-// TestListSSLBindings_Basic 测试基本列出功能
-func TestListSSLBindings_Basic(t *testing.T) {
-	bindings, err := ListSSLBindings()
-	if err != nil {
-		t.Logf("ListSSLBindings 返回错误: %v", err)
-		return
-	}
-
-	t.Logf("系统中有 %d 个 SSL 绑定", len(bindings))
-	for i, b := range bindings {
-		t.Logf("绑定 %d: %s (IsIP: %v)", i+1, b.HostnamePort, b.IsIPBinding)
+	if result["www.example.com"] == nil {
+		t.Error("应该匹配 www.example.com")
 	}
 }
 
-// TestGetBindingForHost_NotFound 测试未找到绑定
-func TestGetBindingForHost_NotFound(t *testing.T) {
-	binding, err := GetBindingForHost("nonexistent.example.com", 443)
-	if err != nil {
-		t.Logf("GetBindingForHost 返回错误: %v", err)
-		return
+// TestFindBindingsFromList_EmptyDomains 测试空域名列表
+func TestFindBindingsFromList_EmptyDomains(t *testing.T) {
+	bindings := []SSLBinding{
+		{HostnamePort: "www.example.com:443", CertHash: "aaa", IsIPBinding: false},
 	}
 
-	// 未找到时应该返回 nil
-	if binding != nil {
-		t.Logf("找到绑定: %s (可能是系统已有)", binding.HostnamePort)
-	}
-}
-
-// TestGetBindingForIP_NotFound 测试未找到 IP 绑定
-func TestGetBindingForIP_NotFound(t *testing.T) {
-	// 使用一个不太可能存在的 IP
-	binding, err := GetBindingForIP("192.168.255.255", 8443)
-	if err != nil {
-		t.Logf("GetBindingForIP 返回错误: %v", err)
-		return
+	result := findBindingsFromList(bindings, []string{})
+	if len(result) != 0 {
+		t.Errorf("空域名列表应该返回空映射，得到 %d 个", len(result))
 	}
 
-	if binding != nil {
-		t.Logf("找到绑定: %s (意外)", binding.HostnamePort)
+	result = findBindingsFromList(bindings, nil)
+	if len(result) != 0 {
+		t.Errorf("nil 域名列表应该返回空映射，得到 %d 个", len(result))
 	}
 }
 
-// TestParseSSLBindings_IPvsHostname 测试区分 IP 和主机名绑定
-func TestParseSSLBindings_IPvsHostname(t *testing.T) {
-	output := `
-SSL Certificate bindings:
--------------------------
-
-    IP:port                      : 0.0.0.0:443
-    Certificate Hash             : abc123def456789012345678901234567890abcd
-    Application ID               : {00000000-0000-0000-0000-000000000000}
-    Certificate Store Name       : MY
-
-    Hostname:port                : www.example.com:443
-    Certificate Hash             : def456789012345678901234567890abcdef1234
-    Application ID               : {00000000-0000-0000-0000-000000000000}
-    Certificate Store Name       : MY
-`
-	bindings := parseSSLBindings(output)
-
-	if len(bindings) != 2 {
-		t.Fatalf("期望 2 个绑定，得到 %d 个", len(bindings))
+// TestFindBindingsFromList_EmptyBindings 测试空绑定列表
+func TestFindBindingsFromList_EmptyBindings(t *testing.T) {
+	result := findBindingsFromList([]SSLBinding{}, []string{"*.example.com"})
+	if len(result) != 0 {
+		t.Errorf("空绑定列表应该返回空映射，得到 %d 个", len(result))
 	}
 
-	// 第一个应该是 IP 绑定
-	if !bindings[0].IsIPBinding {
-		t.Error("第一个绑定应该是 IP 绑定")
-	}
-	if bindings[0].HostnamePort != "0.0.0.0:443" {
-		t.Errorf("第一个绑定 HostnamePort = %q", bindings[0].HostnamePort)
-	}
-
-	// 第二个应该是主机名绑定
-	if bindings[1].IsIPBinding {
-		t.Error("第二个绑定不应该是 IP 绑定")
-	}
-	if bindings[1].HostnamePort != "www.example.com:443" {
-		t.Errorf("第二个绑定 HostnamePort = %q", bindings[1].HostnamePort)
+	result = findBindingsFromList(nil, []string{"*.example.com"})
+	if len(result) != 0 {
+		t.Errorf("nil 绑定列表应该返回空映射，得到 %d 个", len(result))
 	}
 }
 
-// TestParseSSLBindings_OnlyIPBindings 测试只有 IP 绑定
-func TestParseSSLBindings_OnlyIPBindings(t *testing.T) {
-	output := `
-SSL Certificate bindings:
--------------------------
-
-    IP:port                      : 0.0.0.0:443
-    Certificate Hash             : abc123def456789012345678901234567890abcd
-    Application ID               : {00000000-0000-0000-0000-000000000000}
-    Certificate Store Name       : MY
-
-    IP:port                      : 192.168.1.1:8443
-    Certificate Hash             : def456789012345678901234567890abcdef1234
-    Application ID               : {11111111-1111-1111-1111-111111111111}
-    Certificate Store Name       : MY
-`
-	bindings := parseSSLBindings(output)
-
-	if len(bindings) != 2 {
-		t.Fatalf("期望 2 个绑定，得到 %d 个", len(bindings))
+// TestFindBindingsFromList_ExactMatch 测试精确域名匹配
+func TestFindBindingsFromList_ExactMatch(t *testing.T) {
+	bindings := []SSLBinding{
+		{HostnamePort: "www.example.com:443", CertHash: "aaa", IsIPBinding: false},
+		{HostnamePort: "api.example.com:443", CertHash: "bbb", IsIPBinding: false},
 	}
 
-	for i, b := range bindings {
-		if !b.IsIPBinding {
-			t.Errorf("绑定 %d 应该是 IP 绑定", i+1)
-		}
+	result := findBindingsFromList(bindings, []string{"www.example.com"})
+
+	if len(result) != 1 {
+		t.Fatalf("期望匹配 1 个绑定，得到 %d 个", len(result))
+	}
+	if result["www.example.com"] == nil {
+		t.Error("应该精确匹配 www.example.com")
 	}
 }
 
-// TestParseSSLBindings_OnlyHostnameBindings 测试只有主机名绑定
-func TestParseSSLBindings_OnlyHostnameBindings(t *testing.T) {
-	output := `
-SSL Certificate bindings:
--------------------------
-
-    Hostname:port                : www.example.com:443
-    Certificate Hash             : abc123def456789012345678901234567890abcd
-    Application ID               : {00000000-0000-0000-0000-000000000000}
-    Certificate Store Name       : MY
-
-    Hostname:port                : api.example.com:443
-    Certificate Hash             : def456789012345678901234567890abcdef1234
-    Application ID               : {11111111-1111-1111-1111-111111111111}
-    Certificate Store Name       : MY
-`
-	bindings := parseSSLBindings(output)
-
-	if len(bindings) != 2 {
-		t.Fatalf("期望 2 个绑定，得到 %d 个", len(bindings))
+// TestFindBindingsFromList_MultipleDomains 测试多域名搜索
+func TestFindBindingsFromList_MultipleDomains(t *testing.T) {
+	bindings := []SSLBinding{
+		{HostnamePort: "www.example.com:443", CertHash: "aaa", IsIPBinding: false},
+		{HostnamePort: "api.other.com:443", CertHash: "bbb", IsIPBinding: false},
+		{HostnamePort: "admin.third.com:443", CertHash: "ccc", IsIPBinding: false},
 	}
 
-	for i, b := range bindings {
-		if b.IsIPBinding {
-			t.Errorf("绑定 %d 不应该是 IP 绑定", i+1)
-		}
+	result := findBindingsFromList(bindings, []string{"www.example.com", "*.other.com"})
+
+	if len(result) != 2 {
+		t.Fatalf("期望匹配 2 个绑定，得到 %d 个", len(result))
+	}
+	if result["www.example.com"] == nil {
+		t.Error("应该匹配 www.example.com")
+	}
+	if result["api.other.com"] == nil {
+		t.Error("应该匹配 api.other.com")
 	}
 }
 
-// TestFindBindingsForDomains_IgnoresIPBindings 测试忽略 IP 绑定
-func TestFindBindingsForDomains_IgnoresIPBindings(t *testing.T) {
-	// 这个测试验证 FindBindingsForDomains 只返回 SNI 绑定
-	// 由于依赖系统状态，我们只能验证逻辑
-	domains := []string{"www.example.com"}
-
-	bindings, err := FindBindingsForDomains(domains)
-	if err != nil {
-		t.Logf("FindBindingsForDomains 返回错误: %v", err)
-		return
+// TestFindBindingsFromList_WildcardNoMultiLevel 测试通配符不匹配多级子域名
+func TestFindBindingsFromList_WildcardNoMultiLevel(t *testing.T) {
+	bindings := []SSLBinding{
+		{HostnamePort: "a.b.example.com:443", CertHash: "aaa", IsIPBinding: false},
+		{HostnamePort: "example.com:443", CertHash: "bbb", IsIPBinding: false},
 	}
 
-	// 检查返回的绑定中不包含 IP 绑定
-	for host, binding := range bindings {
-		if binding.IsIPBinding {
-			t.Errorf("返回了 IP 绑定: %s", host)
-		}
+	result := findBindingsFromList(bindings, []string{"*.example.com"})
+
+	if len(result) != 0 {
+		t.Errorf("通配符不应匹配多级子域名或根域名，得到 %d 个匹配", len(result))
 	}
 }
 
-// TestMockHelpers 测试 mock 辅助函数
-func TestMockHelpers(t *testing.T) {
-	t.Run("MockSiteInfo", func(t *testing.T) {
-		bindings := []BindingInfo{
-			MockBindingInfo("https", "*", 443, "www.example.com", true),
-		}
-		site := MockSiteInfo(1, "Test Site", "Started", bindings)
-
-		if site.ID != 1 {
-			t.Errorf("ID = %d", site.ID)
-		}
-		if site.Name != "Test Site" {
-			t.Errorf("Name = %q", site.Name)
-		}
-		if site.State != "Started" {
-			t.Errorf("State = %q", site.State)
-		}
-		if len(site.Bindings) != 1 {
-			t.Errorf("Bindings 数量 = %d", len(site.Bindings))
-		}
-	})
-
-	t.Run("MockBindingInfo", func(t *testing.T) {
-		binding := MockBindingInfo("https", "*", 443, "www.example.com", true)
-
-		if binding.Protocol != "https" {
-			t.Errorf("Protocol = %q", binding.Protocol)
-		}
-		if binding.IP != "*" {
-			t.Errorf("IP = %q", binding.IP)
-		}
-		if binding.Port != 443 {
-			t.Errorf("Port = %d", binding.Port)
-		}
-		if binding.Host != "www.example.com" {
-			t.Errorf("Host = %q", binding.Host)
-		}
-		if !binding.HasSSL {
-			t.Error("HasSSL 应该为 true")
-		}
-	})
-
-	t.Run("MockSSLBinding", func(t *testing.T) {
-		binding := MockSSLBinding("www.example.com:443", TestThumbprint, "{00000000}", "MY")
-
-		if binding.HostnamePort != "www.example.com:443" {
-			t.Errorf("HostnamePort = %q", binding.HostnamePort)
-		}
-		if binding.CertHash != TestThumbprint {
-			t.Errorf("CertHash = %q", binding.CertHash)
-		}
-		if binding.AppID != "{00000000}" {
-			t.Errorf("AppID = %q", binding.AppID)
-		}
-		if binding.CertStoreName != "MY" {
-			t.Errorf("CertStoreName = %q", binding.CertStoreName)
-		}
-	})
-
-	t.Run("MockError", func(t *testing.T) {
-		err := MockError("test error")
-		if err == nil {
-			t.Error("MockError 应该返回错误")
-		}
-		if err.Error() != "test error" {
-			t.Errorf("错误消息 = %q", err.Error())
-		}
-	})
-}
-
-// TestTestConstants 测试测试常量
-func TestTestConstants(t *testing.T) {
-	if TestThumbprint == "" {
-		t.Error("TestThumbprint 不应为空")
+// TestFindBindingsFromList_NonStandardPort 测试非标准端口
+func TestFindBindingsFromList_NonStandardPort(t *testing.T) {
+	bindings := []SSLBinding{
+		{HostnamePort: "www.example.com:8443", CertHash: "aaa", IsIPBinding: false},
 	}
-	if TestThumbprintLower == "" {
-		t.Error("TestThumbprintLower 不应为空")
-	}
-	if TestDomain == "" {
-		t.Error("TestDomain 不应为空")
-	}
-	if TestWildcardDomain == "" {
-		t.Error("TestWildcardDomain 不应为空")
-	}
-	if TestPort != 443 {
-		t.Errorf("TestPort = %d, want 443", TestPort)
-	}
-	if TestSiteName == "" {
-		t.Error("TestSiteName 不应为空")
-	}
-}
 
-// TestMockMode 测试 mock 模式开关
-func TestMockMode(t *testing.T) {
-	// 测试启用和禁用 mock 模式
-	EnableMock()
-	// 验证 mock 已启用（内部状态）
+	result := findBindingsFromList(bindings, []string{"*.example.com"})
 
-	DisableMock()
-	// 验证 mock 已禁用
+	if len(result) != 1 {
+		t.Fatalf("期望匹配 1 个绑定，得到 %d 个", len(result))
+	}
+	if result["www.example.com"] == nil {
+		t.Error("应该匹配 www.example.com（不同端口）")
+	}
 }

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -34,6 +35,9 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 			Size(ui.Dpi(500, 450)).
 			Style(co.WS_CAPTION|co.WS_SYSMENU|co.WS_POPUP|co.WS_VISIBLE),
 	)
+
+	// 对话框级 context，用于取消 goroutine
+	dlgCtx, dlgCancel := context.WithCancel(context.Background())
 
 	// 域名标签
 	ui.NewStatic(dlg,
@@ -332,6 +336,9 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
+					if dlgCtx.Err() != nil {
+						return
+					}
 					dlg.UiThread(func() {
 						btnBind.Hwnd().EnableWindow(true)
 						btnCancel.Hwnd().EnableWindow(true)
@@ -339,6 +346,10 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 					})
 				}
 			}()
+
+			if dlgCtx.Err() != nil {
+				return
+			}
 
 			// 检查站点是否有对应的 https 绑定，如果没有则创建
 			hasBinding := false
@@ -409,6 +420,11 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 		updateCurrentBinding(domain)
 
 		return 0
+	})
+
+	// 对话框关闭时取消所有 goroutine
+	dlg.On().WmDestroy(func() {
+		dlgCancel()
 	})
 
 	dlg.ShowModal()

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 
 	"sslctlw/cert"
@@ -19,6 +20,9 @@ func ShowInstallDialog(owner ui.Parent, onSuccess func()) {
 			Style(co.WS_CAPTION|co.WS_SYSMENU|co.WS_POPUP|co.WS_VISIBLE),
 	)
 	logDebug("ShowInstallDialog: modal created")
+
+	// 对话框级 context，用于取消 goroutine
+	dlgCtx, dlgCancel := context.WithCancel(context.Background())
 
 	// PFX 文件标签
 	ui.NewStatic(dlg,
@@ -102,6 +106,9 @@ func ShowInstallDialog(owner ui.Parent, onSuccess func()) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
+					if dlgCtx.Err() != nil {
+						return
+					}
 					dlg.UiThread(func() {
 						btnInstall.Hwnd().EnableWindow(true)
 						btnCancel.Hwnd().EnableWindow(true)
@@ -113,6 +120,9 @@ func ShowInstallDialog(owner ui.Parent, onSuccess func()) {
 
 			result, err := cert.InstallPFX(pfxPath, password)
 
+			if dlgCtx.Err() != nil {
+				return
+			}
 			dlg.UiThread(func() {
 				btnInstall.Hwnd().EnableWindow(true)
 				btnCancel.Hwnd().EnableWindow(true)
@@ -146,6 +156,11 @@ func ShowInstallDialog(owner ui.Parent, onSuccess func()) {
 	dlg.On().WmCreate(func(_ ui.WmCreate) int {
 		logDebug("ShowInstallDialog WmCreate: initializing")
 		return 0
+	})
+
+	// 对话框关闭时取消所有 goroutine
+	dlg.On().WmDestroy(func() {
+		dlgCancel()
 	})
 
 	logDebug("ShowInstallDialog: calling ShowModal")

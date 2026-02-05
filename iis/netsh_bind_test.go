@@ -241,36 +241,3 @@ func TestGetBindingForIP_DefaultValues(t *testing.T) {
 	_ = err
 }
 
-// TestSSLBinding_IsIPBinding 测试 IsIPBinding 字段
-func TestSSLBinding_IsIPBinding(t *testing.T) {
-	tests := []struct {
-		name        string
-		binding     SSLBinding
-		wantIsIP    bool
-	}{
-		{
-			name: "IP 绑定",
-			binding: SSLBinding{
-				HostnamePort: "0.0.0.0:443",
-				IsIPBinding:  true,
-			},
-			wantIsIP: true,
-		},
-		{
-			name: "SNI 绑定",
-			binding: SSLBinding{
-				HostnamePort: "www.example.com:443",
-				IsIPBinding:  false,
-			},
-			wantIsIP: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.binding.IsIPBinding != tt.wantIsIP {
-				t.Errorf("IsIPBinding = %v, want %v", tt.binding.IsIPBinding, tt.wantIsIP)
-			}
-		})
-	}
-}

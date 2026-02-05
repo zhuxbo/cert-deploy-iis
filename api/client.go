@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -75,23 +76,24 @@ const (
 	APISubmitTimeout = 60 * time.Second
 	// APICallbackTimeout 回调类 API 超时时间
 	APICallbackTimeout = 60 * time.Second
+	// maxResponseSize 响应体大小限制 (10MB)
+	maxResponseSize = 10 << 20
 )
 
 // NewClient 创建新的 API 客户端
 func NewClient(baseURL, token string) *Client {
-	maxTimeout := APIQueryTimeout
-	if APISubmitTimeout > maxTimeout {
-		maxTimeout = APISubmitTimeout
-	}
-	if APICallbackTimeout > maxTimeout {
-		maxTimeout = APICallbackTimeout
+	// 检查 HTTPS 安全性
+	if baseURL != "" && !strings.HasPrefix(baseURL, "https://") &&
+		!strings.HasPrefix(baseURL, "http://localhost") &&
+		!strings.HasPrefix(baseURL, "http://127.0.0.1") {
+		log.Printf("警告: API 接口地址 %q 未使用 HTTPS，数据传输可能不安全", baseURL)
 	}
 
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Token:   token,
 		HTTPClient: &http.Client{
-			Timeout: maxTimeout,
+			Timeout: 120 * time.Second, // 兜底超时，实际超时由调用方 context 控制
 		},
 	}
 }
@@ -158,10 +160,10 @@ func (e *APIError) Error() string {
 		return e.Message
 	}
 	if e.RawBody != "" {
-		// 截取前 200 字符
+		// 截取前 200 字节（UTF-8 安全）
 		body := e.RawBody
 		if len(body) > 200 {
-			body = body[:200] + "..."
+			body = util.TruncateString(body, 200) + "..."
 		}
 		return fmt.Sprintf("HTTP %d: %s", e.StatusCode, body)
 	}
@@ -281,7 +283,7 @@ func (c *Client) ListCertsByDomain(ctx context.Context, domain string) ([]CertDa
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("读取响应失败: %w", err)
 	}
@@ -407,7 +409,7 @@ func (c *Client) Callback(ctx context.Context, req *CallbackRequest) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 		if err != nil {
 			return fmt.Errorf("回调失败: HTTP %d (读取响应失败: %v)", resp.StatusCode, err)
 		}
@@ -458,7 +460,7 @@ func (c *Client) SubmitCSR(ctx context.Context, req *CSRRequest) (*CSRResponse, 
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("读取响应失败: %w", err)
 	}
@@ -509,7 +511,7 @@ func (c *Client) GetCertByOrderID(ctx context.Context, orderID int) (*CertData, 
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("读取响应失败: %w", err)
 	}

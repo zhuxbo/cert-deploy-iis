@@ -539,7 +539,9 @@ const CallbackTimeout = 60 * time.Second
 
 // sendCallback 发送部署回调（异步，带超时控制，最多重试3次）
 func sendCallback(d *Deployer, orderID int, domain string, success bool, message string) {
+	d.callbackWg.Add(1)
 	go func() {
+		defer d.callbackWg.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), CallbackTimeout)
 		defer cancel()
 
@@ -600,7 +602,11 @@ func CheckAndDeploy() error {
 	}
 
 	store := cert.NewOrderStore()
-	results := AutoDeploy(cfg, DefaultDeployer(cfg, store))
+	deployer := DefaultDeployer(cfg, store)
+	results := AutoDeploy(cfg, deployer)
+
+	// 等待所有回调 goroutine 完成
+	deployer.WaitCallbacks()
 
 	successCount := 0
 	failCount := 0
@@ -659,6 +665,7 @@ func deployCertAutoMode(d *Deployer, certData *api.CertData, privateKey string, 
 	matchedBindings, err := d.Binder.FindBindingsForDomains(allDomains)
 	if err != nil {
 		log.Printf("查找 IIS 绑定失败: %v", err)
+		return []Result{{Domain: certCfg.Domain, Success: false, Message: fmt.Sprintf("查找 IIS 绑定失败: %v", err), OrderID: certData.OrderID}}
 	}
 
 	if len(matchedBindings) == 0 {

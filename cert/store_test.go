@@ -201,7 +201,7 @@ func TestGetWildcardName(t *testing.T) {
 		{"www 子域名", "www.example.com", "*.example.com"},
 		{"api 子域名", "api.example.com", "*.example.com"},
 		{"根域名", "example.com", "*.example.com"},
-		{"多级子域名", "a.b.example.com", "*.example.com"},
+		{"多级子域名", "a.b.example.com", "*.b.example.com"},
 		{"单个部分", "localhost", "localhost"},
 	}
 
@@ -468,8 +468,8 @@ func TestGetWildcardName_MoreCases(t *testing.T) {
 	}{
 		{"已是通配符", "*.example.com", "*.example.com"},
 		{"一级子域名", "www.example.com", "*.example.com"},
-		{"二级子域名", "api.sub.example.com", "*.example.com"},
-		{"三级子域名", "a.b.c.example.com", "*.example.com"},
+		{"二级子域名", "api.sub.example.com", "*.sub.example.com"},
+		{"三级子域名", "a.b.c.example.com", "*.b.c.example.com"},
 		{"根域名", "example.com", "*.example.com"},
 		{"单词", "localhost", "localhost"},
 		{"空字符串", "", ""},

@@ -62,7 +62,12 @@ type OrderStore struct {
 func NewOrderStore() *OrderStore {
 	exe, err := os.Executable()
 	if err != nil {
-		return &OrderStore{BaseDir: filepath.Join(".", "data", "orders")}
+		// fallback 到 %APPDATA%\sslctlw\data\orders
+		appData := os.Getenv("APPDATA")
+		if appData == "" {
+			appData = "."
+		}
+		return &OrderStore{BaseDir: filepath.Join(appData, "sslctlw", "data", "orders")}
 	}
 	baseDir := filepath.Join(filepath.Dir(exe), "data", "orders")
 	return &OrderStore{BaseDir: baseDir}
