@@ -29,6 +29,37 @@ func TestNewClient(t *testing.T) {
 	}
 }
 
+func TestIsAllowedAPIURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		baseURL   string
+		wantAllow bool
+	}{
+		{"空地址", "", true},
+		{"HTTPS 正常", "https://api.example.com", true},
+		{"HTTP localhost", "http://localhost:8080", true},
+		{"HTTP 回环 IPv4", "http://127.0.0.1:8080", true},
+		{"HTTP 回环 IPv6", "http://[::1]:8080", true},
+		{"HTTP 子域名绕过", "http://localhost.evil.com", false},
+		{"HTTP 用户信息绕过", "http://127.0.0.1@evil.com", false},
+		{"HTTP 非本地", "http://example.com", false},
+		{"非 HTTPS 协议", "ftp://example.com", false},
+		{"缺少协议", "api.example.com", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			allowed, reason := isAllowedAPIURL(tt.baseURL)
+			if allowed != tt.wantAllow {
+				t.Errorf("isAllowedAPIURL(%q) = %v, want %v (reason: %s)", tt.baseURL, allowed, tt.wantAllow, reason)
+			}
+			if !allowed && reason == "" {
+				t.Errorf("isAllowedAPIURL(%q) 返回禁止时必须给出原因", tt.baseURL)
+			}
+		})
+	}
+}
+
 func TestCertData_GetDomainList(t *testing.T) {
 	tests := []struct {
 		name    string

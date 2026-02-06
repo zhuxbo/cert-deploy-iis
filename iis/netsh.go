@@ -30,7 +30,7 @@ func BindCertificate(hostname string, port int, certHash string) error {
 	}
 
 	// 参数验证
-	if err := util.ValidateHostname(hostname); err != nil {
+	if err := util.ValidateDomain(hostname); err != nil {
 		return fmt.Errorf("无效的主机名: %w", err)
 	}
 	if err := util.ValidatePort(port); err != nil {
@@ -165,7 +165,7 @@ func UnbindCertificate(hostname string, port int) error {
 	}
 
 	// 参数验证
-	if err := util.ValidateHostname(hostname); err != nil {
+	if err := util.ValidateDomain(hostname); err != nil {
 		return fmt.Errorf("无效的主机名: %w", err)
 	}
 	if err := util.ValidatePort(port); err != nil {
@@ -391,4 +391,3 @@ func ParsePortFromBinding(hostnamePort string) int {
 	}
 	return 443
 }
-

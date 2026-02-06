@@ -34,6 +34,8 @@ type BackgroundTask struct {
 	nextRun      time.Time
 	interval     time.Duration
 	running      bool
+	checkMu      sync.Mutex
+	checking     bool
 	stopChan     chan struct{}
 	resetChan    chan struct{} // 通知 runLoop 重建 ticker
 	onUpdate     func()
@@ -198,6 +200,11 @@ func (t *BackgroundTask) runLoop() {
 
 // doCheck 执行检查
 func (t *BackgroundTask) doCheck() {
+	if !t.tryStartCheck() {
+		return
+	}
+	defer t.endCheck()
+
 	t.updateStatus(TaskStatusRunning, "正在检测证书...")
 
 	cfg, err := config.Load()
@@ -257,6 +264,22 @@ func (t *BackgroundTask) updateStatus(status TaskStatus, message string) {
 	if onUpdate != nil {
 		onUpdate()
 	}
+}
+
+func (t *BackgroundTask) tryStartCheck() bool {
+	t.checkMu.Lock()
+	defer t.checkMu.Unlock()
+	if t.checking {
+		return false
+	}
+	t.checking = true
+	return true
+}
+
+func (t *BackgroundTask) endCheck() {
+	t.checkMu.Lock()
+	t.checking = false
+	t.checkMu.Unlock()
 }
 
 // CheckCertExpiry 检查证书过期情况（不自动部署，仅检查）

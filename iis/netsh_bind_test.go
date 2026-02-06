@@ -1,6 +1,7 @@
 package iis
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -64,6 +65,17 @@ func TestBindCertificate_InvalidParams(t *testing.T) {
 				t.Errorf("BindCertificate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestBindCertificate_WildcardHostValidation(t *testing.T) {
+	// 使用无效指纹确保不会执行实际命令
+	err := BindCertificate("*.example.com", 443, "invalid")
+	if err == nil {
+		t.Fatal("BindCertificate() 预期返回错误")
+	}
+	if !strings.Contains(err.Error(), "证书指纹") {
+		t.Errorf("BindCertificate() 错误应来自指纹校验, got: %v", err)
 	}
 }
 
@@ -240,4 +252,3 @@ func TestGetBindingForIP_DefaultValues(t *testing.T) {
 	// 可能成功也可能失败
 	_ = err
 }
-

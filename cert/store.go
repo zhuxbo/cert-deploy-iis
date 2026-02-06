@@ -14,20 +14,33 @@ import (
 // parseTimeMultiFormat 尝试多种日期格式解析时间字符串
 // 非英文 Windows 的 PowerShell 可能输出不同的日期格式
 func parseTimeMultiFormat(value string) time.Time {
-	formats := []string{
-		"2006-01-02 15:04:05",       // ISO 格式 (PowerShell ToString 指定)
-		"2006/01/02 15:04:05",       // 斜杠格式
-		"01/02/2006 15:04:05",       // US 格式 (MM/DD/YYYY)
-		"02/01/2006 15:04:05",       // GB 格式 (DD/MM/YYYY)
-		"1/2/2006 15:04:05",         // US 短格式
-		"2/1/2006 15:04:05",         // GB 短格式
-		"1/2/2006 3:04:05 PM",       // US 12小时格式
-		"2006-01-02T15:04:05",       // ISO 8601
-		"2006-01-02T15:04:05Z07:00", // ISO 8601 with timezone
-		"2006-01-02",                // 仅日期
+	type layout struct {
+		format string
+		local  bool
+	}
+	formats := []layout{
+		{"2006-01-02 15:04:05", true},        // ISO 格式 (PowerShell ToString 指定)
+		{"2006/01/02 15:04:05", true},        // 斜杠格式
+		{"01/02/2006 15:04:05", true},        // US 格式 (MM/DD/YYYY)
+		{"02/01/2006 15:04:05", true},        // GB 格式 (DD/MM/YYYY)
+		{"1/2/2006 15:04:05", true},          // US 短格式
+		{"2/1/2006 15:04:05", true},          // GB 短格式
+		{"1/2/2006 3:04:05 PM", true},        // US 12小时格式
+		{"2006-01-02T15:04:05", true},        // ISO 8601 (无时区，按本地时间)
+		{"2006-01-02T15:04:05Z07:00", false}, // ISO 8601 with timezone
+		{"2006-01-02", true},                 // 仅日期
 	}
 	for _, f := range formats {
-		if t, err := time.Parse(f, value); err == nil {
+		var (
+			t   time.Time
+			err error
+		)
+		if f.local {
+			t, err = time.ParseInLocation(f.format, value, time.Local)
+		} else {
+			t, err = time.Parse(f.format, value)
+		}
+		if err == nil {
 			return t
 		}
 	}

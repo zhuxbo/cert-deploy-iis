@@ -39,31 +39,31 @@ type BindRule struct {
 
 // CertConfig 证书配置（以证书为维度）
 type CertConfig struct {
-	OrderID          int        `json:"order_id"`                     // 证书订单 ID
-	Domain           string     `json:"domain"`                       // 主域名（显示用）
-	Domains          []string   `json:"domains"`                      // 证书包含的所有域名
-	ExpiresAt        string     `json:"expires_at"`                   // 过期时间
-	SerialNumber     string     `json:"serial_number"`                // 证书序列号
-	Enabled          bool       `json:"enabled"`                      // 是否启用自动部署
-	BindRules        []BindRule `json:"bind_rules,omitempty"`         // 绑定规则
-	UseLocalKey      bool       `json:"use_local_key"`                // 使用本地私钥模式
-	ValidationMethod string     `json:"validation_method,omitempty"`  // 验证方法: file 或 delegation
-	AutoBindMode     bool       `json:"auto_bind_mode"`               // 自动绑定模式（按已有绑定更换证书）
+	OrderID          int        `json:"order_id"`                    // 证书订单 ID
+	Domain           string     `json:"domain"`                      // 主域名（显示用）
+	Domains          []string   `json:"domains"`                     // 证书包含的所有域名
+	ExpiresAt        string     `json:"expires_at"`                  // 过期时间
+	SerialNumber     string     `json:"serial_number"`               // 证书序列号
+	Enabled          bool       `json:"enabled"`                     // 是否启用自动部署
+	BindRules        []BindRule `json:"bind_rules,omitempty"`        // 绑定规则
+	UseLocalKey      bool       `json:"use_local_key"`               // 使用本地私钥模式
+	ValidationMethod string     `json:"validation_method,omitempty"` // 验证方法: file 或 delegation
+	AutoBindMode     bool       `json:"auto_bind_mode"`              // 自动绑定模式（按已有绑定更换证书）
 }
 
 // Config 应用配置
 type Config struct {
 	APIBaseURL       string       `json:"api_base_url"`
-	Token            string       `json:"token,omitempty"`             // 旧版明文 Token（兼容）
-	EncryptedToken   string       `json:"encrypted_token,omitempty"`  // 加密后的 Token
-	Certificates     []CertConfig `json:"certificates"`                // 证书配置
-	RenewDaysLocal   int          `json:"renew_days_local"`            // 本地私钥模式：到期前多少天发起续签（默认15）
-	RenewDaysFetch   int          `json:"renew_days_fetch"`            // 拉取模式：到期前多少天开始拉取（默认13）
-	LastCheck        string       `json:"last_check"`                  // 上次检查时间
-	AutoCheckEnabled bool         `json:"auto_check_enabled"`          // 是否启用自动部署（任务计划）
-	CheckInterval    int          `json:"check_interval"`              // 检测间隔（小时），默认6
-	TaskName         string       `json:"task_name"`                   // 任务计划名称
-	IIS7Mode         bool         `json:"iis7_mode"`                   // IIS7 兼容模式（自动检测）
+	Token            string       `json:"token,omitempty"`           // 明文 Token（已禁用，仅用于检测）
+	EncryptedToken   string       `json:"encrypted_token,omitempty"` // 加密后的 Token
+	Certificates     []CertConfig `json:"certificates"`              // 证书配置
+	RenewDaysLocal   int          `json:"renew_days_local"`          // 本地私钥模式：到期前多少天发起续签（默认15）
+	RenewDaysFetch   int          `json:"renew_days_fetch"`          // 拉取模式：到期前多少天开始拉取（默认13）
+	LastCheck        string       `json:"last_check"`                // 上次检查时间
+	AutoCheckEnabled bool         `json:"auto_check_enabled"`        // 是否启用自动部署（任务计划）
+	CheckInterval    int          `json:"check_interval"`            // 检测间隔（小时），默认6
+	TaskName         string       `json:"task_name"`                 // 任务计划名称
+	IIS7Mode         bool         `json:"iis7_mode"`                 // IIS7 兼容模式（自动检测）
 }
 
 // GetToken 获取解密后的 Token
@@ -107,18 +107,29 @@ func DefaultConfig() *Config {
 func GetDataDir() string {
 	exe, err := os.Executable()
 	if err != nil {
-		// 回退到当前目录
-		return DataDirName
+		return resolveDataDir("", os.Getenv("APPDATA"), os.MkdirAll)
 	}
-	dataDir := filepath.Join(filepath.Dir(exe), DataDirName)
+	return resolveDataDir(exe, os.Getenv("APPDATA"), os.MkdirAll)
+}
 
-	// 确保目录存在（使用更严格的权限）
-	if err := os.MkdirAll(dataDir, 0700); err != nil {
-		// 目录创建失败时记录日志，但不中断程序
-		fmt.Printf("警告: 创建数据目录失败 %s: %v\n", dataDir, err)
+func resolveDataDir(exePath, appData string, mkdir func(string, os.FileMode) error) string {
+	if exePath != "" {
+		dataDir := filepath.Join(filepath.Dir(exePath), DataDirName)
+		if err := mkdir(dataDir, 0700); err == nil {
+			return dataDir
+		} else {
+			fmt.Printf("警告: 创建数据目录失败 %s: %v\n", dataDir, err)
+		}
 	}
 
-	return dataDir
+	if appData == "" {
+		appData = "."
+	}
+	fallback := filepath.Join(appData, DataDirName)
+	if err := mkdir(fallback, 0700); err != nil {
+		fmt.Printf("警告: 创建数据目录失败 %s: %v\n", fallback, err)
+	}
+	return fallback
 }
 
 // GetConfigPath 获取配置文件路径
@@ -168,6 +179,11 @@ func Load() (*Config, error) {
 	}
 	if cfg.TaskName == "" {
 		cfg.TaskName = DefaultTaskName
+	}
+
+	if cfg.Token != "" {
+		cfg.Token = "" // 明文 Token 已禁用，清理后提示用户重新配置
+		return &cfg, fmt.Errorf("检测到明文 Token，已被禁用，请在界面重新配置")
 	}
 
 	return &cfg, nil

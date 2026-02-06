@@ -157,6 +157,9 @@ func AutoDeploy(cfg *config.Config, d *Deployer) []Result {
 		log.Printf("警告: 保存配置失败: %v", err)
 	}
 
+	// 等待所有回调完成，避免任务结束过早
+	d.WaitCallbacks()
+
 	return results
 }
 

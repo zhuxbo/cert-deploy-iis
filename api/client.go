@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -60,10 +61,11 @@ func (c *CertData) GetDomainList() []string {
 
 // Client API 客户端
 type Client struct {
-	BaseURL     string
-	Token       string
-	HTTPClient  *http.Client
-	insecureURL bool // 非 HTTPS 且非本地地址
+	BaseURL        string
+	Token          string
+	HTTPClient     *http.Client
+	insecureURL    bool // 非 HTTPS 且非本地地址
+	insecureReason string
 }
 
 // API 客户端配置常量
@@ -90,19 +92,49 @@ func NewClient(baseURL, token string) *Client {
 		},
 	}
 
-	// 检查 HTTPS 安全性：非 HTTPS 且非本地地址时标记为不安全
-	if baseURL != "" && !strings.HasPrefix(baseURL, "https://") &&
-		!strings.HasPrefix(baseURL, "http://localhost") &&
-		!strings.HasPrefix(baseURL, "http://127.0.0.1") {
+	allowed, reason := isAllowedAPIURL(c.BaseURL)
+	if !allowed {
 		c.insecureURL = true
+		c.insecureReason = reason
 	}
 
 	return c
 }
 
+// isAllowedAPIURL 校验 API 地址是否允许（仅 HTTPS 或本地 HTTP）
+func isAllowedAPIURL(baseURL string) (bool, string) {
+	if baseURL == "" {
+		return true, ""
+	}
+
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return false, "API 地址无效"
+	}
+
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return true, ""
+	case "http":
+		host := strings.ToLower(parsed.Hostname())
+		if host == "localhost" {
+			return true, ""
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return true, ""
+		}
+		return false, "API 地址必须使用 HTTPS（localhost/127.0.0.1 除外）"
+	default:
+		return false, "API 地址必须使用 HTTPS"
+	}
+}
+
 // doWithRetry 执行带重试的 HTTP 请求，支持 context 取消
 func (c *Client) doWithRetry(ctx context.Context, req *http.Request) (*http.Response, error) {
 	if c.insecureURL {
+		if c.insecureReason != "" {
+			return nil, fmt.Errorf("%s: %s", c.insecureReason, c.BaseURL)
+		}
 		return nil, fmt.Errorf("API 地址必须使用 HTTPS（localhost/127.0.0.1 除外）: %s", c.BaseURL)
 	}
 

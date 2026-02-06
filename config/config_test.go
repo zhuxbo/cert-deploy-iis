@@ -1,6 +1,10 @@
 package config
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -389,6 +393,86 @@ func TestGetDataDir(t *testing.T) {
 	// 应该包含 sslctlw
 	if !containsString(dir, DataDirName) {
 		t.Errorf("GetDataDir() = %q, 应该包含 %q", dir, DataDirName)
+	}
+}
+
+func TestResolveDataDir_PrimarySuccess(t *testing.T) {
+	exePath := "C:\\Program Files\\sslctlw\\sslctlw.exe"
+	appData := "C:\\Users\\Tester\\AppData\\Roaming"
+
+	calls := []string{}
+	mkdir := func(path string, perm os.FileMode) error {
+		calls = append(calls, path)
+		return nil
+	}
+
+	got := resolveDataDir(exePath, appData, mkdir)
+	want := filepath.Join(filepath.Dir(exePath), DataDirName)
+
+	if got != want {
+		t.Errorf("resolveDataDir() = %q, want %q", got, want)
+	}
+	if len(calls) != 1 || calls[0] != want {
+		t.Errorf("resolveDataDir() 调用次数/路径异常: %v", calls)
+	}
+}
+
+func TestResolveDataDir_Fallback(t *testing.T) {
+	exePath := "C:\\Program Files\\sslctlw\\sslctlw.exe"
+	appData := "C:\\Users\\Tester\\AppData\\Roaming"
+
+	calls := []string{}
+	mkdir := func(path string, perm os.FileMode) error {
+		calls = append(calls, path)
+		if strings.Contains(path, "Program Files") {
+			return errors.New("permission denied")
+		}
+		return nil
+	}
+
+	got := resolveDataDir(exePath, appData, mkdir)
+	wantPrimary := filepath.Join(filepath.Dir(exePath), DataDirName)
+	wantFallback := filepath.Join(appData, DataDirName)
+
+	if got != wantFallback {
+		t.Errorf("resolveDataDir() = %q, want %q", got, wantFallback)
+	}
+	if len(calls) < 2 || calls[0] != wantPrimary || calls[1] != wantFallback {
+		t.Errorf("resolveDataDir() 未按预期尝试 fallback: %v", calls)
+	}
+}
+
+func TestLoad_PlainTokenRejected(t *testing.T) {
+	path := GetConfigPath()
+	dir := filepath.Dir(path)
+
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Skipf("无法创建配置目录: %v", err)
+	}
+
+	orig, origErr := os.ReadFile(path)
+
+	data := `{"api_base_url":"https://api.example.com","token":"plain-token","certificates":[]}`
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Skipf("无法写入配置文件: %v", err)
+	}
+	defer func() {
+		if origErr == nil {
+			_ = os.WriteFile(path, orig, 0600)
+		} else {
+			_ = os.Remove(path)
+		}
+	}()
+
+	cfg, err := Load()
+	if err == nil {
+		t.Fatal("Load() 应该拒绝明文 Token")
+	}
+	if cfg == nil {
+		t.Fatal("Load() 应该返回配置对象")
+	}
+	if cfg.Token != "" {
+		t.Errorf("Load() 应清理明文 Token, got %q", cfg.Token)
 	}
 }
 

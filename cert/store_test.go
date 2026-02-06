@@ -187,6 +187,31 @@ func TestGetCertStatus(t *testing.T) {
 	}
 }
 
+func TestParseTimeMultiFormat_Local(t *testing.T) {
+	input := "2024-01-02 03:04:05"
+	got := parseTimeMultiFormat(input)
+	if got.IsZero() {
+		t.Fatal("parseTimeMultiFormat() 返回零值")
+	}
+	if got.Location() != time.Local {
+		t.Errorf("parseTimeMultiFormat() Location = %v, want %v", got.Location(), time.Local)
+	}
+	if got.Format("2006-01-02 15:04:05") != input {
+		t.Errorf("parseTimeMultiFormat() = %s, want %s", got.Format("2006-01-02 15:04:05"), input)
+	}
+}
+
+func TestParseTimeMultiFormat_WithTimezone(t *testing.T) {
+	input := "2024-01-02T03:04:05+08:00"
+	got := parseTimeMultiFormat(input)
+	if got.IsZero() {
+		t.Fatal("parseTimeMultiFormat() 返回零值")
+	}
+	if got.Format(time.RFC3339) != input {
+		t.Errorf("parseTimeMultiFormat() = %s, want %s", got.Format(time.RFC3339), input)
+	}
+}
+
 func containsString(s, substr string) bool {
 	return len(s) >= len(substr) && s[:len(substr)] == substr
 }
@@ -313,10 +338,10 @@ SerialNumber: 123
 // TestCertInfo_MatchesDomain_MoreCases 更多域名匹配测试
 func TestCertInfo_MatchesDomain_MoreCases(t *testing.T) {
 	tests := []struct {
-		name     string
-		cert     *CertInfo
-		domain   string
-		want     bool
+		name   string
+		cert   *CertInfo
+		domain string
+		want   bool
 	}{
 		{
 			"匹配 CN",
