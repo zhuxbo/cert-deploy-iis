@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha1"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"strings"
@@ -81,12 +82,7 @@ func GetCertThumbprint(certPEM string) (string, error) {
 	fingerprint := sha1.Sum(cert.Raw)
 
 	// 转换为十六进制字符串（大写）
-	var thumbprint string
-	for _, b := range fingerprint {
-		thumbprint += fmt.Sprintf("%02X", b)
-	}
-
-	return thumbprint, nil
+	return strings.ToUpper(hex.EncodeToString(fingerprint[:])), nil
 }
 
 // GetCertSerialNumber 获取证书序列号

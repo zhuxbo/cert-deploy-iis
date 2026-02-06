@@ -468,7 +468,7 @@ func TestIsIPBinding_MoreCases(t *testing.T) {
 		hostnamePort string
 		want         bool
 	}{
-		{"空字符串", "", true}, // 空主机名被视为 IP
+		{"空字符串", "", false}, // 空主机名不应被视为 IP
 		{"只有端口", ":443", false}, // 冒号前为空，不是纯数字
 		{"本地回环", "127.0.0.1:443", true},
 		{"内网IP", "10.0.0.1:8443", true},

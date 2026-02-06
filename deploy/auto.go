@@ -537,7 +537,8 @@ func updateOrderMeta(orderID int, certData *api.CertData, store OrderStore) {
 // CallbackTimeout 回调超时时间
 const CallbackTimeout = 60 * time.Second
 
-// sendCallback 发送部署回调（异步，带超时控制，最多重试3次）
+// sendCallback 发送部署回调（异步，带超时控制）
+// 注意：Client.Callback 内部已有重试机制（doWithRetry），此处不再额外重试
 func sendCallback(d *Deployer, orderID int, domain string, success bool, message string) {
 	d.callbackWg.Add(1)
 	go func() {
@@ -559,34 +560,9 @@ func sendCallback(d *Deployer, orderID int, domain string, success bool, message
 			Message:    message,
 		}
 
-		var lastErr error
-		for attempt := 0; attempt < 3; attempt++ {
-			// 检查是否超时
-			select {
-			case <-ctx.Done():
-				log.Printf("回调超时取消 (%s)", domain)
-				return
-			default:
-			}
-
-			if attempt > 0 {
-				// 带超时检查的休眠
-				select {
-				case <-ctx.Done():
-					log.Printf("回调超时取消 (%s)", domain)
-					return
-				case <-time.After(time.Duration(attempt*10) * time.Second):
-				}
-			}
-
-			if err := d.Client.Callback(ctx, req); err == nil {
-				return
-			} else {
-				lastErr = err
-				log.Printf("回调重试 %d/3 失败 (%s): %v", attempt+1, domain, err)
-			}
+		if err := d.Client.Callback(ctx, req); err != nil {
+			log.Printf("回调失败 (%s): %v", domain, err)
 		}
-		log.Printf("回调最终失败 (%s): %v", domain, lastErr)
 	}()
 }
 
@@ -802,6 +778,9 @@ func handleFileValidation(domain string, file *api.FileValidation) error {
 // isIPBinding 判断是否是 IP 绑定（如 0.0.0.0:443）
 func isIPBinding(hostnamePort string) bool {
 	host := iis.ParseHostFromBinding(hostnamePort)
+	if host == "" {
+		return false
+	}
 	// 简单判断：全数字和点则认为是 IP
 	for _, c := range host {
 		if c != '.' && (c < '0' || c > '9') {

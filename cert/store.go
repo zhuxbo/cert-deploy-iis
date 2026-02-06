@@ -178,10 +178,12 @@ func GetCertDisplayName(cert *CertInfo) string {
 	return cert.Subject
 }
 
+// cnRegex 用于从证书主题中提取 CN
+var cnRegex = regexp.MustCompile(`CN=([^,]+)`)
+
 // extractCN 从证书主题中提取 CN
 func extractCN(subject string) string {
-	re := regexp.MustCompile(`CN=([^,]+)`)
-	matches := re.FindStringSubmatch(subject)
+	matches := cnRegex.FindStringSubmatch(subject)
 	if len(matches) > 1 {
 		return strings.TrimSpace(matches[1])
 	}

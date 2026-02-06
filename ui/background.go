@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -325,7 +326,7 @@ func CheckLocalCerts() []LocalCertInfo {
 	}
 	boundCerts := make(map[string]bool)
 	for _, b := range sslBindings {
-		boundCerts[b.CertHash] = true
+		boundCerts[strings.ToUpper(b.CertHash)] = true
 	}
 
 	for _, c := range certs {

@@ -10,6 +10,7 @@ import (
 	"sslctlw/cert"
 	"sslctlw/config"
 	"sslctlw/iis"
+	"sslctlw/util"
 
 	"github.com/rodrigocfd/windigo/co"
 	"github.com/rodrigocfd/windigo/ui"
@@ -23,10 +24,10 @@ func formatAPIError(err error) string {
 			return fmt.Sprintf("获取失败: %s (错误码: %d)", apiErr.Message, apiErr.Code)
 		}
 		if apiErr.RawBody != "" {
-			// 显示摘要
+			// 显示摘要（UTF-8 安全截断）
 			body := apiErr.RawBody
 			if len(body) > 100 {
-				body = body[:100] + "..."
+				body = util.TruncateString(body, 100) + "..."
 			}
 			return fmt.Sprintf("返回数据错误 (HTTP %d):\r\n%s", apiErr.StatusCode, body)
 		}
@@ -234,8 +235,12 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 				cfg = config.DefaultConfig()
 			}
 			cfg.APIBaseURL = apiURL
-			cfg.SetToken(token)
-			cfg.Save()
+			if err := cfg.SetToken(token); err != nil {
+				logDebug("saveConfig: SetToken failed: %v", err)
+			}
+			if err := cfg.Save(); err != nil {
+				logDebug("saveConfig: Save failed: %v", err)
+			}
 		}
 	}
 
@@ -566,11 +571,8 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 							allDomains = []string{certToInstall.Domain}
 						}
 
-						results = append(results, fmt.Sprintf("  [检查绑定] 证书域名: %v", allDomains))
-
 						_, httpMatches, _ := iis.FindMatchingBindings(allDomains)
 						if len(httpMatches) > 0 {
-							results = append(results, fmt.Sprintf("  [检查绑定] 发现 %d 个 HTTP 绑定需要添加 HTTPS", len(httpMatches)))
 							for _, match := range httpMatches {
 								if err := iis.AddHttpsBinding(match.SiteName, match.Host, match.Port); err != nil {
 									results = append(results, fmt.Sprintf("  ! 添加HTTPS绑定失败 %s: %v", match.Host, err))
@@ -626,18 +628,9 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 					allDomains = []string{certToInstall.Domain}
 				}
 
-				// 调试: 显示证书域名列表
-				results = append(results, fmt.Sprintf("  [调试] 证书域名: %v", allDomains))
-
 				httpsMatches, httpMatches, findErr := iis.FindMatchingBindings(allDomains)
 				if findErr != nil {
 					results = append(results, fmt.Sprintf("  ! 查找绑定失败: %v", findErr))
-				}
-
-				// 调试: 显示匹配结果
-				results = append(results, fmt.Sprintf("  [调试] 匹配: HTTPS=%d, HTTP=%d", len(httpsMatches), len(httpMatches)))
-				for _, m := range httpMatches {
-					results = append(results, fmt.Sprintf("  [调试] HTTP匹配: %s (站点: %s)", m.Host, m.SiteName))
 				}
 
 				boundCount := 0
@@ -709,10 +702,11 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 				}
 			}
 
-
 			// 循环结束后统一保存配置
 			if loopCfgDirty && loopCfg != nil {
-				loopCfg.Save()
+				if err := loopCfg.Save(); err != nil {
+					logDebug("saveConfig loop: Save failed: %v", err)
+				}
 			}
 			if dlgCtx.Err() != nil {
 				return

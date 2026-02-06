@@ -102,10 +102,7 @@ func installPEMWithGo(certPath, keyPath, password string) (*InstallResult, error
 	leafPEM, chainPEM := splitPEMCertChain(string(certBytes))
 	pfxPath, err := PEMToPFX(leafPEM, string(keyBytes), chainPEM, password)
 	if err != nil {
-		return &InstallResult{
-			Success:      false,
-			ErrorMessage: fmt.Sprintf("convert pem to pfx failed: %v", err),
-		}, nil
+		return nil, fmt.Errorf("convert pem to pfx failed: %w", err)
 	}
 	defer func() {
 		if err := os.Remove(pfxPath); err != nil && !os.IsNotExist(err) {

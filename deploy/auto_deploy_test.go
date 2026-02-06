@@ -1106,33 +1106,23 @@ func TestSendCallback(t *testing.T) {
 		}
 	})
 
-	t.Run("全部失败重试3次", func(t *testing.T) {
+	t.Run("失败只调用一次-依赖内部重试", func(t *testing.T) {
 		d := NewMockDeployer()
 
 		var callCount int32
-		done := make(chan struct{})
 
 		d.Client.(*MockAPIClient).CallbackFunc = func(ctx context.Context, req *api.CallbackRequest) error {
-			cnt := atomic.AddInt32(&callCount, 1)
-			if cnt >= 3 {
-				close(done)
-			}
+			atomic.AddInt32(&callCount, 1)
 			return errors.New("回调失败")
 		}
 
 		sendCallback(d, 100, "example.com", false, "部署失败")
 
-		// 等待所有重试完成
-		select {
-		case <-done:
-			// OK
-		case <-time.After(90 * time.Second):
-			t.Fatal("等待回调重试超时")
-		}
+		d.callbackWg.Wait()
 
 		finalCount := atomic.LoadInt32(&callCount)
-		if finalCount != 3 {
-			t.Errorf("期望重试 3 次，实际调用 %d 次", finalCount)
+		if finalCount != 1 {
+			t.Errorf("期望调用 1 次（重试由 Client 内部处理），实际调用 %d 次", finalCount)
 		}
 	})
 }

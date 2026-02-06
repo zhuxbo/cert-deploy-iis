@@ -221,18 +221,20 @@ func ListSSLBindings() ([]SSLBinding, error) {
 	return parseSSLBindings(output), nil
 }
 
+// netsh 输出解析正则（支持中英文和全角/半角冒号）
+var (
+	// SNI 绑定: "Hostname:port", "主机名:端口"
+	sniBindingRe = regexp.MustCompile(`(?i)(?:Hostname:port|主机名[:：]端口)\s*[:：]\s*(.+)`)
+	// IP 绑定: "IP:port", "IP:端口"（空主机名，用于通配符泛匹配或 IP 证书）
+	ipBindingRe = regexp.MustCompile(`(?i)(?:IP:port|IP[:：]端口)\s*[:：]\s*(.+)`)
+	certHashRe  = regexp.MustCompile(`(?i)(?:Certificate Hash|证书哈希)\s*[:：]\s*([a-fA-F0-9]+)`)
+	appIDRe     = regexp.MustCompile(`(?i)(?:Application ID|应用程序\s*ID)\s*[:：]\s*(\{[^}]+\})`)
+	storeRe     = regexp.MustCompile(`(?i)(?:Certificate Store Name|证书存储名称)\s*[:：]\s*(.+)`)
+)
+
 // parseSSLBindings 解析 netsh 输出
 func parseSSLBindings(output string) []SSLBinding {
 	bindings := make([]SSLBinding, 0)
-
-	// 正则表达式匹配（支持中英文和全角/半角冒号）
-	// SNI 绑定: "Hostname:port", "主机名:端口"
-	sniBindingRe := regexp.MustCompile(`(?i)(?:Hostname:port|主机名[:：]端口)\s*[:：]\s*(.+)`)
-	// IP 绑定: "IP:port", "IP:端口"（空主机名，用于通配符泛匹配或 IP 证书）
-	ipBindingRe := regexp.MustCompile(`(?i)(?:IP:port|IP[:：]端口)\s*[:：]\s*(.+)`)
-	certHashRe := regexp.MustCompile(`(?i)(?:Certificate Hash|证书哈希)\s*[:：]\s*([a-fA-F0-9]+)`)
-	appIDRe := regexp.MustCompile(`(?i)(?:Application ID|应用程序\s*ID)\s*[:：]\s*(\{[^}]+\})`)
-	storeRe := regexp.MustCompile(`(?i)(?:Certificate Store Name|证书存储名称)\s*[:：]\s*(.+)`)
 
 	var current *SSLBinding
 	scanner := bufio.NewScanner(strings.NewReader(output))

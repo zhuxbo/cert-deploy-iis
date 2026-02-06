@@ -129,9 +129,9 @@ func (c *Client) doWithRetry(ctx context.Context, req *http.Request) (*http.Resp
 			// 重置 Body（如果有）
 			if req.GetBody != nil {
 				body, err := req.GetBody()
-			if err != nil {
-				return nil, fmt.Errorf("重置请求体失败: %w", err)
-			}
+				if err != nil {
+					return nil, fmt.Errorf("重置请求体失败: %w", err)
+				}
 				req.Body = body
 			}
 		}
