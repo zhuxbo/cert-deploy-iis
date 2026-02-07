@@ -235,7 +235,6 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 			return
 		}
 		ui.MsgOk(dlg, "成功", "配置已保存", "")
-		dlg.Hwnd().SendMessage(co.WM_CLOSE, 0, 0)
 		if onSuccess != nil {
 			onSuccess()
 		}

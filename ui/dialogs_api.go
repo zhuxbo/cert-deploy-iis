@@ -90,7 +90,7 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 			Position(ui.Dpi(110, 48)).
 			Width(ui.DpiX(320)).
 			Text(defaultToken).
-			CtrlStyle(co.ES_PASSWORD),
+			CtrlStyle(co.ES_PASSWORD | co.ES_AUTOHSCROLL),
 	)
 
 	// 显示/隐藏 Token 按钮

@@ -3,7 +3,9 @@ package ui
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
+	"time"
 
 	"sslctlw/config"
 	"sslctlw/upgrade"
@@ -21,8 +23,11 @@ func ShowUpgradeDialog(owner ui.Parent, currentVersion string, onComplete func()
 
 	// 检查 Release URL 是否配置
 	if cfg.ReleaseURL == "" {
-		ui.MsgOk(owner, "提示", "升级服务未配置", "请先在设置中配置 Release 服务地址。")
-		return
+		releaseURL := showConfigureReleaseURLDialog(owner, cfg)
+		if releaseURL == "" {
+			return // 用户取消
+		}
+		cfg.ReleaseURL = releaseURL
 	}
 
 	dlg := ui.NewModal(owner,
@@ -567,6 +572,119 @@ func showCertConfirmDialog(owner ui.Parent, result *upgrade.VerifyResult, onResu
 	dlg.ShowModal()
 }
 
+// showConfigureReleaseURLDialog 弹出 Release URL 配置对话框
+// 返回用户输入的 URL（空字符串表示用户取消）
+func showConfigureReleaseURLDialog(owner ui.Parent, cfg *config.Config) string {
+	var result string
+
+	dlg := ui.NewModal(owner,
+		ui.OptsModal().
+			Title("配置升级服务").
+			Size(ui.Dpi(420, 190)).
+			Style(co.WS_CAPTION|co.WS_SYSMENU|co.WS_POPUP|co.WS_VISIBLE),
+	)
+
+	// 提示标签
+	ui.NewStatic(dlg,
+		ui.OptsStatic().
+			Text("升级服务未配置，请输入 Release 服务地址：").
+			Position(ui.Dpi(20, 20)).
+			Size(ui.Dpi(380, 20)),
+	)
+
+	// URL 输入框
+	txtURL := ui.NewEdit(dlg,
+		ui.OptsEdit().
+			Position(ui.Dpi(20, 48)).
+			Width(ui.DpiX(380)),
+	)
+
+	// 状态标签
+	lblStatus := ui.NewStatic(dlg,
+		ui.OptsStatic().
+			Text("").
+			Position(ui.Dpi(20, 80)).
+			Size(ui.Dpi(380, 20)),
+	)
+
+	// 确定按钮
+	btnOK := ui.NewButton(dlg,
+		ui.OptsButton().
+			Text("确定").
+			Position(ui.Dpi(230, 110)).
+			Width(ui.DpiX(80)).
+			Height(ui.DpiY(30)),
+	)
+
+	// 取消按钮
+	btnCancel := ui.NewButton(dlg,
+		ui.OptsButton().
+			Text("取消").
+			Position(ui.Dpi(320, 110)).
+			Width(ui.DpiX(80)).
+			Height(ui.DpiY(30)),
+	)
+
+	btnOK.On().BnClicked(func() {
+		rawURL := strings.TrimSpace(txtURL.Text())
+
+		// 空值检查
+		if rawURL == "" {
+			ui.MsgOk(dlg, "提示", "地址不能为空", "请输入 Release 服务地址。")
+			return
+		}
+
+		// URL 格式校验
+		parsed, err := url.Parse(rawURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			ui.MsgOk(dlg, "提示", "地址格式不正确", "请输入以 http:// 或 https:// 开头的有效地址。")
+			return
+		}
+
+		// 禁用按钮，显示验证状态
+		btnOK.Hwnd().EnableWindow(false)
+		btnCancel.Hwnd().EnableWindow(false)
+		lblStatus.Hwnd().SetWindowText("正在验证升级服务...")
+
+		// 异步验证升级服务
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			checker := upgrade.NewGitHubChecker(rawURL)
+			_, err := checker.CheckUpdate(ctx, "stable", "0.0.0")
+
+			dlg.UiThread(func() {
+				if err != nil {
+					lblStatus.Hwnd().SetWindowText(fmt.Sprintf("验证失败: %v", err))
+					btnOK.Hwnd().EnableWindow(true)
+					btnCancel.Hwnd().EnableWindow(true)
+					return
+				}
+
+				// 校验通过，保存配置
+				cfg.ReleaseURL = rawURL
+				if saveErr := cfg.Save(); saveErr != nil {
+					lblStatus.Hwnd().SetWindowText(fmt.Sprintf("保存配置失败: %v", saveErr))
+					btnOK.Hwnd().EnableWindow(true)
+					btnCancel.Hwnd().EnableWindow(true)
+					return
+				}
+
+				result = rawURL
+				dlg.Hwnd().SendMessage(co.WM_CLOSE, 0, 0)
+			})
+		}()
+	})
+
+	btnCancel.On().BnClicked(func() {
+		dlg.Hwnd().SendMessage(co.WM_CLOSE, 0, 0)
+	})
+
+	dlg.ShowModal()
+	return result
+}
+
 // ShowUpgradeSettingsDialog 显示升级设置对话框
 func ShowUpgradeSettingsDialog(owner ui.Parent) {
 	cfg, _ := config.Load()
@@ -634,6 +752,14 @@ func ShowUpgradeSettingsDialog(owner ui.Parent) {
 			Text(fmt.Sprintf("%d", cfg.UpgradeInterval)),
 	)
 
+	// 状态标签
+	lblStatus := ui.NewStatic(dlg,
+		ui.OptsStatic().
+			Text("").
+			Position(ui.Dpi(20, 170)).
+			Size(ui.Dpi(170, 20)),
+	)
+
 	// 保存按钮
 	btnSave := ui.NewButton(dlg,
 		ui.OptsButton().
@@ -685,11 +811,11 @@ func ShowUpgradeSettingsDialog(owner ui.Parent) {
 		cfg.UpgradeInterval = interval
 
 		if err := cfg.Save(); err != nil {
-			ui.MsgOk(dlg, "错误", "保存失败", fmt.Sprintf("保存配置失败: %v", err))
+			lblStatus.Hwnd().SetWindowText(fmt.Sprintf("保存失败: %v", err))
 			return
 		}
 
-		dlg.Hwnd().SendMessage(co.WM_CLOSE, 0, 0)
+		lblStatus.Hwnd().SetWindowText("已保存")
 	})
 
 	// 取消
