@@ -59,13 +59,15 @@ func runAutoDeploy() {
 	logPath := filepath.Join(config.GetLogDir(), "deploy.log")
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err == nil {
+		defer logFile.Close()
 		// 如果是新文件，写入 UTF-8 BOM
-		info, _ := logFile.Stat()
-		if info != nil && info.Size() == 0 {
-			logFile.Write([]byte{0xEF, 0xBB, 0xBF}) // UTF-8 BOM
+		info, statErr := logFile.Stat()
+		if statErr == nil && info != nil && info.Size() == 0 {
+			if _, writeErr := logFile.Write([]byte{0xEF, 0xBB, 0xBF}); writeErr != nil {
+				log.Printf("警告: 写入 UTF-8 BOM 失败: %v", writeErr)
+			}
 		}
 		log.SetOutput(logFile)
-		defer logFile.Close()
 	}
 
 	log.Printf("========== 开始自动部署 ==========")

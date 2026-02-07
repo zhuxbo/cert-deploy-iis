@@ -8,7 +8,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"time"
 
 	"software.sslmate.com/src/go-pkcs12"
 )
@@ -71,7 +70,11 @@ func PEMToPFX(certPEM, keyPEM, intermediatePEM, password string) (string, error)
 
 	// 写入临时文件
 	tempDir := os.TempDir()
-	pfxPath := filepath.Join(tempDir, fmt.Sprintf("cert_%s.pfx", generateRandomString(8)))
+	randomStr, err := generateRandomString(8)
+	if err != nil {
+		return "", fmt.Errorf("生成临时文件名失败: %w", err)
+	}
+	pfxPath := filepath.Join(tempDir, fmt.Sprintf("cert_%s.pfx", randomStr))
 
 	if err := os.WriteFile(pfxPath, pfxData, 0600); err != nil {
 		return "", fmt.Errorf("写入 PFX 文件失败: %w", err)
@@ -81,18 +84,17 @@ func PEMToPFX(certPEM, keyPEM, intermediatePEM, password string) (string, error)
 }
 
 // generateRandomString 生成随机字符串
-// 使用加密安全的随机数，失败时结合时间戳确保唯一性
-func generateRandomString(length int) string {
+// 使用加密安全的随机数
+func generateRandomString(length int) (string, error) {
 	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, length)
 	if _, err := rand.Read(b); err != nil {
 		// rand.Read 失败极为罕见（仅当系统熵源不可用时）
-		// 结合时间戳和进程 ID 确保唯一性，但安全性降低
-		log.Printf("警告: 加密随机数生成失败: %v，使用降级方案\n", err)
-		return fmt.Sprintf("%d_%d", time.Now().UnixNano(), os.Getpid())
+		// 返回错误而非使用不安全的降级方案
+		return "", fmt.Errorf("加密随机数生成失败: %w", err)
 	}
 	for i := range b {
 		b[i] = charset[int(b[i])%len(charset)]
 	}
-	return string(b)
+	return string(b), nil
 }

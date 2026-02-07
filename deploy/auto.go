@@ -62,6 +62,7 @@ func AutoDeploy(cfg *config.Config, d *Deployer) []Result {
 		log.Printf("检查证书: %s (订单: %d, 本地私钥: %v)", certCfg.Domain, certCfg.OrderID, certCfg.UseLocalKey)
 
 		var certData *api.CertData
+		// 安全警告: privateKey 包含敏感的私钥数据，严禁在日志中打印
 		var privateKey string
 		var err error
 

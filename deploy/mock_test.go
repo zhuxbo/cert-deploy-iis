@@ -47,12 +47,15 @@ func (m *MockAPIClient) Callback(ctx context.Context, req *api.CallbackRequest) 
 
 // MockOrderStore 模拟订单存储
 type MockOrderStore struct {
-	HasPrivateKeyFunc  func(orderID int) bool
-	LoadPrivateKeyFunc func(orderID int) (string, error)
-	SavePrivateKeyFunc func(orderID int, keyPEM string) error
+	HasPrivateKeyFunc   func(orderID int) bool
+	LoadPrivateKeyFunc  func(orderID int) (string, error)
+	SavePrivateKeyFunc  func(orderID int, keyPEM string) error
 	SaveCertificateFunc func(orderID int, certPEM, chainPEM string) error
-	SaveMetaFunc       func(orderID int, meta *cert.OrderMeta) error
-	DeleteOrderFunc    func(orderID int) error
+	LoadCertificateFunc func(orderID int) (certPEM, chainPEM string, err error)
+	SaveMetaFunc        func(orderID int, meta *cert.OrderMeta) error
+	LoadMetaFunc        func(orderID int) (*cert.OrderMeta, error)
+	ListOrdersFunc      func() ([]int, error)
+	DeleteOrderFunc     func(orderID int) error
 }
 
 func (m *MockOrderStore) HasPrivateKey(orderID int) bool {
@@ -83,11 +86,32 @@ func (m *MockOrderStore) SaveCertificate(orderID int, certPEM, chainPEM string) 
 	return nil
 }
 
+func (m *MockOrderStore) LoadCertificate(orderID int) (certPEM, chainPEM string, err error) {
+	if m.LoadCertificateFunc != nil {
+		return m.LoadCertificateFunc(orderID)
+	}
+	return "", "", nil
+}
+
 func (m *MockOrderStore) SaveMeta(orderID int, meta *cert.OrderMeta) error {
 	if m.SaveMetaFunc != nil {
 		return m.SaveMetaFunc(orderID, meta)
 	}
 	return nil
+}
+
+func (m *MockOrderStore) LoadMeta(orderID int) (*cert.OrderMeta, error) {
+	if m.LoadMetaFunc != nil {
+		return m.LoadMetaFunc(orderID)
+	}
+	return nil, nil
+}
+
+func (m *MockOrderStore) ListOrders() ([]int, error) {
+	if m.ListOrdersFunc != nil {
+		return m.ListOrdersFunc()
+	}
+	return []int{}, nil
 }
 
 func (m *MockOrderStore) DeleteOrder(orderID int) error {

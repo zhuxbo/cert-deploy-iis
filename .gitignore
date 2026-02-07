@@ -34,4 +34,6 @@ config.json
 
 # Temp
 nul
-coverage.out
+
+# Coverage
+/*.out

@@ -26,7 +26,10 @@ func TestGenerateRandomString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := generateRandomString(tt.length)
+			result, err := generateRandomString(tt.length)
+			if err != nil {
+				t.Fatalf("generateRandomString(%d) 返回错误: %v", tt.length, err)
+			}
 			if len(result) != tt.length {
 				t.Errorf("generateRandomString(%d) 长度 = %d, want %d", tt.length, len(result), tt.length)
 			}
@@ -53,7 +56,10 @@ func TestGenerateRandomString_Unique(t *testing.T) {
 	// 生成多个随机字符串，验证不重复
 	seen := make(map[string]bool)
 	for i := 0; i < 100; i++ {
-		s := generateRandomString(16)
+		s, err := generateRandomString(16)
+		if err != nil {
+			t.Fatalf("generateRandomString(16) 返回错误: %v", err)
+		}
 		if seen[s] {
 			t.Errorf("generateRandomString() 生成了重复的字符串: %s", s)
 		}

@@ -58,8 +58,14 @@ type OrderStore interface {
 	SavePrivateKey(orderID int, keyPEM string) error
 	// SaveCertificate 保存证书
 	SaveCertificate(orderID int, certPEM, chainPEM string) error
+	// LoadCertificate 加载证书
+	LoadCertificate(orderID int) (certPEM, chainPEM string, err error)
 	// SaveMeta 保存元数据
 	SaveMeta(orderID int, meta *cert.OrderMeta) error
+	// LoadMeta 加载元数据
+	LoadMeta(orderID int) (*cert.OrderMeta, error)
+	// ListOrders 列出所有订单 ID
+	ListOrders() ([]int, error)
 	// DeleteOrder 删除订单
 	DeleteOrder(orderID int) error
 }

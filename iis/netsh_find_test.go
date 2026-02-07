@@ -142,3 +142,44 @@ func TestFindBindingsFromList_NonStandardPort(t *testing.T) {
 		t.Error("应该匹配 www.example.com（不同端口）")
 	}
 }
+
+// TestFindBindingsFromList_EmptyHost 测试空主机名
+func TestFindBindingsFromList_EmptyHost(t *testing.T) {
+	bindings := []SSLBinding{
+		{HostnamePort: ":443", CertHash: "aaa", IsIPBinding: false},
+		{HostnamePort: "", CertHash: "bbb", IsIPBinding: false},
+	}
+
+	result := findBindingsFromList(bindings, []string{"*.example.com"})
+
+	if len(result) != 0 {
+		t.Errorf("空主机名不应匹配，得到 %d 个匹配", len(result))
+	}
+}
+
+// TestFindBindingsFromList_CaseInsensitive 测试大小写不敏感
+func TestFindBindingsFromList_CaseInsensitive(t *testing.T) {
+	bindings := []SSLBinding{
+		{HostnamePort: "WWW.EXAMPLE.COM:443", CertHash: "aaa", IsIPBinding: false},
+	}
+
+	result := findBindingsFromList(bindings, []string{"www.example.com"})
+
+	if len(result) != 1 {
+		t.Fatalf("期望匹配 1 个绑定（大小写不敏感），得到 %d 个", len(result))
+	}
+}
+
+// TestFindBindingsFromList_DuplicateDomain 测试重复域名只返回一次
+func TestFindBindingsFromList_DuplicateDomain(t *testing.T) {
+	bindings := []SSLBinding{
+		{HostnamePort: "www.example.com:443", CertHash: "aaa", IsIPBinding: false},
+	}
+
+	// 域名列表中有重复
+	result := findBindingsFromList(bindings, []string{"www.example.com", "*.example.com"})
+
+	if len(result) != 1 {
+		t.Fatalf("同一绑定只应返回一次，得到 %d 个", len(result))
+	}
+}

@@ -47,12 +47,16 @@ func (d *HTTPDownloader) Download(ctx context.Context, downloadURL string, destP
 	}
 
 	// 下载到临时文件
-	err = d.DownloadToWriter(ctx, downloadURL, f, onProgress)
-	f.Close()
+	downloadErr := d.DownloadToWriter(ctx, downloadURL, f, onProgress)
+	closeErr := f.Close()
 
-	if err != nil {
+	if downloadErr != nil {
 		os.Remove(tmpPath)
-		return err
+		return downloadErr
+	}
+	if closeErr != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("关闭临时文件失败: %w", closeErr)
 	}
 
 	// 删除已存在的目标文件（Windows 上 Rename 不会覆盖）

@@ -353,52 +353,87 @@ func selectBestCert(certs []CertData, targetDomain string) *CertData {
 
 	targetDomain = util.NormalizeDomain(targetDomain)
 
+	// 复制切片以避免修改输入参数（副作用）
+	sorted := make([]CertData, len(certs))
+	copy(sorted, certs)
+
+	// 预解析所有证书的域名列表，避免排序时重复 split
+	type certMeta struct {
+		domains     []string // 预解析的域名列表
+		exactMatch  bool     // 精确匹配
+		wildcardMatch bool   // 通配符匹配
+	}
+	metas := make([]certMeta, len(sorted))
+	for i := range sorted {
+		metas[i].domains = parseDomainList(sorted[i].Domains)
+		metas[i].exactMatch = util.NormalizeDomain(sorted[i].Domain) == targetDomain ||
+			isExactMatchList(metas[i].domains, targetDomain)
+		metas[i].wildcardMatch = containsDomainList(metas[i].domains, targetDomain) ||
+			util.MatchDomain(targetDomain, sorted[i].Domain)
+	}
+
 	// 按优先级排序
-	sort.Slice(certs, func(i, j int) bool {
+	sort.Slice(sorted, func(i, j int) bool {
 		// 优先 active 状态
-		if certs[i].Status == "active" && certs[j].Status != "active" {
+		if sorted[i].Status == "active" && sorted[j].Status != "active" {
 			return true
 		}
-		if certs[i].Status != "active" && certs[j].Status == "active" {
+		if sorted[i].Status != "active" && sorted[j].Status == "active" {
 			return false
 		}
 
 		// 优先精确匹配（不含通配符）
-		iExact := util.NormalizeDomain(certs[i].Domain) == targetDomain || isExactMatch(certs[i].Domains, targetDomain)
-		jExact := util.NormalizeDomain(certs[j].Domain) == targetDomain || isExactMatch(certs[j].Domains, targetDomain)
-		if iExact && !jExact {
+		if metas[i].exactMatch && !metas[j].exactMatch {
 			return true
 		}
-		if !iExact && jExact {
+		if !metas[i].exactMatch && metas[j].exactMatch {
 			return false
 		}
 
 		// 其次是通配符匹配
-		iMatch := containsDomain(certs[i].Domains, targetDomain) || util.MatchDomain(targetDomain, certs[i].Domain)
-		jMatch := containsDomain(certs[j].Domains, targetDomain) || util.MatchDomain(targetDomain, certs[j].Domain)
-		if iMatch && !jMatch {
+		if metas[i].wildcardMatch && !metas[j].wildcardMatch {
 			return true
 		}
-		if !iMatch && jMatch {
+		if !metas[i].wildcardMatch && metas[j].wildcardMatch {
 			return false
 		}
 
 		// 按过期时间排序（晚的优先）
-		return certs[i].ExpiresAt > certs[j].ExpiresAt
+		return sorted[i].ExpiresAt > sorted[j].ExpiresAt
 	})
 
 	// 只返回 active 状态的证书
-	if certs[0].Status == "active" {
-		return &certs[0]
+	if sorted[0].Status == "active" {
+		return &sorted[0]
 	}
 
 	return nil
 }
 
+// parseDomainList 解析逗号分隔的域名列表
+func parseDomainList(domains string) []string {
+	if domains == "" {
+		return nil
+	}
+	parts := strings.Split(domains, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if d := strings.TrimSpace(p); d != "" {
+			result = append(result, d)
+		}
+	}
+	return result
+}
+
 // containsDomain 检查域名列表是否包含目标域名（支持通配符）
 func containsDomain(domains string, target string) bool {
-	for _, d := range strings.Split(domains, ",") {
-		if util.MatchDomain(target, strings.TrimSpace(d)) {
+	return containsDomainList(parseDomainList(domains), target)
+}
+
+// containsDomainList 检查预解析的域名列表是否包含目标域名（支持通配符）
+func containsDomainList(domains []string, target string) bool {
+	for _, d := range domains {
+		if util.MatchDomain(target, d) {
 			return true
 		}
 	}
@@ -407,7 +442,12 @@ func containsDomain(domains string, target string) bool {
 
 // isExactMatch 检查是否精确匹配（不使用通配符）
 func isExactMatch(domains string, target string) bool {
-	for _, d := range strings.Split(domains, ",") {
+	return isExactMatchList(parseDomainList(domains), target)
+}
+
+// isExactMatchList 检查预解析的域名列表是否精确匹配
+func isExactMatchList(domains []string, target string) bool {
+	for _, d := range domains {
 		if util.NormalizeDomain(d) == target {
 			return true
 		}

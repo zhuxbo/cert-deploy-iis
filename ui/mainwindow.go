@@ -161,42 +161,42 @@ func RunApp() {
 	app.btnRefresh = ui.NewButton(app.mainWnd,
 		ui.OptsButton().
 			Text("刷新").
-			Position(ui.Dpi(10, 10)).
-			Width(ui.DpiX(70)).
-			Height(ui.DpiY(28)),
+			Position(ui.Dpi(MarginMedium, MarginMedium)).
+			Width(ui.DpiX(ButtonWidthSmall)).
+			Height(ui.DpiY(ButtonHeight)),
 	)
 
 	app.btnBind = ui.NewButton(app.mainWnd,
 		ui.OptsButton().
 			Text("绑定证书").
-			Position(ui.Dpi(90, 10)).
-			Width(ui.DpiX(80)).
-			Height(ui.DpiY(28)),
+			Position(ui.Dpi(MarginMedium+ButtonWidthSmall+MarginMedium, MarginMedium)).
+			Width(ui.DpiX(ButtonWidthMedium)).
+			Height(ui.DpiY(ButtonHeight)),
 	)
 
 	app.btnInstall = ui.NewButton(app.mainWnd,
 		ui.OptsButton().
 			Text("导入证书").
-			Position(ui.Dpi(180, 10)).
-			Width(ui.DpiX(80)).
-			Height(ui.DpiY(28)),
+			Position(ui.Dpi(MarginMedium+ButtonWidthSmall+MarginMedium+ButtonWidthMedium+MarginMedium, MarginMedium)).
+			Width(ui.DpiX(ButtonWidthMedium)).
+			Height(ui.DpiY(ButtonHeight)),
 	)
 
 	app.btnAPI = ui.NewButton(app.mainWnd,
 		ui.OptsButton().
 			Text("部署接口").
-			Position(ui.Dpi(270, 10)).
-			Width(ui.DpiX(80)).
-			Height(ui.DpiY(28)),
+			Position(ui.Dpi(MarginMedium+ButtonWidthSmall+3*(ButtonWidthMedium+MarginMedium)-ButtonWidthMedium, MarginMedium)).
+			Width(ui.DpiX(ButtonWidthMedium)).
+			Height(ui.DpiY(ButtonHeight)),
 	)
 
 	// 检查更新按钮
 	btnCheckUpdate := ui.NewButton(app.mainWnd,
 		ui.OptsButton().
 			Text("检查更新").
-			Position(ui.Dpi(360, 10)).
-			Width(ui.DpiX(80)).
-			Height(ui.DpiY(28)),
+			Position(ui.Dpi(MarginMedium+ButtonWidthSmall+4*(ButtonWidthMedium+MarginMedium)-ButtonWidthMedium, MarginMedium)).
+			Width(ui.DpiX(ButtonWidthMedium)).
+			Height(ui.DpiY(ButtonHeight)),
 	)
 
 	// 检查更新按钮事件
@@ -370,30 +370,29 @@ func RunApp() {
 			return
 		}
 		cx, cy := int(p.ClientAreaSize().Cx), int(p.ClientAreaSize().Cy)
-		statusHeight := 22
-		taskPanelHeight := 180
 
 		// 调整站点列表大小
-		listHeight := cy - 50 - statusHeight - taskPanelHeight
-		if listHeight < 100 {
-			listHeight = 100
+		toolbarHeight := MarginMedium + ButtonHeight + MarginMedium
+		listHeight := cy - toolbarHeight - StatusBarHeight - TaskPanelHeight
+		if listHeight < ListMinHeight {
+			listHeight = ListMinHeight
 		}
-		app.siteList.Hwnd().SetWindowPos(0, 10, 50, cx-20, listHeight, co.SWP_NOZORDER)
+		app.siteList.Hwnd().SetWindowPos(0, MarginMedium, toolbarHeight, cx-MarginLarge, listHeight, co.SWP_NOZORDER)
 
 		// 调整后台任务面板位置
-		taskPanelY := 50 + listHeight + 5
-		app.lblTaskSection.Hwnd().SetWindowPos(0, 10, taskPanelY, 200, 20, co.SWP_NOZORDER)
-		app.btnAutoCheck.Hwnd().SetWindowPos(0, 10, taskPanelY+25, 100, 28, co.SWP_NOZORDER)
-		app.btnCheckNow.Hwnd().SetWindowPos(0, 120, taskPanelY+25, 80, 28, co.SWP_NOZORDER)
-		app.btnConfig.Hwnd().SetWindowPos(0, 210, taskPanelY+25, 80, 28, co.SWP_NOZORDER)
+		taskPanelY := toolbarHeight + listHeight + MarginSmall
+		app.lblTaskSection.Hwnd().SetWindowPos(0, MarginMedium, taskPanelY, 200, 20, co.SWP_NOZORDER)
+		app.btnAutoCheck.Hwnd().SetWindowPos(0, MarginMedium, taskPanelY+25, ButtonWidthLarge, ButtonHeight, co.SWP_NOZORDER)
+		app.btnCheckNow.Hwnd().SetWindowPos(0, MarginMedium+ButtonWidthLarge+MarginMedium, taskPanelY+25, ButtonWidthMedium, ButtonHeight, co.SWP_NOZORDER)
+		app.btnConfig.Hwnd().SetWindowPos(0, MarginMedium+ButtonWidthLarge+ButtonWidthMedium+MarginLarge, taskPanelY+25, ButtonWidthMedium, ButtonHeight, co.SWP_NOZORDER)
 
 		// 状态指示器位置
 		if app.statusIndicator != nil {
-			app.statusIndicator.SetPosition(300, taskPanelY+28)
+			app.statusIndicator.SetPosition(300, taskPanelY+ButtonHeight)
 		}
 
 		app.lblTaskStatus.Hwnd().SetWindowPos(0, 330, taskPanelY+30, cx-350, 20, co.SWP_NOZORDER)
-		app.txtTaskLog.Hwnd().SetWindowPos(0, 10, taskPanelY+60, cx-20, cy-taskPanelY-60-statusHeight-5, co.SWP_NOZORDER)
+		app.txtTaskLog.Hwnd().SetWindowPos(0, MarginMedium, taskPanelY+60, cx-MarginLarge, cy-taskPanelY-60-StatusBarHeight-MarginSmall, co.SWP_NOZORDER)
 	})
 
 	// 按钮事件

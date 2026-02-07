@@ -50,7 +50,18 @@ func (lb *LogBuffer) AppendRaw(text string) {
 	}
 	var fullText string
 	if needRebuild {
-		fullText = strings.Join(lb.lines, "\r\n") + "\r\n"
+		// 使用 strings.Builder 优化字符串拼接性能
+		var sb strings.Builder
+		// 预估容量：每行平均 50 字符 + 2 字符换行符
+		sb.Grow(len(lb.lines) * 52)
+		for i, line := range lb.lines {
+			if i > 0 {
+				sb.WriteString("\r\n")
+			}
+			sb.WriteString(line)
+		}
+		sb.WriteString("\r\n")
+		fullText = sb.String()
 	}
 	lb.mu.Unlock()
 
@@ -105,7 +116,17 @@ func (lb *LogBuffer) SetMaxLines(max int) {
 	needRebuild := len(lb.lines) > max
 	if needRebuild {
 		lb.lines = lb.lines[len(lb.lines)-max:]
-		fullText = strings.Join(lb.lines, "\r\n") + "\r\n"
+		// 使用 strings.Builder 优化字符串拼接性能
+		var sb strings.Builder
+		sb.Grow(len(lb.lines) * 52)
+		for i, line := range lb.lines {
+			if i > 0 {
+				sb.WriteString("\r\n")
+			}
+			sb.WriteString(line)
+		}
+		sb.WriteString("\r\n")
+		fullText = sb.String()
 	}
 	lb.mu.Unlock()
 	if needRebuild {

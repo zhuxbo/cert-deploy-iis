@@ -376,6 +376,8 @@ func (v *AuthenticodeVerifier) getCertificateInfo(filePath string) (*certificate
 		return nil, fmt.Errorf("未找到签名证书")
 	}
 
+	// Windows API 返回的 certCtx 是有效的指针，转换为 CERT_CONTEXT 是安全的
+	// nolint:gosec // G103: Windows API 交互必须使用 unsafe.Pointer
 	pCert := (*CERT_CONTEXT)(unsafe.Pointer(certCtx))
 	defer procCertFreeCertificateContext.Call(certCtx)
 
