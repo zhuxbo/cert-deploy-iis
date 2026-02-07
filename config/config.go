@@ -28,6 +28,9 @@ const (
 
 	// DefaultTaskName 默认任务计划名称
 	DefaultTaskName = "SSLCtlW"
+
+	// DefaultUpgradeCheckInterval 默认升级检查间隔（小时）
+	DefaultUpgradeCheckInterval = 24
 )
 
 // BindRule 绑定规则
@@ -64,6 +67,14 @@ type Config struct {
 	CheckInterval    int          `json:"check_interval"`            // 检测间隔（小时），默认6
 	TaskName         string       `json:"task_name"`                 // 任务计划名称
 	IIS7Mode         bool         `json:"iis7_mode"`                 // IIS7 兼容模式（自动检测）
+
+	// 升级配置
+	UpgradeEnabled   bool   `json:"upgrade_enabled"`     // 启用自动检查更新，默认 true
+	UpgradeChannel   string `json:"upgrade_channel"`     // 版本通道: stable | beta，默认 stable
+	UpgradeInterval  int    `json:"upgrade_interval"`    // 升级检查间隔（小时），默认 24
+	LastUpgradeCheck string `json:"last_upgrade_check"`  // 上次升级检查时间
+	SkippedVersion   string `json:"skipped_version"`     // 用户跳过的版本
+	ReleaseURL       string `json:"release_url"`         // Release API 地址
 }
 
 // GetToken 获取解密后的 Token
@@ -100,6 +111,11 @@ func DefaultConfig() *Config {
 		CheckInterval:    DefaultCheckInterval,
 		TaskName:         DefaultTaskName,
 		IIS7Mode:         false,
+		// 升级配置默认值
+		UpgradeEnabled:  true,
+		UpgradeChannel:  "stable",
+		UpgradeInterval: DefaultUpgradeCheckInterval,
+		ReleaseURL:      "",
 	}
 }
 
@@ -179,6 +195,14 @@ func Load() (*Config, error) {
 	}
 	if cfg.TaskName == "" {
 		cfg.TaskName = DefaultTaskName
+	}
+
+	// 升级配置默认值
+	if cfg.UpgradeInterval == 0 {
+		cfg.UpgradeInterval = DefaultUpgradeCheckInterval
+	}
+	if cfg.UpgradeChannel == "" {
+		cfg.UpgradeChannel = "stable"
 	}
 
 	if cfg.Token != "" {
@@ -271,6 +295,38 @@ func GetDefaultBindRules(domains []string) []BindRule {
 		})
 	}
 	return rules
+}
+
+// GetUpgradeConfig 获取升级配置（用于 upgrade 包）
+func (c *Config) GetUpgradeConfig() *UpgradeConfig {
+	return &UpgradeConfig{
+		Enabled:        c.UpgradeEnabled,
+		Channel:        c.UpgradeChannel,
+		CheckInterval:  c.UpgradeInterval,
+		LastCheck:      c.LastUpgradeCheck,
+		SkippedVersion: c.SkippedVersion,
+		ReleaseURL:     c.ReleaseURL,
+	}
+}
+
+// SetUpgradeConfig 设置升级配置
+func (c *Config) SetUpgradeConfig(uc *UpgradeConfig) {
+	c.UpgradeEnabled = uc.Enabled
+	c.UpgradeChannel = uc.Channel
+	c.UpgradeInterval = uc.CheckInterval
+	c.LastUpgradeCheck = uc.LastCheck
+	c.SkippedVersion = uc.SkippedVersion
+	c.ReleaseURL = uc.ReleaseURL
+}
+
+// UpgradeConfig 升级配置（与 upgrade 包交互用）
+type UpgradeConfig struct {
+	Enabled        bool
+	Channel        string
+	CheckInterval  int
+	LastCheck      string
+	SkippedVersion string
+	ReleaseURL     string
 }
 
 // ValidationMethod 验证方法常量

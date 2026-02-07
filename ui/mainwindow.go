@@ -13,6 +13,7 @@ import (
 	"sslctlw/cert"
 	"sslctlw/config"
 	"sslctlw/iis"
+	"sslctlw/upgrade"
 	"sslctlw/util"
 
 	"github.com/rodrigocfd/windigo/co"
@@ -25,6 +26,14 @@ var (
 	debugLog     *log.Logger
 	debugLogFile *os.File
 )
+
+// 版本号（由 main.go 设置）
+var version = "0.0.0"
+
+// SetVersion 设置版本号（在 RunApp 之前调用）
+func SetVersion(v string) {
+	version = v
+}
 
 // EnableDebugMode 启用调试模式
 func EnableDebugMode() {
@@ -181,6 +190,23 @@ func RunApp() {
 			Height(ui.DpiY(28)),
 	)
 
+	// 检查更新按钮
+	btnCheckUpdate := ui.NewButton(app.mainWnd,
+		ui.OptsButton().
+			Text("检查更新").
+			Position(ui.Dpi(360, 10)).
+			Width(ui.DpiX(80)).
+			Height(ui.DpiY(28)),
+	)
+
+	// 检查更新按钮事件
+	btnCheckUpdate.On().BnClicked(func() {
+		ShowUpgradeDialog(app.mainWnd, version, func() {
+			// 升级完成后刷新
+			app.refreshSiteList()
+		})
+	})
+
 	// 创建站点列表
 	app.siteList = ui.NewListView(app.mainWnd,
 		ui.OptsListView().
@@ -321,7 +347,10 @@ func RunApp() {
 				app.setButtonsEnabled(false)
 				app.setStatus("正在加载...")
 			})
-			app.doLoadDataAsync(nil)
+			app.doLoadDataAsync(func() {
+				// 数据加载完成后，检查是否需要自动检查更新
+				app.checkAutoUpgrade()
+			})
 		}()
 
 		return 0
@@ -795,4 +824,81 @@ func (app *AppWindow) setStatus(text string) {
 	if app.statusBar != nil && app.statusBar.Parts.Count() > 0 {
 		app.statusBar.Parts.Get(0).SetText(text)
 	}
+}
+
+// refreshSiteList 刷新站点列表
+func (app *AppWindow) refreshSiteList() {
+	app.setButtonsEnabled(false)
+	app.setStatus("正在刷新...")
+	app.doLoadDataAsync(nil)
+}
+
+// checkAutoUpgrade 检查是否需要自动检查更新
+func (app *AppWindow) checkAutoUpgrade() {
+	go func() {
+		// 检查 context
+		select {
+		case <-app.ctx.Done():
+			return
+		default:
+		}
+
+		cfg, err := config.Load()
+		if err != nil || cfg == nil {
+			return
+		}
+
+		// 检查是否启用了自动检查更新
+		if !cfg.UpgradeEnabled {
+			return
+		}
+
+		// 检查 Release URL 是否配置
+		if cfg.ReleaseURL == "" {
+			return
+		}
+
+		// 创建升级配置（安全配置从 DefaultConfig 获取）
+		defaultCfg := upgrade.DefaultConfig()
+		upgradeCfg := &upgrade.Config{
+			Enabled:        cfg.UpgradeEnabled,
+			Channel:        upgrade.Channel(cfg.UpgradeChannel),
+			CheckInterval:  cfg.UpgradeInterval,
+			LastCheck:      cfg.LastUpgradeCheck,
+			SkippedVersion: cfg.SkippedVersion,
+			ReleaseURL:     cfg.ReleaseURL,
+			Fingerprints:   defaultCfg.Fingerprints,
+			TrustedOrg:     defaultCfg.TrustedOrg,
+			TrustedCountry: defaultCfg.TrustedCountry,
+			TrustedCAs:     defaultCfg.TrustedCAs,
+		}
+
+		upgrader := upgrade.NewUpgrader(upgradeCfg)
+
+		// 检查是否应该检查更新（基于检查间隔）
+		if !upgrader.ShouldCheckUpdate() {
+			return
+		}
+
+		// 执行更新检查
+		info, err := upgrader.CheckForUpdate(app.ctx, version)
+
+		// 更新上次检查时间
+		upgrader.UpdateLastCheck()
+		cfg.LastUpgradeCheck = upgradeCfg.LastCheck
+		if err := cfg.Save(); err != nil {
+			logDebug("save config failed after auto upgrade check: %v", err)
+		}
+
+		if err != nil || info == nil {
+			return
+		}
+
+		// 发现新版本，在 UI 线程中显示对话框
+		app.mainWnd.UiThread(func() {
+			ShowUpgradeDialog(app.mainWnd, version, func() {
+				app.refreshSiteList()
+			})
+		})
+	}()
 }

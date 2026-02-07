@@ -46,6 +46,9 @@ func main() {
 		ui.EnableDebugMode()
 	}
 
+	// 设置版本号
+	ui.SetVersion(version)
+
 	// GUI 模式
 	ui.RunApp()
 }
