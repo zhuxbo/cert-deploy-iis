@@ -140,7 +140,7 @@ $os.Caption.Trim() + ' ' + $os.Version
 	}
 
 	// 管理员权限检测
-	_, err = util.RunCmd("net", "session")
+	_, err = util.RunCmd(util.ResolveSystem32Exe("net.exe"), "session")
 	if err != nil {
 		printKV("管理员权限", "否")
 	} else {
@@ -309,7 +309,7 @@ func collectTaskInfo(cfg *config.Config) {
 	}
 
 	fmt.Println("\n详细信息:")
-	for _, line := range strings.Split(strings.TrimSpace(info), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(info), "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" {
 			fmt.Printf("  %s\n", line)

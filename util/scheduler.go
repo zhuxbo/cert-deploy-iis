@@ -16,7 +16,7 @@ func IsTaskExists(taskName string) bool {
 		return false
 	}
 
-	output, err := RunCmdCombined("schtasks", "/query", "/tn", taskName)
+	output, err := RunCmdCombined(ResolveSystem32Exe("schtasks.exe"), "/query", "/tn", taskName)
 	if err != nil {
 		return false
 	}
@@ -53,7 +53,7 @@ func CreateTask(taskName string) error {
 	// /ru SYSTEM: 以 SYSTEM 账户运行（需要管理员权限）
 	// /rl HIGHEST: 最高权限运行
 	// /f: 强制覆盖
-	output, err := RunCmdCombined("schtasks",
+	output, err := RunCmdCombined(ResolveSystem32Exe("schtasks.exe"),
 		"/create",
 		"/tn", taskName,
 		"/tr", taskRun,
@@ -87,7 +87,7 @@ func DeleteTask(taskName string) error {
 		return nil // 不存在则无需删除
 	}
 
-	output, err := RunCmdCombined("schtasks", "/delete", "/tn", taskName, "/f")
+	output, err := RunCmdCombined(ResolveSystem32Exe("schtasks.exe"), "/delete", "/tn", taskName, "/f")
 	if err != nil {
 		return fmt.Errorf("删除任务失败: %v, 输出: %s", err, output)
 	}
@@ -106,7 +106,7 @@ func RunTaskNow(taskName string) error {
 		return fmt.Errorf("任务不存在: %s", taskName)
 	}
 
-	output, err := RunCmdCombined("schtasks", "/run", "/tn", taskName)
+	output, err := RunCmdCombined(ResolveSystem32Exe("schtasks.exe"), "/run", "/tn", taskName)
 	if err != nil {
 		return fmt.Errorf("运行任务失败: %v, 输出: %s", err, output)
 	}
@@ -125,7 +125,7 @@ func GetTaskInfo(taskName string) (string, error) {
 		return "", fmt.Errorf("任务不存在")
 	}
 
-	output, err := RunCmd("schtasks", "/query", "/tn", taskName, "/v", "/fo", "LIST")
+	output, err := RunCmd(ResolveSystem32Exe("schtasks.exe"), "/query", "/tn", taskName, "/v", "/fo", "LIST")
 	if err != nil {
 		return "", err
 	}

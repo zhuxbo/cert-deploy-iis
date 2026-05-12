@@ -1,9 +1,56 @@
 package util
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestResolveSystem32Exe_PowerShell(t *testing.T) {
+	got := ResolveSystem32Exe("powershell.exe")
+	if got == "" {
+		t.Fatal("ResolveSystem32Exe(powershell.exe) 返回空")
+	}
+	sysroot := os.Getenv("SystemRoot")
+	if sysroot == "" {
+		sysroot = `C:\Windows`
+	}
+	want := filepath.Join(sysroot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+	wantAlt := filepath.Join(sysroot, "Sysnative", "WindowsPowerShell", "v1.0", "powershell.exe")
+	if got != want && got != wantAlt {
+		// 允许 LookPath 返回路径不同（如系统极简），但至少应以 powershell.exe 结尾
+		if !strings.EqualFold(filepath.Base(got), "powershell.exe") {
+			t.Errorf("ResolveSystem32Exe(powershell.exe) = %q, want %q 或 %q", got, want, wantAlt)
+		}
+	}
+}
+
+func TestResolveSystem32Exe_AddsExeSuffix(t *testing.T) {
+	withExt := ResolveSystem32Exe("net.exe")
+	noExt := ResolveSystem32Exe("net")
+	// 即使传入不带 .exe，也应能解析到 net.exe（除非系统真的缺失）
+	if !strings.EqualFold(filepath.Base(withExt), "net.exe") {
+		t.Errorf("ResolveSystem32Exe(net.exe) = %q, 期望以 net.exe 结尾", withExt)
+	}
+	if !strings.EqualFold(filepath.Base(noExt), "net.exe") && noExt != "net" {
+		t.Errorf("ResolveSystem32Exe(net) = %q, 期望以 net.exe 结尾或回落到 net", noExt)
+	}
+}
+
+func TestResolveSystem32Exe_UnknownReturnsOriginal(t *testing.T) {
+	got := ResolveSystem32Exe("nonexistent_tool_zzzz_for_test")
+	if got != "nonexistent_tool_zzzz_for_test" {
+		t.Errorf("ResolveSystem32Exe 未命中应回落到原名, 实际 = %q", got)
+	}
+}
+
+func TestResolveSystem32Exe_Empty(t *testing.T) {
+	if got := ResolveSystem32Exe(""); got != "" {
+		t.Errorf("ResolveSystem32Exe(\"\") = %q, want \"\"", got)
+	}
+}
 
 func TestCmdTimeout(t *testing.T) {
 	// 临时设置较短的超时

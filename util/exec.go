@@ -5,6 +5,9 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -19,6 +22,64 @@ var (
 	DefaultPowerShellTimeout = 5 * time.Minute
 )
 
+// system32ExeCache 缓存已解析的系统工具路径
+var system32ExeCache sync.Map
+
+// ResolveSystem32Exe 将 System32 下的系统工具名解析为绝对路径。
+// 避免依赖 PATH —— 当 PATH 被其他软件破坏（如多余引号、缺失条目）时，
+// Go 的 exec.LookPath 会失败导致工具不可用。
+//
+// 解析顺序：
+//  1. 缓存
+//  2. powershell.exe 特例：位于 System32\WindowsPowerShell\v1.0
+//  3. %SystemRoot%\System32\<name>
+//  4. %SystemRoot%\Sysnative\<name>（32 位进程访问 64 位 System32）
+//  5. exec.LookPath（PATH 兜底）
+//  6. 原名（让调用方继续报错）
+func ResolveSystem32Exe(name string) string {
+	if name == "" {
+		return name
+	}
+	if cached, ok := system32ExeCache.Load(name); ok {
+		return cached.(string)
+	}
+
+	sysroot := os.Getenv("SystemRoot")
+	if sysroot == "" {
+		sysroot = `C:\Windows`
+	}
+
+	exeName := name
+	if !strings.HasSuffix(strings.ToLower(exeName), ".exe") {
+		exeName += ".exe"
+	}
+
+	var candidates []string
+	if strings.EqualFold(exeName, "powershell.exe") {
+		candidates = []string{
+			filepath.Join(sysroot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+			filepath.Join(sysroot, "Sysnative", "WindowsPowerShell", "v1.0", "powershell.exe"),
+		}
+	} else {
+		candidates = []string{
+			filepath.Join(sysroot, "System32", exeName),
+			filepath.Join(sysroot, "Sysnative", exeName),
+		}
+	}
+
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			system32ExeCache.Store(name, p)
+			return p
+		}
+	}
+	if p, err := exec.LookPath(name); err == nil {
+		system32ExeCache.Store(name, p)
+		return p
+	}
+	return name
+}
+
 // newCmdContext 创建带超时的命令，返回 cmd 和 cancel 函数
 // 调用方必须在命令执行完毕后调用 cancel 释放资源
 func newCmdContext(timeout time.Duration, name string, args ...string) (*exec.Cmd, context.CancelFunc) {
@@ -32,7 +93,7 @@ func RunPowerShell(script string) (string, error) {
 	// 在脚本开头设置 UTF-8 输出编码
 	fullScript := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + script
 
-	cmd, cancel := newCmdContext(DefaultPowerShellTimeout, "powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
+	cmd, cancel := newCmdContext(DefaultPowerShellTimeout, ResolveSystem32Exe("powershell.exe"), "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
 	defer cancel()
 
 	// 隐藏窗口
@@ -53,7 +114,7 @@ func RunPowerShell(script string) (string, error) {
 func RunPowerShellCombined(script string) (string, error) {
 	fullScript := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + script
 
-	cmd, cancel := newCmdContext(DefaultPowerShellTimeout, "powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
+	cmd, cancel := newCmdContext(DefaultPowerShellTimeout, ResolveSystem32Exe("powershell.exe"), "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
 	defer cancel()
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -73,7 +134,7 @@ func RunPowerShellCombined(script string) (string, error) {
 func RunPowerShellWithEnv(script string, env map[string]string) (string, error) {
 	fullScript := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + script
 
-	cmd, cancel := newCmdContext(DefaultPowerShellTimeout, "powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
+	cmd, cancel := newCmdContext(DefaultPowerShellTimeout, ResolveSystem32Exe("powershell.exe"), "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
 	defer cancel()
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{

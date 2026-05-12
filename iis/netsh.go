@@ -54,7 +54,7 @@ func BindCertificate(hostname string, port int, certHash string) error {
 	_ = UnbindCertificate(hostname, port)
 
 	// 添加新绑定
-	output, err := util.RunCmdCombined("netsh", "http", "add", "sslcert",
+	output, err := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), "http", "add", "sslcert",
 		fmt.Sprintf("hostnameport=%s", hostnamePort),
 		fmt.Sprintf("certhash=%s", certHash),
 		fmt.Sprintf("appid=%s", defaultAppID),
@@ -123,7 +123,7 @@ func BindCertificateByIP(ip string, port int, certHash string) error {
 	_ = UnbindCertificateByIP(ip, port)
 
 	// 添加新绑定
-	output, err := util.RunCmdCombined("netsh", "http", "add", "sslcert",
+	output, err := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), "http", "add", "sslcert",
 		fmt.Sprintf("ipport=%s", ipPort),
 		fmt.Sprintf("certhash=%s", certHash),
 		fmt.Sprintf("appid=%s", defaultAppID),
@@ -179,7 +179,7 @@ func UnbindCertificate(hostname string, port int) error {
 	}
 
 	hostnamePort := fmt.Sprintf("%s:%d", hostname, port)
-	output, err := util.RunCmdCombined("netsh", "http", "delete", "sslcert",
+	output, err := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), "http", "delete", "sslcert",
 		fmt.Sprintf("hostnameport=%s", hostnamePort))
 
 	if err != nil {
@@ -207,7 +207,7 @@ func UnbindCertificateByIP(ip string, port int) error {
 	}
 
 	ipPort := fmt.Sprintf("%s:%d", ip, port)
-	output, err := util.RunCmdCombined("netsh", "http", "delete", "sslcert",
+	output, err := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), "http", "delete", "sslcert",
 		fmt.Sprintf("ipport=%s", ipPort))
 
 	if err != nil {
@@ -219,7 +219,7 @@ func UnbindCertificateByIP(ip string, port int) error {
 
 // ListSSLBindings 列出所有 SSL 证书绑定
 func ListSSLBindings() ([]SSLBinding, error) {
-	output, err := util.RunCmd("netsh", "http", "show", "sslcert")
+	output, err := util.RunCmd(util.ResolveSystem32Exe("netsh.exe"), "http", "show", "sslcert")
 	if err != nil {
 		return nil, fmt.Errorf("获取 SSL 绑定列表失败: %v", err)
 	}
