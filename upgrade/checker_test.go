@@ -44,6 +44,11 @@ func TestCompareVersion(t *testing.T) {
 		// 数字 vs 字符串（数字排在前面）
 		{"1.0.0-1", "1.0.0-alpha", -1},
 		{"1.0.0-alpha", "1.0.0-1", 1},
+
+		// build metadata 不参与排序
+		{"1.0.0+build1", "1.0.0+build2", 0},
+		{"1.0.0", "1.0.0+build", 0},
+		{"1.0.0-beta.1+abc", "1.0.0-beta.1+xyz", 0},
 	}
 
 	for _, tt := range tests {

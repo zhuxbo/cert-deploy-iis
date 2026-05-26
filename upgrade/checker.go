@@ -253,8 +253,12 @@ func comparePreRelease(pre1, pre2 string) int {
 }
 
 // splitVersion 分离主版本号和预发布标签
+// 先剥离 build metadata（semver: +xxx 不参与排序），再切分 pre-release
 func splitVersion(v string) (main, pre string) {
-	if idx := strings.IndexAny(v, "-+"); idx != -1 {
+	if idx := strings.IndexByte(v, '+'); idx != -1 {
+		v = v[:idx]
+	}
+	if idx := strings.IndexByte(v, '-'); idx != -1 {
 		return v[:idx], v[idx+1:]
 	}
 	return v, ""
