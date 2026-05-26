@@ -310,7 +310,7 @@ if ($CurrentVersion) {
     } elseif ($CurrentVersion -eq $TargetVersion) {
         Write-Info "当前版本: $CurrentVersion，强制重新安装"
     } else {
-        Write-Info "升级: $CurrentVersion -> $TargetVersion"
+        Write-Info "安装: $CurrentVersion -> $TargetVersion"
     }
 }
 
