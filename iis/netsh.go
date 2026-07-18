@@ -2,6 +2,7 @@ package iis
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"log"
 	"regexp"
@@ -25,24 +26,6 @@ type SSLBinding struct {
 	CertStoreName   string
 	SslCtlStoreName string
 	IsIPBinding     bool // true: IP:port 绑定（空主机名），false: Hostname:port 绑定（SNI）
-}
-
-// capturedBinding 回绑旧证书所需的绑定参数快照。
-// 最小三字段（CertHash/AppID/CertStoreName）始终可用；
-// full=true 时（经 httpapi 结构化查询）携带完整高级 SSL 参数，回绑可完整还原。
-type capturedBinding struct {
-	CertHash      string
-	AppID         string
-	CertStoreName string
-
-	// 以下高级参数仅在 full=true 时有效（HttpQueryServiceConfiguration 结构化查询结果）
-	full                    bool
-	certCheckMode           uint32 // DefaultCertCheckMode 位掩码
-	revocationFreshnessTime uint32 // DefaultRevocationFreshnessTime（秒）
-	urlRetrievalTimeout     uint32 // DefaultRevocationUrlRetrievalTimeout（毫秒）
-	sslCtlIdentifier        string // pDefaultSslCtlIdentifier
-	sslCtlStoreName         string // pDefaultSslCtlStoreName
-	defaultFlags            uint32 // DefaultFlags 位掩码
 }
 
 // DefaultCertCheckMode / DefaultFlags 位定义（MSDN HTTP_SERVICE_CONFIG_SSL_PARAM）。
@@ -164,25 +147,44 @@ func parseBindingByValue(output string) *capturedBinding {
 	return b
 }
 
-// queryBindingByKey 查询单条 SSL 绑定（keyParam: "hostnameport" 或 "ipport"）
-// 返回 nil 表示未查到（绑定不存在或查询失败）。仅捕获最小三字段（netsh show 正则解析）。
-func queryBindingByKey(keyParam, keyValue string) *capturedBinding {
+// queryBindingByNetsh 经 netsh 查询单条 SSL 绑定。
+// netsh 非零退出既可能是不存在也可能是查询故障，因此一律返回 error，不伪装成“不存在”。
+func queryBindingByNetsh(keyParam, keyValue string) (*capturedBinding, error) {
 	output, err := util.RunCmd(util.ResolveSystem32Exe("netsh.exe"), "http", "show", "sslcert",
 		fmt.Sprintf("%s=%s", keyParam, keyValue))
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("netsh 查询失败: %w", err)
 	}
-	return parseBindingByValue(output)
+	binding := parseBindingByValue(output)
+	if binding == nil {
+		return nil, errors.New("netsh 查询成功但输出无法解析")
+	}
+	return binding, nil
+}
+
+// queryBindingByKey 查询单条 SSL 绑定（keyParam: "hostnameport" 或 "ipport"）。
+// 优先使用 httpapi 精确区分“不存在”和“查询失败”；结构化查询不可用时降级 netsh。
+func queryBindingByKey(keyParam, keyValue string) (*capturedBinding, error) {
+	binding, structuredErr := queryFullBinding(keyParam, keyValue)
+	if structuredErr == nil {
+		return binding, nil
+	}
+	binding, netshErr := queryBindingByNetsh(keyParam, keyValue)
+	if netshErr == nil {
+		return binding, nil
+	}
+	return nil, fmt.Errorf("结构化查询失败: %v; %w", structuredErr, netshErr)
 }
 
 // captureBinding 捕获旧绑定完整参数供回绑：
 // 优先经 httpapi HttpQueryServiceConfiguration 结构化查询（locale 无关，含 flags/吊销/SSL CTL 等高级参数），
-// 查询失败（API 不可用/未查到/结构解析异常）降级为 netsh show 最小三字段捕获，行为不劣于现状。
+// 结构化查询失败（API 不可用/结构解析异常）降级为 netsh show 最小三字段捕获；明确不存在则返回 nil。
 func captureBinding(keyParam, keyValue string) *capturedBinding {
-	if full := queryFullBinding(keyParam, keyValue); full != nil {
+	if full, err := queryFullBinding(keyParam, keyValue); err == nil {
 		return full
 	}
-	return queryBindingByKey(keyParam, keyValue)
+	binding, _ := queryBindingByNetsh(keyParam, keyValue)
+	return binding
 }
 
 // bindAndVerify 通用绑定流程：捕获旧绑定 → 删除 → 添加 → 验证 → 失败回绑
@@ -202,50 +204,62 @@ func bindAndVerify(keyParam, keyValue, certHash string, unbind func() error) err
 		fmt.Sprintf("appid=%s", defaultAppID),
 		"certstorename=MY")
 
-	// 4. 操作后验证目标绑定（verify 瞬时未命中重试一次，避免 netsh show 抖动/延迟误判回绑）
-	if verifyBindingWithRetry(func() *capturedBinding { return queryBindingByKey(keyParam, keyValue) }, certHash, bindVerifyRetryDelay) {
+	// 4. 操作后验证目标绑定；明确区分目标已生效、不存在、异常占用与查询失败。
+	current, queryErr := queryBindingWithRetry(
+		func() (*capturedBinding, error) { return queryBindingByKey(keyParam, keyValue) },
+		certHash,
+		bindVerifyRetryDelay,
+	)
+	state := classifyBindingState(current, queryErr, certHash)
+	if state == bindingStateDesired {
 		return nil
 	}
 
 	failErr := fmt.Errorf("绑定证书失败 (%s=%s): 命令错误=%v, 输出: %s",
 		keyParam, keyValue, addErr, strings.TrimSpace(addOutput))
 
-	// 5. 新绑定未生效：尽力回绑旧证书
+	// 查询失败时实际状态未知，禁止盲删一个可能已正确生效的新绑定。
+	if !bindingStateAllowsRecovery(state) {
+		return fmt.Errorf("%v; 操作后绑定状态无法确认，未执行破坏性回滚: %v", failErr, queryErr)
+	}
+
+	// 5. 已确认新绑定不存在或存在异常绑定：尽力恢复旧证书。
 	if oldBinding == nil {
 		return failErr
 	}
-	if rbErr := rebindOldBinding(keyParam, keyValue, oldBinding); rbErr != nil {
+	if rbErr := rebindOldBinding(keyParam, keyValue, current, oldBinding); rbErr != nil {
 		return fmt.Errorf("%v; 回绑旧证书 %s 失败: %v", failErr, oldBinding.CertHash, rbErr)
 	}
 	log.Printf("绑定新证书失败，已回绑旧证书 %s (%s=%s)", oldBinding.CertHash, keyParam, keyValue)
 	return fmt.Errorf("%v; 已回绑旧证书 %s", failErr, oldBinding.CertHash)
 }
 
-// verifyBindingWithRetry 校验目标绑定是否为期望证书；首次未命中后延迟重查一次再判定。
-// netsh add 成功但紧接的 show 偶发瞬时失败/延迟不应直接判失败触发回绑（回绑还会丢高级 SSL flag）。
-// query 可注入便于单测；retryDelay<=0 时不休眠（测试加速）。
-func verifyBindingWithRetry(query func() *capturedBinding, certHash string, retryDelay time.Duration) bool {
-	if current := query(); current != nil && strings.EqualFold(current.CertHash, certHash) {
-		return true
-	}
-	if retryDelay > 0 {
-		time.Sleep(retryDelay)
-	}
-	current := query()
-	return current != nil && strings.EqualFold(current.CertHash, certHash)
-}
-
 // rebindOldBinding 用捕获的旧绑定信息恢复绑定，结果同样按实际绑定验证。
 // 参数串由 buildRebindArgs 生成：完整捕获时还原全部高级 SSL 参数，最小捕获时保持三字段回绑。
-func rebindOldBinding(keyParam, keyValue string, old *capturedBinding) error {
-	args := append([]string{"http", "add", "sslcert"}, buildRebindArgs(keyParam, keyValue, old)...)
-	output, err := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), args...)
-
-	current := queryBindingByKey(keyParam, keyValue)
-	if current != nil && strings.EqualFold(current.CertHash, old.CertHash) {
+func rebindOldBinding(keyParam, keyValue string, current, old *capturedBinding) error {
+	deleteCurrent := func() error {
+		output, err := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), "http", "delete", "sslcert",
+			fmt.Sprintf("%s=%s", keyParam, keyValue))
+		if err != nil {
+			return fmt.Errorf("命令错误=%v, 输出: %s", err, strings.TrimSpace(output))
+		}
 		return nil
 	}
-	return fmt.Errorf("回绑命令错误=%v, 输出: %s", err, strings.TrimSpace(output))
+	addOld := func() error {
+		args := append([]string{"http", "add", "sslcert"}, buildRebindArgs(keyParam, keyValue, old)...)
+		output, err := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), args...)
+		if err != nil {
+			return fmt.Errorf("命令错误=%v, 输出: %s", err, strings.TrimSpace(output))
+		}
+		return nil
+	}
+	return restoreBinding(
+		current,
+		old,
+		deleteCurrent,
+		addOld,
+		func() (*capturedBinding, error) { return queryBindingByKey(keyParam, keyValue) },
+	)
 }
 
 // normalizeCertHash 清理证书哈希（移除空格和连字符，统一小写）

@@ -108,7 +108,14 @@ Get-ChildItem Cert:\LocalMachine\My
 
 ### netsh 绑定验证
 
-`BindCertificate` 和 `BindCertificateByIP` 在执行绑定命令后会查询验证绑定是否生效。如果命令输出报告成功但验证查询失败，会记录警告日志但返回成功（信任命令输出）。这种情况可能由解析问题或权限差异导致。
+`BindCertificate` 和 `BindCertificateByIP` 在替换前捕获旧绑定完整参数，执行后通过 httpapi 结构化查询验证实际状态，结构化查询不可用时才降级 `netsh show`：
+
+- 目标证书已生效：成功。
+- 明确不存在：直接用旧快照恢复。
+- 存在异常绑定：先删除异常绑定，再用旧快照恢复。
+- 查询失败、状态未知：返回错误且不执行破坏性回滚，避免误删一个可能已经正确生效的新绑定。
+
+恢复后必须再次查询并确认旧证书哈希；不能仅凭 `netsh` 输出判断成功。查询会对瞬时失败或未命中重试一次。
 
 ### AddHttpsBindingIfNotExists 只添加绑定不绑证书
 

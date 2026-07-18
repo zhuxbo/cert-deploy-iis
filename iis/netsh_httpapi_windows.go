@@ -5,6 +5,7 @@ package iis
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"runtime"
@@ -37,7 +38,11 @@ const (
 
 	afInet = 2 // AF_INET（IPv4）
 
-	errorInsufficientBuffer = 122 // ERROR_INSUFFICIENT_BUFFER
+	errorInsufficientBuffer = 122  // ERROR_INSUFFICIENT_BUFFER
+	errorMoreData           = 234  // ERROR_MORE_DATA（同样表示输出缓冲区不足）
+	errorFileNotFound       = 2    // ERROR_FILE_NOT_FOUND（精确绑定不存在）
+	errorNoMoreItems        = 259  // ERROR_NO_MORE_ITEMS（查询无结果）
+	errorNotFound           = 1168 // ERROR_NOT_FOUND（部分系统版本返回）
 )
 
 // guidLE 对应 Windows GUID（Data1/Data2/Data3 为主机字节序，Data4 为字节数组）
@@ -100,18 +105,19 @@ type httpServiceConfigSSLSniSet struct {
 	ParamDesc httpServiceConfigSSLParam
 }
 
-// queryFullBinding 经 httpapi 结构化查询捕获绑定完整参数；失败返回 nil（调用方降级）。
-// keyParam: "ipport"（IPv4）或 "hostnameport"（SNI）；SNI 与 IPv6 ipport 之外的场景返回 nil。
-func queryFullBinding(keyParam, keyValue string) *capturedBinding {
+// queryFullBinding 经 httpapi 结构化查询捕获绑定完整参数。
+// 返回 (nil, nil) 表示明确不存在；返回 error 表示状态未知，调用方可降级 netsh 查询。
+// keyParam: "ipport"（IPv4）或 "hostnameport"（SNI）；不支持的场景返回 error。
+func queryFullBinding(keyParam, keyValue string) (*capturedBinding, error) {
 	host := ParseHostFromBinding(keyValue)
 	port := ParsePortFromBinding(keyValue)
 	if host == "" || port <= 0 || port > 65535 {
-		return nil
+		return nil, fmt.Errorf("无效的绑定键: %s=%s", keyParam, keyValue)
 	}
 
 	// HttpInitialize(HTTPAPI_VERSION{1,0} 打包为 uintptr(1), HTTP_INITIALIZE_CONFIG, NULL)
 	if ret, _, _ := procHTTPInitialize.Call(uintptr(1), uintptr(httpInitializeConfig), 0); ret != 0 {
-		return nil
+		return nil, fmt.Errorf("HttpInitialize 失败: %w", syscall.Errno(ret))
 	}
 	defer func() { _, _, _ = procHTTPTerminate.Call(uintptr(httpInitializeConfig), 0) }()
 
@@ -121,58 +127,78 @@ func queryFullBinding(keyParam, keyValue string) *capturedBinding {
 	case "hostnameport":
 		return querySNIBinding(host, port)
 	default:
-		return nil
+		return nil, fmt.Errorf("不支持的绑定类型: %s", keyParam)
 	}
 }
 
 // queryIPPortBinding 查询 ipport（IPv4）绑定
-func queryIPPortBinding(ip string, port int) *capturedBinding {
+func queryIPPortBinding(ip string, port int) (*capturedBinding, error) {
 	var sa [16]byte // sockaddr_in
 	if !fillSockaddrIn4(sa[:], ip, port) {
-		return nil // 非 IPv4（含 IPv6 通配），降级
+		return nil, fmt.Errorf("不支持的 ipport 地址: %s", ip)
 	}
 	query := httpServiceConfigSSLQuery{
 		QueryDesc: httpServiceConfigQueryExact,
 		KeyDesc:   httpServiceConfigSSLKey{pIpPort: uintptr(unsafe.Pointer(&sa[0]))},
 	}
-	buf := queryServiceConfig(httpServiceConfigSSLCertInfo, unsafe.Pointer(&query), unsafe.Sizeof(query))
+	buf, err := queryServiceConfig(httpServiceConfigSSLCertInfo, unsafe.Pointer(&query), unsafe.Sizeof(query))
 	runtime.KeepAlive(&sa)
 	runtime.KeepAlive(&query)
-	if buf == nil || len(buf) < int(unsafe.Sizeof(httpServiceConfigSSLSet{})) {
-		return nil
+	if err != nil {
+		return nil, err
+	}
+	if buf == nil {
+		return nil, nil // 明确不存在
+	}
+	if len(buf) < int(unsafe.Sizeof(httpServiceConfigSSLSet{})) {
+		return nil, errors.New("httpapi ipport 查询结果结构不完整")
 	}
 	set := (*httpServiceConfigSSLSet)(unsafe.Pointer(&buf[0]))
-	return parseSSLParam(&set.ParamDesc, buf)
+	binding := parseSSLParam(&set.ParamDesc, buf)
+	if binding == nil {
+		return nil, errors.New("httpapi ipport 查询结果无法解析")
+	}
+	return binding, nil
 }
 
 // querySNIBinding 查询 hostnameport（SNI）绑定，IpPort 用 IPv4 通配 0.0.0.0:port
-func querySNIBinding(host string, port int) *capturedBinding {
+func querySNIBinding(host string, port int) (*capturedBinding, error) {
 	hostPtr, err := syscall.UTF16PtrFromString(host)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("SNI 主机名编码失败: %w", err)
 	}
 	var key httpServiceConfigSSLSniKey
 	if !fillSockaddrIn4(key.IpPort[:], "0.0.0.0", port) {
-		return nil
+		return nil, errors.New("SNI 通配地址编码失败")
 	}
 	key.Host = uintptr(unsafe.Pointer(hostPtr))
 	query := httpServiceConfigSSLSniQuery{
 		QueryDesc: httpServiceConfigQueryExact,
 		KeyDesc:   key,
 	}
-	buf := queryServiceConfig(httpServiceConfigSSLSniCertInfo, unsafe.Pointer(&query), unsafe.Sizeof(query))
+	buf, err := queryServiceConfig(httpServiceConfigSSLSniCertInfo, unsafe.Pointer(&query), unsafe.Sizeof(query))
 	runtime.KeepAlive(hostPtr)
 	runtime.KeepAlive(&query)
-	if buf == nil || len(buf) < int(unsafe.Sizeof(httpServiceConfigSSLSniSet{})) {
-		return nil
+	if err != nil {
+		return nil, err
+	}
+	if buf == nil {
+		return nil, nil // 明确不存在
+	}
+	if len(buf) < int(unsafe.Sizeof(httpServiceConfigSSLSniSet{})) {
+		return nil, errors.New("httpapi SNI 查询结果结构不完整")
 	}
 	set := (*httpServiceConfigSSLSniSet)(unsafe.Pointer(&buf[0]))
-	return parseSSLParam(&set.ParamDesc, buf)
+	binding := parseSSLParam(&set.ParamDesc, buf)
+	if binding == nil {
+		return nil, errors.New("httpapi SNI 查询结果无法解析")
+	}
+	return binding, nil
 }
 
 // queryServiceConfig 执行 HttpQueryServiceConfiguration，处理缓冲区不足重试；失败返回 nil。
 // 返回的缓冲区 8 字节对齐，供结构体指针安全解引用。
-func queryServiceConfig(configID uint32, input unsafe.Pointer, inputLen uintptr) []byte {
+func queryServiceConfig(configID uint32, input unsafe.Pointer, inputLen uintptr) ([]byte, error) {
 	buf := alignedBuf(4096)
 	var retLen uint32
 	ret, _, _ := procHTTPQueryServiceConfiguration.Call(
@@ -185,7 +211,7 @@ func queryServiceConfig(configID uint32, input unsafe.Pointer, inputLen uintptr)
 		uintptr(unsafe.Pointer(&retLen)),
 		0,
 	)
-	if ret == errorInsufficientBuffer && retLen > uint32(len(buf)) {
+	if (ret == errorInsufficientBuffer || ret == errorMoreData) && retLen > uint32(len(buf)) {
 		buf = alignedBuf(int(retLen))
 		ret, _, _ = procHTTPQueryServiceConfiguration.Call(
 			0,
@@ -198,10 +224,13 @@ func queryServiceConfig(configID uint32, input unsafe.Pointer, inputLen uintptr)
 			0,
 		)
 	}
-	if ret != 0 {
-		return nil // 未查到 / 错误：降级
+	if ret == errorFileNotFound || ret == errorNoMoreItems || ret == errorNotFound {
+		return nil, nil
 	}
-	return buf
+	if ret != 0 {
+		return nil, fmt.Errorf("HttpQueryServiceConfiguration 失败: %w", syscall.Errno(ret))
+	}
+	return buf, nil
 }
 
 // parseSSLParam 从 HTTP_SERVICE_CONFIG_SSL_PARAM 提取完整绑定参数；异常返回 nil（降级）。
