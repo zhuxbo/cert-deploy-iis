@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"sslctlw/cert"
 	"sslctlw/config"
@@ -233,10 +234,26 @@ func runStatus() {
 	if taskName == "" {
 		taskName = config.DefaultTaskName
 	}
-	if util.IsTaskExists(taskName) {
-		fmt.Printf("计划任务: %s (已创建)\n", taskName)
-	} else {
+	if !util.IsTaskExists(taskName) {
 		fmt.Printf("计划任务: %s (未创建)\n", taskName)
+		return
+	}
+	fmt.Printf("计划任务: %s (已创建)\n", taskName)
+
+	// 任务运行健康：上次运行时间/结果，停摆时明确告警
+	health, err := util.GetTaskHealth(taskName)
+	if err != nil {
+		fmt.Printf("  运行状态: 查询失败 (%v)\n", err)
+		return
+	}
+	if health.HasRun {
+		fmt.Printf("  上次运行: %s (结果: 0x%X)\n",
+			health.LastRunTime.Format("2006-01-02 15:04:05"), health.LastTaskResult)
+	} else {
+		fmt.Println("  上次运行: 从未运行")
+	}
+	for _, w := range util.EvaluateTaskHealth(health, time.Now()) {
+		fmt.Printf("  [告警] %s\n", w)
 	}
 }
 

@@ -76,7 +76,7 @@ sslctlw help
 
 ### 自动部署
 
-计划任务调用 `sslctlw deploy --all` 实现自动续签。`setup` 命令会自动创建计划任务。
+计划任务调用 `sslctlw deploy --all` 实现自动续签。`setup` 命令会自动创建计划任务（XML 定义，启用错过补偿：关机错过计划时间后开机补跑）。`status` 命令显示任务上次运行时间与结果，停摆时告警。
 
 ## API 接口
 
