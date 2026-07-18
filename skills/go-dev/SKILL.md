@@ -179,9 +179,16 @@ func parseTimeMultiFormat(value string) time.Time {
 }
 ```
 
-### fmt.Printf 在 `-H windowsgui` 模式下不可见
+### GUI 模式无控制台：库层禁止直接 fmt.Print
 
-使用 `-ldflags="-H windowsgui"` 编译后，`fmt.Printf`/`fmt.Println` 的输出不会显示在任何地方。使用 `log.Printf` 替代（输出到 stderr，可被日志系统捕获）。
+程序是 **Console 子系统**应用（非 `-H windowsgui`），GUI 模式（无参数）启动后由
+`util.HideConsole()`（`ShowWindow(SW_HIDE)` + `FreeConsole()`）隐藏并释放控制台，此时
+`fmt.Printf`/`fmt.Println` 的输出无处可见。因此：
+
+- 库层 / 后台诊断用 `log.Printf`（输出 stderr，可被日志系统捕获），不用 `fmt.Print`。
+- **setup 共享逻辑**：`setup/` 包的 `Run(opts, progress, promptKey)` 被 CLI 与 GUI 共用，
+  进度必须经 `ProgressFunc(step, total, message)` 回调输出，绝不直接 `fmt.Print` ——
+  否则 GUI 模式下进度全部丢失。CLI 侧把回调打印到控制台，GUI 侧写进日志面板。
 
 ### UTF-8 安全字符串截断
 

@@ -43,13 +43,11 @@ integration/  # 端到端集成测试
 
 ## 关键设计
 
-- **API 配置在证书级** - 每个 CertConfig 有独立的 `API` 字段（URL + DPAPI 加密 Token），无全局 API
-- **per-cert client** - deploy 层遍历证书时为每个证书创建独立的 API Client
-- **分散延迟** - CLI `deploy --all` 启用分散延迟（总上限 600s），GUI 不延迟
-- **域名提取** - 部署成功后从证书 PEM 提取 CN+SAN 更新配置，回退到 API 数据
-- **Local 模式健壮性** - CSR 重试上限 10 次（spec §3.2），processing 状态按 spec §3.5 处理
-- **Console 子系统** - 构建为 Console 应用，GUI 模式通过 `util.HideConsole()` 隐藏控制台
-- **setup 共享** - `setup/` 包的 `Run()` 被 CLI 和 GUI 共用，通过 `ProgressFunc` 回调输出进度
+- **证书级 API + per-cert client** - 每个 CertConfig 独立 `api` 字段（URL + DPAPI 加密 Token），无全局 API；deploy 层为每张证书创建独立 Client。详见 `skills/api/`
+- **自动部署行为** - CLI `deploy --all` 证书间分散延迟（总上限 600s），GUI 不延迟；部署成功后从证书 PEM 提取 CN+SAN 回填配置。详见 `skills/api/`
+- **Local 模式健壮性** - CSR 重试上限 10 次（spec §3.2），processing 按 spec §3.5 等待。详见 `skills/api/`
+- **Console 子系统** - 构建为 Console 应用（非 `-H windowsgui`），GUI 模式运行时 `util.HideConsole()` 隐藏控制台。详见 `skills/windigo-ui/`
+- **setup 共享** - `setup/` 的 `Run()` 被 CLI/GUI 共用，进度经 `ProgressFunc` 回调（GUI 无控制台，禁止直接 `fmt.Print`）。详见 `skills/go-dev/`
 
 ## 构建与发布
 

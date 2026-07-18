@@ -87,6 +87,10 @@ Content-Type: application/json
 请求体为三字段 + 可选 `message`（仅 `status=failure` 时携带失败原因摘要，
 客户端脱敏 + 按 rune 截断 ≤256，服务端上限 500）。`status` 仅用 `success`/`failure`（回调不发 `pending`）。
 
+**订单级聚合单发**：一个订单内多个绑定的成败合并为**单条**回调（spec §2.8），
+全部成功→`success`（不含 message）；任一失败→`failure`（message 取首个失败绑定原因）；
+无绑定被处理（全部冲突跳过 / 无匹配）则不产生回调。详见"自动部署运行时行为"。
+
 ```
 POST /api/deploy/callback
 Content-Type: application/json
@@ -173,17 +177,23 @@ client.Callback(&api.CallbackRequest{
 
 ## 配置结构
 
+**API 配置在证书级**：每张证书独立的 `api` 字段（`url` + Token），无全局 API 配置。
+Windows 平台以 DPAPI 机器作用域加密的 `encrypted_token` 替代 spec §1.4 的明文 `token`
+（spec §1.6 允许的安全增强扩展，见 `config.CertAPIConfig`）。
+
 ```json
 {
-  "api_base_url": "http://manager.example.com",
-  "token": "deploy-api-token",
   "certificates": [
     {
       "domain": "example.com",
       "domains": ["example.com", "www.example.com"],
       "order_id": 123,
       "use_local_key": false,
-      "enabled": true
+      "enabled": true,
+      "api": {
+        "url": "https://manager.example.com",
+        "encrypted_token": "vm:..."
+      }
     }
   ],
   "renew_days_local": 15,
@@ -198,6 +208,8 @@ client.Callback(&api.CallbackRequest{
 | `domains` | SAN 域名列表 |
 | `order_id` | 订单 ID |
 | `use_local_key` | 本机提交模式（true）或自动签发模式（false） |
+| `api.url` | 证书级部署接口地址 |
+| `api.encrypted_token` | 证书级 Token，DPAPI 机器作用域密文（`GetToken()` 解密，禁止直读） |
 | `renew_days_local` | 本机提交：到期前多少天发起续签（默认 15，需 > 服务端 14 天） |
 | `renew_days_fetch` | 自动签发：到期前多少天开始拉取（默认 13，需 < 服务端 14 天） |
 | `check_interval` | 定时检测间隔（小时，默认 6） |
@@ -234,6 +246,10 @@ client.Callback(&api.CallbackRequest{
 
 **设计意图**：到期前 13 天发起续签，确保使用本地私钥。
 
+**CSR 重试上限**：`issue_retry_count > 10`（代码常量 `maxIssueRetries = 10`）时停止提交，
+跳过并等待人工处理（spec §3.2 前置过滤 / §3.5 Local 模式）；每次提交 CSR 递增计数，
+`active` 部署成功后清零。避免 CA 持续拒签时无限重试。`processing` 状态保持查询等待，不重复提交。
+
 **重要**：重新签发（reissue）不会改变 OrderID，只有续费（renew）才会生成新 OrderID。
 
 本地存储目录结构：
@@ -247,6 +263,40 @@ client.Callback(&api.CallbackRequest{
   └── 67890/
       └── ...
 ```
+
+## 自动部署运行时行为
+
+`deploy/auto.go` 的 `AutoDeploy(cfg, d, scatterDelay)` 逐证书执行，运行时行为：
+
+### per-cert client
+
+按"API 配置在证书级"设计，遍历证书时为每张证书用 `NewClientForCert(&cfg.Certificates[i])`
+创建独立 API Client（各自的 URL + 解密 Token），不共用全局客户端。
+
+### 分散延迟（deploy --all）
+
+CLI `deploy --all` 传 `scatterDelay=true`，在证书之间插入随机延迟以分散 API 请求压力；
+GUI 模式传 `false` 不延迟。区间由启用证书数量 N 决定（`calcSpreadDelay`）：
+
+- 常量：`spreadMin=5`、`spreadMax=120`、`spreadTotalMax=600`（秒）
+- 每证书延迟区间上界 = `clamp(600/N, 5, 120)`
+- 第一张证书不延迟，其后每张在区间内随机延迟
+
+### 部署成功后回填配置
+
+出现成功部署结果且 API 返回证书内容非空时：
+
+- `updateCertDomains`：`cert.ExtractDomainsFromPEM` 从证书 PEM 提取 CN+SAN，覆盖
+  `Domain`/`Domains`；提取失败保持原值（既有值来自 API 查询写入）。
+- `updateCertSerial`：回填证书序列号到 `Metadata.CertSerial`。
+- 续费导致 `order_id` 变化时同步更新配置中的订单号。
+
+### 订单级聚合回调
+
+一个订单内各绑定的成败在循环内收集，循环后由 `sendAggregatedCallback` 生成**单条**订单级
+回调（spec §2.8）：全成→`success`（无 message）；任一失败→`failure`，message 为
+`"<失败数>/<总数> 绑定失败: <首因>"`；无绑定被处理则不回调。message 由 `api.Client.Callback`
+统一脱敏 + 按 rune 截断至 `CallbackMessageMaxRunes = 256`（服务端上限 500）。
 
 ## 证书状态
 

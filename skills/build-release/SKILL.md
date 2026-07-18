@@ -6,15 +6,20 @@
 # 开发
 go build -o sslctlw.exe
 
-# 发布（隐藏控制台 + 优化体积）
-go build -ldflags="-s -w -H windowsgui" -o sslctlw.exe
+# 发布（优化体积；实际由 build/build.sh 注入版本号与升级安全配置）
+go build -trimpath -ldflags="-X main.version=1.0.0 -s -w" -o sslctlw.exe
 ```
 
 | 参数 | 作用 |
 |------|------|
+| `-trimpath` | 去除构建路径信息 |
 | `-s` | 去除符号表 |
 | `-w` | 去除调试信息 |
-| `-H windowsgui` | 隐藏控制台 |
+| `-X main.version=` | 注入版本号 |
+
+> **不使用 `-H windowsgui`**：程序构建为 **Console 子系统**应用，GUI 模式在运行时由
+> `util.HideConsole()`（`ShowWindow(SW_HIDE)` + `FreeConsole()`）隐藏控制台，使同一个 exe
+> 兼作 CLI（子命令，控制台可见）与 GUI（无参数，隐藏控制台）。详见 `skills/windigo-ui/`。
 
 ## Manifest 嵌入
 
