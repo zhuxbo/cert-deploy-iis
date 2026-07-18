@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -115,7 +116,22 @@ func (s *OrderStore) SavePrivateKey(orderID int, keyPEM string) error {
 		return fmt.Errorf("加密私钥失败: %w", err)
 	}
 	keyPath := filepath.Join(s.GetOrderPath(orderID), "private.key")
-	return os.WriteFile(keyPath, []byte(encrypted), 0600)
+	return atomicWriteKey(keyPath, []byte(encrypted))
+}
+
+// atomicWriteKey 原子写私钥密文（spec §10.3）：临时文件 + Rename 替换。
+// Windows 上 os.Rename 即 MOVEFILE_REPLACE_EXISTING，原子替换已存在目标；
+// 中途失败（临时文件写入或替换出错）时清理临时文件并保留已有密文，绝不截断唯一密文。
+func atomicWriteKey(keyPath string, data []byte) error {
+	tmpPath := keyPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
+		return fmt.Errorf("写入临时私钥失败: %w", err)
+	}
+	if err := os.Rename(tmpPath, keyPath); err != nil {
+		_ = os.Remove(tmpPath) // 清理临时文件，保留旧密文
+		return fmt.Errorf("原子替换私钥失败: %w", err)
+	}
+	return nil
 }
 
 // LoadPrivateKey 从订单目录加载私钥（使用 DPAPI 解密）
@@ -134,11 +150,15 @@ func (s *OrderStore) LoadPrivateKey(orderID int) (string, error) {
 	if block, _ := pem.Decode([]byte(keyPEM)); block == nil {
 		return "", errors.New("私钥文件可能已损坏")
 	}
-	// 透明迁移：旧用户作用域密文成功解密后，重新以机器作用域加密落盘
-	// 迁移失败不影响本次读取，下次加载再尝试
+	// 透明迁移：旧用户作用域密文成功解密后，原子重写为机器作用域密文（spec §10.3）。
+	// 迁移写失败保留旧密文并记警告、下次加载再试，绝不因迁移失败丢失唯一密文；
+	// 迁移失败不影响本次读取（keyPEM 已在内存中）。
 	if KeyNeedsMigration(stored) {
-		if reEncrypted, encErr := EncryptPrivateKey(keyPEM); encErr == nil {
-			_ = os.WriteFile(keyPath, []byte(reEncrypted), 0600)
+		reEncrypted, encErr := EncryptPrivateKey(keyPEM)
+		if encErr != nil {
+			log.Printf("警告: 私钥迁移重加密失败（订单 %d），保留旧密文下次再试: %v", orderID, encErr)
+		} else if err := atomicWriteKey(keyPath, []byte(reEncrypted)); err != nil {
+			log.Printf("警告: 私钥迁移写入失败（订单 %d），保留旧密文下次再试: %v", orderID, err)
 		}
 	}
 	return keyPEM, nil

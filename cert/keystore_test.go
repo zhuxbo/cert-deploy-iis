@@ -636,3 +636,53 @@ func TestOrderStore_SaveMeta_Override(t *testing.T) {
 		t.Errorf("Status = %q, want %q", loaded.Status, "active")
 	}
 }
+
+// TestAtomicWriteKey_Success 原子写成功：替换已有内容且清理临时文件
+func TestAtomicWriteKey_Success(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "private.key")
+	if err := os.WriteFile(keyPath, []byte("OLD-CIPHERTEXT"), 0600); err != nil {
+		t.Fatalf("预置旧密文失败: %v", err)
+	}
+
+	if err := atomicWriteKey(keyPath, []byte("NEW-CIPHERTEXT")); err != nil {
+		t.Fatalf("atomicWriteKey() error = %v", err)
+	}
+
+	got, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("读取失败: %v", err)
+	}
+	if string(got) != "NEW-CIPHERTEXT" {
+		t.Errorf("内容 = %q, want NEW-CIPHERTEXT", got)
+	}
+	if _, err := os.Stat(keyPath + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("临时文件应已清理")
+	}
+}
+
+// TestAtomicWriteKey_WriteFail_PreservesExisting 临时文件写入失败时保留旧密文（迁移不丢唯一密文）
+func TestAtomicWriteKey_WriteFail_PreservesExisting(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "private.key")
+	if err := os.WriteFile(keyPath, []byte("OLD-CIPHERTEXT"), 0600); err != nil {
+		t.Fatalf("预置旧密文失败: %v", err)
+	}
+	// 把 .tmp 造成目录，使 os.WriteFile(tmpPath) 失败，模拟迁移写入失败
+	if err := os.Mkdir(keyPath+".tmp", 0700); err != nil {
+		t.Fatalf("构造 .tmp 目录失败: %v", err)
+	}
+
+	if err := atomicWriteKey(keyPath, []byte("NEW-CIPHERTEXT")); err == nil {
+		t.Fatal("临时文件写入失败应返回错误")
+	}
+
+	// 旧密文必须完好无损
+	got, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("读取旧密文失败: %v", err)
+	}
+	if string(got) != "OLD-CIPHERTEXT" {
+		t.Errorf("旧密文被破坏: %q, want OLD-CIPHERTEXT", got)
+	}
+}

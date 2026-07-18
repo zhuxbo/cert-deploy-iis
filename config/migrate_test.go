@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -800,5 +801,104 @@ func TestMergeInto_NoChange(t *testing.T) {
 	changed := mergeInto(raw, ".", source)
 	if changed {
 		t.Error("无新字段时不应有变更")
+	}
+}
+
+// === API Token 明文迁移测试（加密失败保留明文）===
+
+// plainTokenRaw 构造带单个证书明文 api.token 的 raw 配置
+func plainTokenRaw(token string) map[string]interface{} {
+	return map[string]interface{}{
+		"certificates": []interface{}{
+			map[string]interface{}{
+				"order_id": float64(1),
+				"api":      map[string]interface{}{"token": token},
+			},
+		},
+	}
+}
+
+// apiObjOf 取第一个证书的 api 子对象
+func apiObjOf(raw map[string]interface{}) map[string]interface{} {
+	return raw["certificates"].([]interface{})[0].(map[string]interface{})["api"].(map[string]interface{})
+}
+
+// TestMigrateAPIToken_EncryptFailKeepsPlaintext 加密失败保留明文、不改写，下次可重试迁移
+func TestMigrateAPIToken_EncryptFailKeepsPlaintext(t *testing.T) {
+	orig := encryptTokenFn
+	defer func() { encryptTokenFn = orig }()
+	encryptTokenFn = func(string) (string, error) { return "", errors.New("DPAPI 不可用") }
+
+	raw := plainTokenRaw("user-only-credential")
+	if migrateAPIToken(raw) {
+		t.Error("加密失败不应报告已变更（避免以丢失明文的形态改写配置）")
+	}
+	api := apiObjOf(raw)
+	if got, _ := api["token"].(string); got != "user-only-credential" {
+		t.Errorf("明文 token 应保留，实际 = %q", got)
+	}
+	if _, has := api["encrypted_token"]; has {
+		t.Error("加密失败不应写入 encrypted_token")
+	}
+
+	// 下次加载（加密恢复）应完成迁移，凭据未丢失
+	encryptTokenFn = func(s string) (string, error) { return EncryptionPrefixMachine + s, nil }
+	if !migrateAPIToken(raw) {
+		t.Fatal("恢复加密后应完成迁移")
+	}
+	api = apiObjOf(raw)
+	if _, has := api["token"]; has {
+		t.Error("迁移成功后明文 token 应删除")
+	}
+	if got, _ := api["encrypted_token"].(string); got != EncryptionPrefixMachine+"user-only-credential" {
+		t.Errorf("迁移后 encrypted_token = %q", got)
+	}
+}
+
+// TestMigrateAPIToken_EncryptSuccessReplaces 加密成功替换为 vm: 密文并删除明文
+func TestMigrateAPIToken_EncryptSuccessReplaces(t *testing.T) {
+	orig := encryptTokenFn
+	defer func() { encryptTokenFn = orig }()
+	encryptTokenFn = func(s string) (string, error) { return EncryptionPrefixMachine + "ciphertext", nil }
+
+	raw := plainTokenRaw("plain-token")
+	if !migrateAPIToken(raw) {
+		t.Fatal("加密成功应报告已变更")
+	}
+	api := apiObjOf(raw)
+	if _, has := api["token"]; has {
+		t.Error("迁移后明文 token 应删除")
+	}
+	if got, _ := api["encrypted_token"].(string); got != EncryptionPrefixMachine+"ciphertext" {
+		t.Errorf("encrypted_token = %q, want vm: 前缀密文", got)
+	}
+	// 幂等：再次迁移无变更
+	if migrateAPIToken(raw) {
+		t.Error("已迁移的配置再次迁移不应变更（幂等）")
+	}
+}
+
+// TestMigrateAPIToken_ExistingEncryptedDropsPlaintext 已有密文时删除冗余明文，不覆盖密文
+func TestMigrateAPIToken_ExistingEncryptedDropsPlaintext(t *testing.T) {
+	raw := map[string]interface{}{
+		"certificates": []interface{}{
+			map[string]interface{}{
+				"order_id": float64(1),
+				"api": map[string]interface{}{
+					"token":           "redundant-plain",
+					"encrypted_token": EncryptionPrefixMachine + "existing",
+				},
+			},
+		},
+	}
+	if !migrateAPIToken(raw) {
+		t.Fatal("存在冗余明文应报告已变更")
+	}
+	api := apiObjOf(raw)
+	if _, has := api["token"]; has {
+		t.Error("冗余明文应删除")
+	}
+	if got, _ := api["encrypted_token"].(string); got != EncryptionPrefixMachine+"existing" {
+		t.Errorf("已有密文不应被覆盖，实际 = %q", got)
 	}
 }

@@ -199,9 +199,16 @@ func Load() (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return DefaultConfig(), nil
+			// 一次性防御：正式文件缺失但存在旧版本两步写法遗留的 .bak 时用其恢复，
+			// 不再误判为无配置返回空默认配置（会丢失既有证书配置）
+			if recovered, ok := recoverFromBak(path); ok {
+				data = recovered
+			} else {
+				return DefaultConfig(), nil
+			}
+		} else {
+			return nil, err
 		}
-		return nil, err
 	}
 
 	var raw map[string]interface{}
@@ -280,37 +287,36 @@ func (c *Config) Save() error {
 	return atomicWriteFile(path, data)
 }
 
-// atomicWriteFile 原子写配置文件：临时文件 + 重命名（Windows 先备份旧文件再替换）
-// 写中途崩溃不会截断已有配置
+// atomicWriteFile 原子写配置文件：临时文件 + 单次重命名替换。
+// Windows 上 os.Rename 即 MOVEFILE_REPLACE_EXISTING，可直接原子替换已存在目标，
+// 无需"先备份再替换"的两步 rename——后者在两次 rename 之间存在正式文件缺失窗口，
+// 崩溃后 Load 遇 NotExist 会误判为无配置返回空默认配置。单步替换消除该窗口。
 func atomicWriteFile(path string, data []byte) error {
-	// 1. 写入临时文件
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
 		return fmt.Errorf("写入临时文件失败: %w", err)
 	}
-
-	// 2. 安全替换（Windows 需要先移开目标文件）
-	bakPath := path + ".bak"
-	if _, err := os.Stat(path); err == nil {
-		// 先备份旧文件
-		if err := os.Rename(path, bakPath); err != nil {
-			os.Remove(tmpPath) // 清理临时文件
-			return fmt.Errorf("备份旧配置失败: %w", err)
-		}
-	}
-
 	if err := os.Rename(tmpPath, path); err != nil {
-		// 重命名失败，从备份恢复
-		if _, bakErr := os.Stat(bakPath); bakErr == nil {
-			os.Rename(bakPath, path)
-		}
+		_ = os.Remove(tmpPath) // 清理临时文件，保留旧配置
 		return fmt.Errorf("重命名配置文件失败: %w", err)
 	}
-
-	// 删除备份文件
-	os.Remove(bakPath)
-
 	return nil
+}
+
+// recoverFromBak 一次性防御：兼容旧版本"先备份再替换"两步写法在两次 rename 之间
+// 崩溃后遗留的状态（正式文件缺失、path.bak 存在）。仅在正式文件缺失时调用：
+// 将 .bak 恢复为正式文件并返回其内容，避免误判为无配置返回空默认配置。
+func recoverFromBak(path string) ([]byte, bool) {
+	bakPath := path + ".bak"
+	data, err := os.ReadFile(bakPath)
+	if err != nil {
+		return nil, false
+	}
+	// 恢复为正式文件；恢复失败也返回已读到的数据供本次加载继续
+	if renErr := os.Rename(bakPath, path); renErr != nil {
+		fmt.Printf("警告: 从 .bak 恢复配置失败: %v\n", renErr)
+	}
+	return data, true
 }
 
 // AddCertificate 添加证书配置

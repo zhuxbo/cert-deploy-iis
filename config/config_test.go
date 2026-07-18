@@ -831,10 +831,39 @@ func TestAtomicWriteFile(t *testing.T) {
 		t.Fatalf("覆盖内容 = %q", data)
 	}
 
-	// 覆盖后不残留临时/备份文件
+	// 覆盖后不残留临时/备份文件（单步替换不再产生 .bak）
 	for _, suffix := range []string{".tmp", ".bak"} {
 		if _, err := os.Stat(path + suffix); !os.IsNotExist(err) {
 			t.Errorf("不应残留 %s 文件", suffix)
 		}
+	}
+}
+
+// TestRecoverFromBak 一次性防御：正式文件缺失且 .bak 存在时用 .bak 恢复
+func TestRecoverFromBak(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	bakPath := path + ".bak"
+
+	// 场景 1：无 .bak → 不恢复
+	if data, ok := recoverFromBak(path); ok || data != nil {
+		t.Errorf("无 .bak 应返回 (nil,false)，got (%q,%v)", data, ok)
+	}
+
+	// 场景 2：有 .bak 且正式文件缺失 → 恢复内容并落地为正式文件
+	if err := os.WriteFile(bakPath, []byte(`{"restored":true}`), 0600); err != nil {
+		t.Fatalf("预置 .bak 失败: %v", err)
+	}
+	data, ok := recoverFromBak(path)
+	if !ok || string(data) != `{"restored":true}` {
+		t.Fatalf("恢复内容 = %q, ok = %v", data, ok)
+	}
+	// 正式文件已恢复，.bak 已被 rename 消费
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != `{"restored":true}` {
+		t.Errorf("正式文件应被恢复: %q, err=%v", got, err)
+	}
+	if _, err := os.Stat(bakPath); !os.IsNotExist(err) {
+		t.Errorf(".bak 恢复后应已消费")
 	}
 }

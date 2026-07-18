@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 )
 
@@ -11,9 +12,9 @@ type migrateAction int
 
 const (
 	actionRename migrateAction = iota + 1 // 重命名字段（path 下 field→target）
-	actionDelete                           // 删除字段（path 下的 field）
-	actionMove                             // 扁平字段移入子对象（目标已存在则不覆盖）
-	actionSpread                           // 顶层字段分发到数组元素（合并语义，不覆盖已有值）
+	actionDelete                          // 删除字段（path 下的 field）
+	actionMove                            // 扁平字段移入子对象（目标已存在则不覆盖）
+	actionSpread                          // 顶层字段分发到数组元素（合并语义，不覆盖已有值）
 )
 
 // migrateRule 声明式迁移规则
@@ -117,7 +118,12 @@ func migrateUpgradeChannel(raw map[string]interface{}) bool {
 	return false
 }
 
+// encryptTokenFn 明文 Token 加密函数，可在测试中替换以注入加密失败
+var encryptTokenFn = EncryptToken
+
 // migrateAPIToken 将明文 api.token 加密迁移为 encrypted_token
+// 加密失败时保留原明文字段不动、记警告日志，下次加载再试迁移，
+// 避免丢弃用户唯一凭据导致被迫重录（与 vm:/v1: 前缀迁移逻辑幂等协同）
 func migrateAPIToken(raw map[string]interface{}) bool {
 	certs := getSlice(raw, "certificates")
 	if len(certs) == 0 {
@@ -137,14 +143,20 @@ func migrateAPIToken(raw map[string]interface{}) bool {
 		if !hasToken || token == "" {
 			continue
 		}
+		// 已有密文：明文冗余，安全删除
 		if _, hasEncrypted := apiObj["encrypted_token"].(string); hasEncrypted {
 			delete(apiObj, "token")
 			changed = true
 			continue
 		}
-		if encrypted, err := EncryptToken(token); err == nil {
-			apiObj["encrypted_token"] = encrypted
+		// 加密失败：保留明文，不删除、不置换，下次加载重试；切勿丢弃唯一凭据
+		encrypted, err := encryptTokenFn(token)
+		if err != nil {
+			log.Printf("警告: 迁移 API Token 加密失败，保留明文待下次重试: %v", err)
+			continue
 		}
+		// 成功才替换：写入密文并删除明文
+		apiObj["encrypted_token"] = encrypted
 		delete(apiObj, "token")
 		changed = true
 	}
