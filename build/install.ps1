@@ -145,6 +145,57 @@ function Normalize-Version {
     return $Ver
 }
 
+# 重建目录 DACL，仅保留 SYSTEM 与 Administrators 完全控制。
+# 不能只用 icacls /inheritance:r /grant:r：它会移除继承 ACE，但会保留存量目录已有的其他显式 ACE。
+function Set-RestrictedDirectoryAcl {
+    param([Parameter(Mandatory=$true)][string]$Path)
+
+    $allowedSids = @('S-1-5-18', 'S-1-5-32-544')
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+
+    # 断开继承且不复制继承项，再清空所有残留显式 ACE。
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.Access)) {
+        [void]$acl.RemoveAccessRuleSpecific($rule)
+    }
+
+    $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    foreach ($sidValue in $allowedSids) {
+        $sid = [System.Security.Principal.SecurityIdentifier]::new($sidValue)
+        $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$acl.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $acl -ErrorAction Stop
+
+    # 回读硬校验，避免 Set-Acl 静默保留意外 Allow ACE 后继续安装。
+    $verified = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $seen = @{}
+    foreach ($ace in $verified.Access) {
+        if ($ace.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) {
+            continue
+        }
+        $sid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+        if ($allowedSids -notcontains $sid) {
+            throw "目录 ACL 仍包含非管理员显式授权: $sid"
+        }
+        if (($ace.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne [System.Security.AccessControl.FileSystemRights]::FullControl) {
+            throw "目录 ACL 的必需主体未获得完全控制: $sid"
+        }
+        $seen[$sid] = $true
+    }
+    foreach ($requiredSid in $allowedSids) {
+        if (-not $seen.ContainsKey($requiredSid)) {
+            throw "目录 ACL 缺少必需授权: $requiredSid"
+        }
+    }
+}
+
 function Get-InstalledVersion {
     $ExePath = "C:\sslctlw\sslctlw.exe"
     if (-not (Test-Path $ExePath)) { return "" }
@@ -276,11 +327,12 @@ if (-not (Test-Path $InstallDir)) {
 # 机器作用域 DPAPI 密文的机密性完全依赖文件系统 ACL：C:\ 默认 DACL 含 BUILTIN\Users
 # 读权限且被继承，普通用户可读 config.json（encrypted_token）与 orders\*\private.key 后自行解密。
 # 用 SID 形式授权（SYSTEM=S-1-5-18, Administrators=S-1-5-32-544）保证非英文 locale 可用；
-# /inheritance:r 断开继承，仅保留这两个主体的完全控制。失败必须中止安装。
+# 重建 DACL，清除继承与存量显式 ACE，仅保留这两个主体的完全控制。失败必须中止安装。
 Write-Info "收紧安装目录 ACL（仅 SYSTEM 与 Administrators）..."
-& icacls.exe $InstallDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    Write-Err "收紧目录 ACL 失败（icacls 退出码 $LASTEXITCODE）"
+try {
+    Set-RestrictedDirectoryAcl -Path $InstallDir
+} catch {
+    Write-Err "收紧目录 ACL 失败: $($_.Exception.Message)"
     Write-Err "机器作用域加密要求数据目录仅限管理员访问；ACL 未收紧会使普通用户可读取并解密 Token 与私钥，已中止安装"
     exit 1
 }

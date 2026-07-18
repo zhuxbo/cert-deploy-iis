@@ -141,6 +141,6 @@ func EvaluateDataDirACL(path string) []string {
 	}
 	return []string{fmt.Sprintf(
 		"数据目录 %s 的 ACL 允许非管理员主体访问 (%s)；机器作用域加密的 Token 与私钥可被这些主体解密，"+
-			"请重新运行安装脚本或执行 icacls \"%s\" /inheritance:r /grant:r \"*S-1-5-18:(OI)(CI)F\" \"*S-1-5-32-544:(OI)(CI)F\" 收紧权限",
-		path, strings.Join(names, ", "), path)}
+			"请重新运行安装脚本以重建目录 DACL、清除存量显式授权",
+		path, strings.Join(names, ", "))}
 }

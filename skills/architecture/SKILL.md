@@ -266,11 +266,11 @@ Token 与私钥使用 Windows DPAPI 加密存储，采用**机器作用域**（`
 文件系统 ACL——本机任意能读到 `sslctlw/` 数据目录的账户都能解密其中的 Token 与私钥。
 因此**数据目录必须仅限管理员（Administrators/SYSTEM）访问**。安装脚本默认装到 `C:\sslctlw`
 （根目录，`C:\` 默认 DACL 含 `BUILTIN\Users` 读权限且被继承），故 `build/install.ps1` 在创建
-安装目录后立即用 `icacls $InstallDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"`
-断开继承并仅授予 SYSTEM 与 Administrators 完全控制（SID 形式，非英文 locale 亦可用），失败则中止安装。
+安装目录后立即通过 `Set-RestrictedDirectoryAcl` 重建 DACL：断开继承、不复制继承项、移除存量显式 ACE，
+再仅授予 SYSTEM 与 Administrators 完全控制（SID 形式，非英文 locale 亦可用），并回读校验；失败则中止安装。
 Go 侧在 `status` 命令与守护（`deploy --all`）启动时各做一次 ACL 自检（`util.EvaluateDataDirACL`，
 按 SID 比较，locale 无关）：若数据目录被授予非管理员主体访问，输出告警但不阻断运行。
-若不经安装脚本、手工把程序放到宽松权限目录，需自行用上述 `icacls` 命令收紧。
+若不经安装脚本、手工把程序放到宽松权限目录，需自行重建目录 DACL，确保只允许 SYSTEM 与 Administrators 访问。
 这是用"账户隔离"换"SYSTEM 自动续签可用"的有意取舍。
 
 旧版本用用户作用域加密的密文（前缀 `v1:` / `v1:dpapi:`）仍兼容解密：能解密时会在配置加载或私钥读取时透明重加密为机器作用域；
