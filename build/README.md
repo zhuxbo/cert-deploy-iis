@@ -1,96 +1,44 @@
-# 构建与发布
+# 构建、签名与发布工具
 
-## 脚本说明
+本目录只提供可执行工具和配置样例，不维护另一份发布流程。权威职责如下：
 
-| 脚本 | 用途 |
-|------|------|
-| `build.sh` | 构建脚本（测试 → 编译 → 输出到 dist/） |
-| `sign.sh` | Authenticode 代码签名（SimplySign + signtool） |
-| `release.sh` | 一键发布（构建 → 签名 → 上传） |
-| `install.ps1` | 客户端安装脚本（发布时自动上传到服务器） |
+- Windows 构建、Authenticode、正式资产与 bundle：`skills/build-release.md`
+- dev/main 发布编排、Git/GitHub、恢复和验收：`skills/remote-release.md`
+- 跨仓统一语义：`deploy-spec.md` 第 8 节
 
-## 一键发布
+## 工具
+
+| 文件 | 单一职责 |
+| --- | --- |
+| `build.sh` | 构建 Windows amd64 EXE，注入版本和升级签名信任配置，不承担 CI 门禁 |
+| `sign.sh` | 对一个 EXE 执行或验证 Authenticode 签名 |
+| `release.sh` | 生成持久化 bundle；对全部发布节点执行 stage/publish/verify/cleanup |
+| `release-helper.py` | 确定性校验 manifest、生成索引、节点提交/回滚/验收 |
+| `release-helper-test.sh` | 在临时目录测试 main 不可变、dev 覆盖和回滚 |
+| `check-governance.sh` | 检查智能体配置、skill 路由和薄工具入口漂移 |
+| `install.ps1` | Windows 安装/升级入口 |
+
+常用的无副作用检查：
 
 ```bash
-./build/release.sh 1.0.0              # 构建 → 签名 → 发布
-./build/release.sh --skip-build 1.0.0 # 跳过构建
-./build/release.sh --skip-sign 1.0.0  # 跳过签名
-./build/release.sh --server cn 1.0.0  # 只发布到指定服务器
-./build/release.sh 1.0.0-beta         # 发布到 dev 通道
+bash build/release.sh --dry-run 1.2.3-rc.1
+bash build/release-helper-test.sh
+bash build/check-governance.sh
 ```
 
-## 单独使用
+不要直接把 `release.sh` 当作完整正式发布入口；正式发布必须从 `skills/remote-release.md` 开始。
 
-```bash
-./build/build.sh 1.0.0    # 仅构建
-./build/sign.sh            # 仅签名 dist/sslctlw.exe
-./build/sign.sh --verify   # 验证签名
-```
-
-## 配置
-
-### build.conf
-
-构建和签名配置，从模板创建：
+## 本地秘密配置
 
 ```bash
 cp build/build.conf.example build/build.conf
-```
-
-| 配置项 | 说明 |
-|--------|------|
-| `TRUSTED_ORG` | EV 证书组织名（编译时注入，用于升级验证） |
-| `TRUSTED_COUNTRY` | 国家代码（默认 CN） |
-| `SIGN_THUMBPRINT` | 证书 SHA1 指纹（SimplySign Desktop 查看） |
-| `SIGN_TSA` | 时间戳服务器（默认 `http://time.certum.pl`） |
-
-### release.conf
-
-发布服务器配置：
-
-```bash
 cp build/release.conf.example build/release.conf
+chmod 600 build/build.conf build/release.conf
 ```
 
-| 配置项 | 说明 |
-|--------|------|
-| `SERVERS` | 服务器列表（名称,主机,端口,目录,URL） |
-| `SSH_USER` | SSH 用户名 |
-| `SSH_KEY` | SSH 私钥路径 |
+两个实际配置文件均被 Git 忽略：
 
-## 发布通道
+- `build.conf`：升级时信任的签名组织/国家、SimplySign 证书指纹和时间戳服务。
+- `release.conf`：完整发布节点集合、SSH 用户和私钥。所有节点共同参与发布，不提供单节点公开发布入口。
 
-- `main`: 正式版（如 `1.0.0`）
-- `dev`: 开发版（如 `1.0.0-beta`、`1.0.0-rc1`）
-
-版本号包含 `-` 时自动归入 dev 通道。
-
-## 服务器配置
-
-1. **添加 release 用户**
-```bash
-useradd -m -s /bin/bash release
-```
-
-2. **配置 SSH 密钥**
-```bash
-mkdir -p /home/release/.ssh
-cat >> /home/release/.ssh/authorized_keys << 'EOF'
-ssh-ed25519 AAAA... your-key
-EOF
-chmod 700 /home/release/.ssh
-chmod 600 /home/release/.ssh/authorized_keys
-chown -R release:release /home/release/.ssh
-```
-
-3. **创建发布目录并设置权限**
-```bash
-mkdir -p /var/www/release/sslctlw
-chown -R release:release /var/www/release/sslctlw
-```
-
-4. **安装 Python3**（用于更新 releases.json）
-```bash
-apt install python3  # Debian/Ubuntu
-yum install python3  # CentOS/RHEL
-```
+Windows 发布机还需要 Git Bash/MSYS2、Go 1.24+、Python 3.9+、SimplySign Desktop、Windows SDK `signtool` 和 `cygpath`。发布节点需要 Python 3。

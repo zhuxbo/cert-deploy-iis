@@ -101,13 +101,10 @@ API 配置在证书级别，每个证书可以有不同的 API 地址和 Token�
 - Go 1.24+
 - Windows 环境 (使用 windigo GUI 库)
 
-### 编译与发布
+### 编译
 
 ```bash
-# 一键发布（构建 → Authenticode 签名 → 上传）
-./build/release.sh 1.0.0
-
-# 仅构建
+# 发布构建（Windows amd64，注入版本）
 ./build/build.sh 1.0.0
 
 # 仅签名
@@ -116,6 +113,8 @@ API 配置在证书级别，每个证书可以有不同的 API 地址和 Token�
 # 或直接构建
 go build -trimpath -ldflags="-s -w -X main.version=1.0.0" -o dist/sslctlw.exe
 ```
+
+正式发布不是单个脚本命令：必须遵守 `skills/remote-release.md` 的 PR、CI、持久化 bundle、全节点暂存、不可变 tag/GitHub Release、恢复和最终验收顺序。平台资产与签名细节见 `skills/build-release.md`；`build/release.sh --dry-run <version>` 可无副作用检查版本分流与执行计划。
 
 ## 技术栈
 

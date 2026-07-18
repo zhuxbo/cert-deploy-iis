@@ -1,360 +1,418 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# sslctlw 一键发布脚本
-# 构建 → Authenticode 签名 → 上传到远程服务器
-#
-# 用法:
-#   ./release.sh <版本号>              # 一键：构建+签名+发布
-#   ./release.sh --skip-build 1.0.0   # 跳过构建（已有 dist/sslctlw.exe）
-#   ./release.sh --skip-sign 1.0.0    # 跳过 Authenticode 签名
-#   ./release.sh --server cn 1.0.0    # 发布到指定服务器
-#   ./release.sh --test               # 测试 SSH 连接
+# sslctlw release data-plane coordinator.
+# Git/PR/tag/GitHub Release orchestration belongs to skills/remote-release.md.
 
-set -e
+set -euo pipefail
 
-# ========================================
-# 配置
-# ========================================
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONFIG_FILE="$SCRIPT_DIR/release.conf"
-DIST_DIR="$PROJECT_ROOT/dist"
+HELPER="$SCRIPT_DIR/release-helper.py"
+DIST_EXE="$PROJECT_ROOT/dist/sslctlw.exe"
+RECOVERY_DIR="$SCRIPT_DIR/recovery"
+ASSET_NAME="sslctlw-windows-amd64.exe"
 
-EXE_NAME="sslctlw.exe"
-
-KEEP_VERSIONS=5
 SSH_TIMEOUT=10
+SSH_USER=""
+SSH_KEY=""
+SERVERS=()
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+VERSION=""
+CHANNEL=""
+SOURCE_COMMIT=""
+DIRTY=""
+ASSET_SHA=""
+INSTALL_SHA=""
+BUNDLE=""
+RELEASE_ID=""
+PREPARED_BUNDLE=""
+PYTHON_BIN=""
 
-log_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warning() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
-log_step()    { echo -e "\n${GREEN}==>${NC} $1"; }
+info() { printf '[INFO] %s\n' "$*"; }
+ok() { printf '[OK] %s\n' "$*"; }
+die() { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 
-# ========================================
-# 加载配置
-# ========================================
-load_config() {
-    if [ ! -f "$CONFIG_FILE" ]; then
-        log_error "配置文件不存在: $CONFIG_FILE"
-        log_info "请复制 release.conf.example 并配置:"
-        log_info "  cp $SCRIPT_DIR/release.conf.example $CONFIG_FILE"
-        exit 1
-    fi
+usage() {
+    cat <<'EOF'
+sslctlw 发布数据面
 
-    source "$CONFIG_FILE"
+用法:
+  build/release.sh --dry-run <version>
+  build/release.sh prepare <version>
+  build/release.sh stage <bundle-dir>
+  build/release.sh publish <bundle-dir>
+  build/release.sh verify <bundle-dir>
+  build/release.sh rollback <bundle-dir>
+  build/release.sh cleanup <bundle-dir>
+  build/release.sh dev <prerelease-version>
+  build/release.sh test
 
-    if [ ${#SERVERS[@]} -eq 0 ]; then log_error "未配置 SERVERS"; exit 1; fi
-    if [ -z "$SSH_USER" ]; then log_error "未配置 SSH_USER"; exit 1; fi
-    if [ -z "$SSH_KEY" ]; then log_error "未配置 SSH_KEY"; exit 1; fi
-
-    SSH_KEY="${SSH_KEY/#\~/$HOME}"
-    if [ ! -f "$SSH_KEY" ]; then log_error "SSH 密钥不存在: $SSH_KEY"; exit 1; fi
-}
-
-# ========================================
-# SSH/SCP
-# ========================================
-parse_server() {
-    IFS=',' read -r SERVER_NAME SERVER_HOST SERVER_PORT SERVER_DIR SERVER_URL <<< "$1"
-    SERVER_PORT=${SERVER_PORT:-22}
-}
-
-ssh_cmd() {
-    local host="$1" port="$2"; shift 2
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=$SSH_TIMEOUT \
-        -p "$port" "$SSH_USER@$host" "$@"
-}
-
-scp_cmd() {
-    scp -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -P "$3" \
-        "$1" "$SSH_USER@$2:$4"
-}
-
-# ========================================
-# 测试连接
-# ========================================
-test_all_connections() {
-    log_step "测试所有服务器连接..."
-    local failed=0
-    for server in "${SERVERS[@]}"; do
-        parse_server "$server"
-        log_info "测试: $SERVER_NAME ($SERVER_HOST:$SERVER_PORT)"
-        if ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "echo 'OK'" 2>/dev/null; then
-            log_success "$SERVER_NAME: 连接成功"
-        else
-            log_error "$SERVER_NAME: 连接失败"
-            failed=$((failed + 1))
-        fi
-    done
-    [ $failed -gt 0 ] && { log_error "$failed 个连接失败"; return 1; }
-    log_success "所有连接正常"
-}
-
-get_channel() {
-    [[ "$1" == *"-"* ]] && echo "dev" || echo "main"
-}
-
-# ========================================
-# 确保 tag
-# ========================================
-ensure_tag() {
-    local tag="$1" head=$(git rev-parse HEAD)
-    local tag_commit=$(git rev-parse "refs/tags/$tag" 2>/dev/null || echo "")
-    if [ -z "$tag_commit" ]; then
-        log_info "创建 tag: $tag"
-        git tag "$tag" && git push origin "$tag"
-    elif [ "$tag_commit" != "$head" ]; then
-        log_warning "更新 tag $tag"
-        git tag -d "$tag" 2>/dev/null || true; git push origin ":refs/tags/$tag" 2>/dev/null || true
-        git tag "$tag" && git push origin "$tag"
-    else
-        log_info "tag $tag 已存在"
-    fi
-}
-
-# ========================================
-# 远程更新 releases.json（spec 6.1, 8.4）
-# 通道做顶层 key，每通道 {latest, versions[{version, released_at, checksums}]}
-# ========================================
-update_releases_json_remote() {
-    local server_str="$1" version="$2" channel="$3"
-    parse_server "$server_str"
-    log_info "更新 releases.json..."
-
-    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "SERVER_DIR='$SERVER_DIR' VERSION='$version' CHANNEL='$channel' python3 << 'PYEOF'
-import json, os, hashlib, datetime
-sd = os.environ['SERVER_DIR']
-ver = os.environ['VERSION']
-ch = os.environ['CHANNEL']
-v_ver = ver if ver.startswith('v') else f'v{ver}'
-strip = lambda s: s.lstrip('v')
-rf = os.path.join(sd, 'releases.json')
-data = {}
-if os.path.exists(rf):
-    try:
-        with open(rf) as f: data = json.load(f)
-    except: pass
-# 确保通道存在
-if ch not in data: data[ch] = {'latest': '', 'versions': []}
-ch_data = data[ch]
-if 'versions' not in ch_data: ch_data['versions'] = []
-# 产物文件名: {product}-{os}-{arch}.{ext}（spec 8.1，版本在目录路径中体现）
-artifact = 'sslctlw-windows-amd64.exe'
-# 计算 SHA256（spec 6.1: checksums 按文件名索引）
-exe_path = os.path.join(sd, ch, v_ver, artifact)
-checksums = {}
-if os.path.exists(exe_path):
-    h = hashlib.sha256()
-    with open(exe_path, 'rb') as f:
-        for chunk in iter(lambda: f.read(8192), b''): h.update(chunk)
-    checksums[artifact] = f'sha256:{h.hexdigest()}'
-entry = {'version': strip(v_ver), 'released_at': datetime.date.today().isoformat(), 'checksums': checksums}
-existing = [i for i, v in enumerate(ch_data['versions']) if strip(v['version']) == strip(v_ver)]
-if existing: ch_data['versions'][existing[0]] = entry
-else: ch_data['versions'].insert(0, entry)
-ch_data['latest'] = strip(v_ver)
-with open(rf, 'w') as f: json.dump(data, f, indent=2)
-os.chmod(rf, 0o644)
-print(f'已更新: {ch}/{strip(v_ver)}')
-PYEOF"
-}
-
-# ========================================
-# 清理旧版本（spec 8.4: 每通道保留 KEEP_VERSIONS 个）
-# ========================================
-cleanup_old_versions_remote() {
-    local server_str="$1" channel="$2"
-    parse_server "$server_str"
-    log_info "清理旧版本（$channel 通道保留 $KEEP_VERSIONS 个）..."
-
-    # 清理产物目录
-    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "
-        cd \"$SERVER_DIR/$channel\" 2>/dev/null || exit 0
-        removed=\$(ls -dt v* 2>/dev/null | tail -n +$((KEEP_VERSIONS + 1)))
-        [ -n \"\$removed\" ] && echo \"\$removed\" | xargs -r rm -rf
-    "
-
-    # 同步 releases.json：移除已删除目录对应的条目
-    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "SERVER_DIR='$SERVER_DIR' CHANNEL='$channel' python3 << 'PYEOF'
-import json, os
-sd = os.environ['SERVER_DIR']
-ch = os.environ['CHANNEL']
-rf = os.path.join(sd, 'releases.json')
-cd = os.path.join(sd, ch)
-if not os.path.exists(rf): exit(0)
-with open(rf) as f: data = json.load(f)
-if ch not in data: exit(0)
-ch_data = data[ch]
-existing = {d for d in os.listdir(cd) if d.startswith('v')} if os.path.isdir(cd) else set()
-strip = lambda s: s.lstrip('v')
-ch_data['versions'] = [v for v in ch_data.get('versions', []) if f'v{strip(v[\"version\"])}' in existing]
-if ch_data['versions']:
-    ch_data['latest'] = ch_data['versions'][0]['version']
-else:
-    ch_data['latest'] = ''
-with open(rf, 'w') as f: json.dump(data, f, indent=2)
-os.chmod(rf, 0o644)
-PYEOF"
-}
-
-# ========================================
-# 上传到服务器（spec 8.2: {channel}/v{version}/）
-# ========================================
-upload_to_server() {
-    local server_str="$1" version="$2" channel="$3"
-    parse_server "$server_str"
-    log_step "部署到 $SERVER_NAME ($SERVER_HOST)..."
-
-    # 产物命名: {product}-{os}-{arch}.{ext}（spec 8.1，版本在目录路径中体现）
-    local artifact="sslctlw-windows-amd64.exe"
-
-    # 目录结构: {server_dir}/{channel}/v{version}/（spec 8.2）
-    local remote_dir="$SERVER_DIR/$channel/$version"
-    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "mkdir -p \"$remote_dir\" && rm -f \"$remote_dir\"/$artifact"
-
-    log_info "上传 $artifact..."
-    scp_cmd "$DIST_DIR/$EXE_NAME" "$SERVER_HOST" "$SERVER_PORT" "$remote_dir/$artifact"
-
-    # 生成 SHA256 校验文件
-    log_info "生成 SHA256 校验文件..."
-    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "cd \"$remote_dir\" && sha256sum $artifact > $artifact.sha256 2>/dev/null || shasum -a 256 $artifact > $artifact.sha256"
-
-    # 上传 install.ps1
-    log_info "上传 install.ps1..."
-    scp_cmd "$PROJECT_ROOT/build/install.ps1" "$SERVER_HOST" "$SERVER_PORT" "$SERVER_DIR/install.ps1"
-
-    update_releases_json_remote "$server_str" "$version" "$channel"
-
-    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "chmod 644 \"$SERVER_DIR/releases.json\" \"$SERVER_DIR/install.ps1\" 2>/dev/null; chmod 644 \"$remote_dir\"/$artifact 2>/dev/null"
-
-    cleanup_old_versions_remote "$server_str" "$channel"
-    log_success "$SERVER_NAME: 部署完成"
-}
-
-# ========================================
-# 帮助
-# ========================================
-show_help() {
-    cat << EOF
-sslctlw 一键发布脚本
-
-用法: $0 [选项] [版本号]
-
-选项:
-  --skip-build      跳过构建（已有 dist/sslctlw.exe）
-  --skip-sign       跳过 Authenticode 签名
-  --server NAME     只发布到指定服务器
-  --test            测试 SSH 连接
-  -h, --help        显示帮助
-
-示例:
-  ./release.sh 1.0.0              # 一键：构建 → 签名 → 发布
-  ./release.sh --skip-build 1.0.0 # 跳过构建，签名 + 发布
-  ./release.sh 1.0.0-dev          # 发布到 dev 通道
+正式版 Git、PR、tag、GitHub Release 和恢复顺序见 skills/remote-release.md。
 EOF
 }
 
-# ========================================
-# 主流程
-# ========================================
-main() {
-    local version="" target_server="" test_only=false
-    local skip_build=false skip_sign=false
+require_cmd() {
+    command -v "$1" >/dev/null 2>&1 || die "缺少命令: $1"
+}
 
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --test) test_only=true; shift ;;
-            --server) target_server="$2"; shift 2 ;;
-            --skip-build) skip_build=true; shift ;;
-            --skip-sign) skip_sign=true; shift ;;
-            -h|--help) show_help; exit 0 ;;
-            -*) log_error "未知选项: $1"; show_help; exit 1 ;;
-            *) version="$1"; shift ;;
-        esac
-    done
-
-    echo ""
-    echo "========================================"
-    echo "  sslctlw 一键发布"
-    echo "========================================"
-    echo ""
-
-    load_config
-
-    if [ "$test_only" = true ]; then test_all_connections; exit $?; fi
-
-    [ -z "$version" ] && { log_error "必须指定版本号"; exit 1; }
-
-    local channel=$(get_channel "$version")
-    local version_bare="${version#v}"
-    [[ "$version" != v* ]] && version="v$version"
-
-    log_info "版本: $version"
-    log_info "通道: $channel"
-    log_info "目标: ${target_server:-全部}"
-    echo ""
-
-    # ---- 1. 构建 ----
-    if [ "$skip_build" = false ]; then
-        log_step "构建..."
-        "$SCRIPT_DIR/build.sh" "$version_bare"
-        echo ""
+find_python() {
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN=python3
+    elif command -v python >/dev/null 2>&1 && python -c 'import sys; raise SystemExit(sys.version_info < (3, 9))' 2>/dev/null; then
+        PYTHON_BIN=python
     else
-        log_info "跳过构建"
+        die "缺少 Python 3.9+"
     fi
+}
 
-    # ---- 2. Authenticode 签名 ----
-    if [ "$skip_sign" = false ]; then
-        log_step "Authenticode 代码签名..."
-        "$SCRIPT_DIR/sign.sh" "$DIST_DIR/$EXE_NAME"
-        echo ""
-    else
-        log_info "跳过 Authenticode 签名"
-    fi
+validate_version() {
+    local output
+    output="$("$PYTHON_BIN" "$HELPER" validate-version "$1")" || exit 1
+    IFS=$'\t' read -r VERSION CHANNEL <<EOF
+$output
+EOF
+    [ -n "$VERSION" ] && [ -n "$CHANNEL" ] || die "无法解析版本: $1"
+}
 
-    # 检查 exe
-    [ ! -f "$DIST_DIR/$EXE_NAME" ] && { log_error "找不到 $DIST_DIR/$EXE_NAME"; exit 1; }
+validate_bundle() {
+    BUNDLE="$(cd "$1" 2>/dev/null && pwd)" || die "bundle 不存在: $1"
+    local output
+    output="$("$PYTHON_BIN" "$HELPER" verify-bundle --bundle "$BUNDLE")" || exit 1
+    IFS=$'\t' read -r VERSION CHANNEL SOURCE_COMMIT DIRTY ASSET_SHA INSTALL_SHA <<EOF
+$output
+EOF
+    RELEASE_ID="$(basename "$BUNDLE")"
+    [[ "$RELEASE_ID" =~ ^[0-9A-Za-z._-]+$ ]] || die "bundle 目录名不安全: $RELEASE_ID"
+}
 
-    # ---- 3. Tag ----
-    [ "$channel" = "main" ] && ensure_tag "v${version#v}"
+verify_bundle_signature() {
+    info "核对 bundle Authenticode 与配置证书指纹"
+    bash "$SCRIPT_DIR/sign.sh" --verify "$BUNDLE/$ASSET_NAME"
+}
 
-    # ---- 4. 连接测试 ----
-    test_all_connections || { log_error "请先解决连接问题"; exit 1; }
+config_mode() {
+    local mode
+    mode="$(stat -f '%Lp' "$CONFIG_FILE" 2>/dev/null || stat -c '%a' "$CONFIG_FILE" 2>/dev/null || true)"
+    printf '%s' "$mode"
+}
 
-    # ---- 5. 上传 ----
-    local success=0 failed=0
+load_config() {
+    [ -f "$CONFIG_FILE" ] || die "缺少 $CONFIG_FILE；从 release.conf.example 创建并设为 600"
+    local mode
+    mode="$(config_mode)"
+    [ "$mode" = "600" ] || die "$CONFIG_FILE 权限必须是 600，当前为 ${mode:-未知}"
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+    [ "${#SERVERS[@]}" -gt 0 ] || die "SERVERS 不能为空"
+    [ -n "${SSH_USER:-}" ] || die "SSH_USER 不能为空"
+    [ -n "${SSH_KEY:-}" ] || die "SSH_KEY 不能为空"
+    SSH_KEY="${SSH_KEY/#\~/$HOME}"
+    [ -f "$SSH_KEY" ] || die "SSH 密钥不存在: $SSH_KEY"
+}
+
+parse_server() {
+    IFS=',' read -r SERVER_NAME SERVER_HOST SERVER_PORT SERVER_DIR SERVER_URL <<EOF
+$1
+EOF
+    SERVER_PORT="${SERVER_PORT:-22}"
+    [[ "$SERVER_NAME" =~ ^[0-9A-Za-z._-]+$ ]] || die "服务器名称不安全: $SERVER_NAME"
+    [[ "$SERVER_HOST" =~ ^[0-9A-Za-z._:-]+$ ]] || die "服务器地址不安全: $SERVER_HOST"
+    [[ "$SERVER_PORT" =~ ^[0-9]+$ ]] || die "服务器端口无效: $SERVER_PORT"
+    [[ "$SERVER_DIR" =~ ^/[0-9A-Za-z._/-]+$ ]] || die "发布目录必须是安全的绝对路径: $SERVER_DIR"
+}
+
+ssh_cmd() {
+    local host="$1" port="$2"
+    shift 2
+    ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+        -o "ConnectTimeout=$SSH_TIMEOUT" -p "$port" "$SSH_USER@$host" "$@"
+}
+
+scp_file() {
+    local source="$1" host="$2" port="$3" destination="$4"
+    scp -q -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+        -o "ConnectTimeout=$SSH_TIMEOUT" -P "$port" "$source" "$SSH_USER@$host:$destination"
+}
+
+test_connections() {
+    local failed=0 server
     for server in "${SERVERS[@]}"; do
         parse_server "$server"
-        [ -n "$target_server" ] && [ "$SERVER_NAME" != "$target_server" ] && continue
-        upload_to_server "$server" "$version" "$channel" && success=$((success + 1)) || { failed=$((failed + 1)); log_error "$SERVER_NAME: 失败"; }
+        info "检查节点 $SERVER_NAME ($SERVER_HOST:$SERVER_PORT)"
+        if ! ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "command -v python3 >/dev/null && mkdir -p '$SERVER_DIR/.staging' '$SERVER_DIR/.rollback'"; then
+            printf '[ERROR] 节点不可用: %s\n' "$SERVER_NAME" >&2
+            failed=1
+        fi
+    done
+    [ "$failed" -eq 0 ] || die "至少一个发布节点不可用"
+}
+
+prepare_bundle() {
+    validate_version "$1"
+    require_cmd git
+    SOURCE_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
+    [ -n "$(git -C "$PROJECT_ROOT" status --porcelain)" ] && DIRTY=true || DIRTY=false
+
+    if [ "$CHANNEL" = "main" ]; then
+        [ "$(git -C "$PROJECT_ROOT" branch --show-current)" = "main" ] || die "main 正式 bundle 只能从 main 分支构建"
+        [ "$DIRTY" = false ] || die "main 正式 bundle 要求工作区干净"
+        local origin_main
+        origin_main="$(git -C "$PROJECT_ROOT" rev-parse refs/remotes/origin/main 2>/dev/null)" || die "缺少 origin/main，请先同步远端引用"
+        [ "$SOURCE_COMMIT" = "$origin_main" ] || die "本地 main 与 origin/main 不一致"
+        ! git -C "$PROJECT_ROOT" show-ref --verify --quiet "refs/tags/v$VERSION" || die "版本 tag 已存在；禁止重建正式 bundle"
+        BUNDLE="$RECOVERY_DIR/v$VERSION-$SOURCE_COMMIT"
+        [ ! -e "$BUNDLE" ] || die "正式 bundle 已存在，请直接复用: $BUNDLE"
+    else
+        BUNDLE="$RECOVERY_DIR/v$VERSION-$SOURCE_COMMIT-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+        [ ! -e "$BUNDLE" ] || die "bundle 路径已存在，请稍后重试"
+    fi
+
+    info "构建 Windows amd64 版本 $VERSION"
+    bash "$SCRIPT_DIR/build.sh" "$VERSION"
+    info "执行并验证 Authenticode 签名"
+    bash "$SCRIPT_DIR/sign.sh" "$DIST_EXE"
+    bash "$SCRIPT_DIR/sign.sh" --verify "$DIST_EXE"
+
+    mkdir -p "$BUNDLE"
+    cp "$DIST_EXE" "$BUNDLE/$ASSET_NAME"
+    cp "$SCRIPT_DIR/install.ps1" "$BUNDLE/install.ps1"
+    "$PYTHON_BIN" "$HELPER" create-manifest \
+        --bundle "$BUNDLE" --version "$VERSION" --source-commit "$SOURCE_COMMIT" --dirty "$DIRTY"
+    "$PYTHON_BIN" "$HELPER" verify-bundle --bundle "$BUNDLE" >/dev/null
+    PREPARED_BUNDLE="$BUNDLE"
+    ok "bundle 已持久化: $BUNDLE"
+}
+
+stage_bundle() {
+    validate_bundle "$1"
+    verify_bundle_signature
+    load_config
+    test_connections
+    local server stage bundle_remote node_index_sha expected_index_sha=""
+    for server in "${SERVERS[@]}"; do
+        parse_server "$server"
+        stage="$SERVER_DIR/.staging/$RELEASE_ID"
+        bundle_remote="$stage/bundle"
+        info "暂存到 $SERVER_NAME"
+        ssh_cmd "$SERVER_HOST" "$SERVER_PORT" \
+            "test ! -e '$SERVER_DIR/.rollback/$RELEASE_ID' && rm -rf '$stage' && mkdir -p '$bundle_remote' '$stage/release'" \
+            || die "$SERVER_NAME 存在未处理的发布状态；先 verify 或 rollback"
+        scp_file "$BUNDLE/manifest.json" "$SERVER_HOST" "$SERVER_PORT" "$bundle_remote/manifest.json"
+        scp_file "$BUNDLE/install.ps1" "$SERVER_HOST" "$SERVER_PORT" "$bundle_remote/install.ps1"
+        scp_file "$BUNDLE/$ASSET_NAME" "$SERVER_HOST" "$SERVER_PORT" "$bundle_remote/$ASSET_NAME"
+        scp_file "$BUNDLE/$ASSET_NAME" "$SERVER_HOST" "$SERVER_PORT" "$stage/release/$ASSET_NAME"
+        scp_file "$HELPER" "$SERVER_HOST" "$SERVER_PORT" "$stage/release-helper.py"
+        ssh_cmd "$SERVER_HOST" "$SERVER_PORT" \
+            "python3 '$stage/release-helper.py' verify-bundle --bundle '$bundle_remote' >/dev/null && python3 '$stage/release-helper.py' next-index --root '$SERVER_DIR' --bundle '$bundle_remote' --output '$stage/releases.json.next'"
+        node_index_sha="$(ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "python3 '$stage/release-helper.py' sha256-file --path '$stage/releases.json.next'")"
+        if [ -z "$expected_index_sha" ]; then
+            expected_index_sha="$node_index_sha"
+        elif [ "$node_index_sha" != "$expected_index_sha" ]; then
+            die "各节点待发布 releases.json 不一致；先修复既有索引漂移"
+        fi
+        ok "$SERVER_NAME 暂存校验通过"
+    done
+    ok "全部节点已暂存；公开索引尚未变更"
+}
+
+check_main_tag() {
+    [ "$CHANNEL" = "main" ] || return 0
+    local local_target remote_target
+    local_target="$(git -C "$PROJECT_ROOT" rev-list -n 1 "v$VERSION" 2>/dev/null)" || die "main publish 要求本地 tag v$VERSION 已存在"
+    [ "$local_target" = "$SOURCE_COMMIT" ] || die "tag v$VERSION 未指向 bundle commit"
+    remote_target="$(git -C "$PROJECT_ROOT" ls-remote origin "refs/tags/v$VERSION^{}" | awk 'NR==1 {print $1}')"
+    if [ -z "$remote_target" ]; then
+        remote_target="$(git -C "$PROJECT_ROOT" ls-remote origin "refs/tags/v$VERSION" | awk 'NR==1 {print $1}')"
+    fi
+    [ "$remote_target" = "$SOURCE_COMMIT" ] || die "远端 tag v$VERSION 不存在或未指向 bundle commit"
+}
+
+rollback_all() {
+    local server stage failed=0 node_index_sha expected_index_sha=""
+    for server in "${SERVERS[@]}"; do
+        parse_server "$server"
+        stage="$SERVER_DIR/.staging/$RELEASE_ID"
+        ssh_cmd "$SERVER_HOST" "$SERVER_PORT" \
+            "test ! -f '$stage/release-helper.py' || python3 '$stage/release-helper.py' rollback-release --root '$SERVER_DIR' --bundle '$stage/bundle' --release-id '$RELEASE_ID'" \
+            || { printf '[ERROR] 自动回滚失败，需人工处理节点: %s\n' "$SERVER_NAME" >&2; failed=1; }
+    done
+    return "$failed"
+}
+
+verify_remote_nodes() {
+    local server stage failed=0 node_index_sha expected_index_sha=""
+    for server in "${SERVERS[@]}"; do
+        parse_server "$server"
+        stage="$SERVER_DIR/.staging/$RELEASE_ID"
+        if ssh_cmd "$SERVER_HOST" "$SERVER_PORT" \
+            "python3 '$stage/release-helper.py' verify-release --root '$SERVER_DIR' --bundle '$stage/bundle'"; then
+            node_index_sha="$(ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "python3 '$stage/release-helper.py' sha256-file --path '$SERVER_DIR/releases.json'")"
+            if [ -z "$expected_index_sha" ]; then
+                expected_index_sha="$node_index_sha"
+            elif [ "$node_index_sha" != "$expected_index_sha" ]; then
+                printf '[ERROR] 节点 releases.json 字节不一致: %s\n' "$SERVER_NAME" >&2
+                failed=1
+                continue
+            fi
+            ok "$SERVER_NAME 资产与索引一致"
+        else
+            printf '[ERROR] 节点验收失败: %s\n' "$SERVER_NAME" >&2
+            failed=1
+        fi
+    done
+    return "$failed"
+}
+
+publish_bundle() {
+    validate_bundle "$1"
+    verify_bundle_signature
+    load_config
+    test_connections
+    check_main_tag
+    local server stage failed=0
+
+    for server in "${SERVERS[@]}"; do
+        parse_server "$server"
+        stage="$SERVER_DIR/.staging/$RELEASE_ID"
+        info "复核 $SERVER_NAME 的暂存内容与待发布索引"
+        ssh_cmd "$SERVER_HOST" "$SERVER_PORT" \
+            "python3 '$stage/release-helper.py' verify-bundle --bundle '$stage/bundle' >/dev/null && python3 '$stage/release-helper.py' next-index --root '$SERVER_DIR' --bundle '$stage/bundle' --output '$stage/releases.json.next'" \
+            || die "$SERVER_NAME 暂存预检失败；公开状态未变更"
+        node_index_sha="$(ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "python3 '$stage/release-helper.py' sha256-file --path '$stage/releases.json.next'")"
+        if [ -z "$expected_index_sha" ]; then
+            expected_index_sha="$node_index_sha"
+        elif [ "$node_index_sha" != "$expected_index_sha" ]; then
+            die "各节点待发布 releases.json 不一致；公开状态未变更"
+        fi
     done
 
-    echo ""
-    log_step "发布结果"
-    log_info "成功: $success"
-    [ $failed -gt 0 ] && log_error "失败: $failed"
+    trap 'rollback_all || true; exit 130' INT TERM HUP
+    for server in "${SERVERS[@]}"; do
+        parse_server "$server"
+        stage="$SERVER_DIR/.staging/$RELEASE_ID"
+        info "提升 $SERVER_NAME 的版本目录与索引"
+        if ! ssh_cmd "$SERVER_HOST" "$SERVER_PORT" \
+            "python3 '$stage/release-helper.py' commit-release --root '$SERVER_DIR' --bundle '$stage/bundle' --next-index '$stage/releases.json.next' --release-id '$RELEASE_ID'"; then
+            failed=1
+            break
+        fi
+    done
 
-    if [ $failed -eq 0 ]; then
-        log_success "发布完成！"
-        echo ""
-        for server in "${SERVERS[@]}"; do
-            parse_server "$server"
-            if [ -z "$target_server" ] || [ "$SERVER_NAME" = "$target_server" ]; then
-                echo "  curl $SERVER_URL/releases.json | jq ."
-                local host
-                host=$(echo "$SERVER_URL" | sed 's|https://||' | sed 's|/sslctlw||')
-                echo "  安装: [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm $SERVER_URL/install.ps1 -OutFile install.ps1; .\\install.ps1 -ReleaseHost $host"
-            fi
-        done
+    if [ "$failed" -ne 0 ]; then
+        trap - INT TERM HUP
+        rollback_all || true
+        die "节点提升失败，已尝试恢复全部节点的发布前状态"
     fi
-    return $failed
+    if ! verify_remote_nodes; then
+        trap - INT TERM HUP
+        rollback_all || true
+        die "全节点验收失败，已尝试恢复全部节点的发布前状态"
+    fi
+    trap - INT TERM HUP
+    ok "全部节点已公开并对账；暂存与回滚数据保留到显式 verify"
+}
+
+verify_bundle_remote() {
+    validate_bundle "$1"
+    verify_bundle_signature
+    load_config
+    test_connections
+    verify_remote_nodes || die "至少一个节点验收失败"
+    ok "全部节点验收通过"
+}
+
+cleanup_bundle_remote() {
+    validate_bundle "$1"
+    load_config
+    test_connections
+    local server stage
+    for server in "${SERVERS[@]}"; do
+        parse_server "$server"
+        stage="$SERVER_DIR/.staging/$RELEASE_ID"
+        ssh_cmd "$SERVER_HOST" "$SERVER_PORT" \
+            "test ! -f '$stage/release-helper.py' || python3 '$stage/release-helper.py' cleanup-release --root '$SERVER_DIR' --bundle '$stage/bundle' --release-id '$RELEASE_ID'"
+    done
+    ok "全部节点的暂存、回滚数据和超额历史目录已清理"
+}
+
+rollback_bundle_remote() {
+    validate_bundle "$1"
+    load_config
+    test_connections
+    rollback_all || die "至少一个节点自动回滚失败，需要人工恢复"
+    ok "已请求全部节点恢复发布前状态；请重新 stage 后继续"
+}
+
+dry_run() {
+    validate_version "$1"
+    printf 'dry-run: true\nversion: %s\nchannel: %s\n' "$VERSION" "$CHANNEL"
+    if [ "$CHANNEL" = "dev" ]; then
+        printf 'plan: prepare -> stage-all -> publish-all -> verify-all\n'
+        printf 'git-writes: none\ngithub-writes: none\nnetwork-writes: none\n'
+    else
+        printf 'plan: remote-release main orchestration + persisted bundle\n'
+        printf 'script-git-writes: none\nscript-github-writes: none\nnetwork-writes: none\n'
+    fi
+}
+
+main() {
+    find_python
+    [ -f "$HELPER" ] || die "缺少 release-helper.py"
+    case "${1:-}" in
+        --dry-run)
+            [ "$#" -eq 2 ] || die "--dry-run 需要一个版本参数"
+            dry_run "$2"
+            ;;
+        prepare)
+            [ "$#" -eq 2 ] || die "prepare 需要一个版本参数"
+            prepare_bundle "$2"
+            printf '%s\n' "$PREPARED_BUNDLE"
+            ;;
+        stage)
+            [ "$#" -eq 2 ] || die "stage 需要一个 bundle 路径"
+            stage_bundle "$2"
+            ;;
+        publish)
+            [ "$#" -eq 2 ] || die "publish 需要一个 bundle 路径"
+            publish_bundle "$2"
+            ;;
+        verify)
+            [ "$#" -eq 2 ] || die "verify 需要一个 bundle 路径"
+            verify_bundle_remote "$2"
+            ;;
+        cleanup)
+            [ "$#" -eq 2 ] || die "cleanup 需要一个 bundle 路径"
+            cleanup_bundle_remote "$2"
+            ;;
+        rollback)
+            [ "$#" -eq 2 ] || die "rollback 需要一个 bundle 路径"
+            rollback_bundle_remote "$2"
+            ;;
+        dev)
+            [ "$#" -eq 2 ] || die "dev 需要一个预发布版本"
+            validate_version "$2"
+            [ "$CHANNEL" = "dev" ] || die "dev 命令只接受带预发布段的 SemVer"
+            prepare_bundle "$2"
+            stage_bundle "$PREPARED_BUNDLE"
+            publish_bundle "$PREPARED_BUNDLE"
+            verify_bundle_remote "$PREPARED_BUNDLE"
+            cleanup_bundle_remote "$PREPARED_BUNDLE"
+            ;;
+        test)
+            [ "$#" -eq 1 ] || die "test 不接受参数"
+            load_config
+            test_connections
+            ok "全部节点连接与 Python3 检查通过"
+            ;;
+        -h|--help|help|"")
+            usage
+            ;;
+        *)
+            usage >&2
+            die "未知命令: $1"
+            ;;
+    esac
 }
 
 main "$@"

@@ -370,7 +370,7 @@ GUI 模式时在运行时调用 `util.HideConsole()` 隐藏并释放控制台：
 
 - 好处：同一个 exe 既能作 CLI（有子命令，控制台可见）又能作 GUI（无参数，隐藏控制台），无需两套二进制。
 - 代价：GUI 模式启动瞬间可能闪现控制台窗口。
-- 后果：GUI 模式无控制台，库层禁止直接 `fmt.Print`，改用 `log.Printf` / `ProgressFunc`（见 `skills/go-dev/`）。
+- 后果：GUI 模式无控制台，库层禁止直接 `fmt.Print`，改用 `log.Printf` / `ProgressFunc`（见 `skills/go-dev.md`）。
 
 ### ComboBox CbnSelChange 事件时序问题（重要）
 

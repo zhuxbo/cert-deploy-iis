@@ -36,9 +36,13 @@ config.json
 # Build/release config (contains secrets)
 build/build.conf
 build/release.conf
+build/recovery/
 
 # Temp
 nul
 
 # Coverage
 /*.out
+
+# Agent process documents
+.superpowers/

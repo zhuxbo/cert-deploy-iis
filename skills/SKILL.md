@@ -1,22 +1,21 @@
-# Skills 索引
+---
+name: sslctlw
+description: 路由 sslctlw 的 Go、IIS、Deploy API、windigo、构建发布和完成检查工作流。
+---
 
-| Skill | 目录 | 内容 |
-|-------|------|------|
-| Deploy API | `api/` | API 接口、认证、证书选择 |
-| Windigo UI | `windigo-ui/` | GUI 控件、布局、防卡死 |
-| IIS 运维 | `iis-ops/` | appcmd、netsh、证书绑定 |
-| Go 开发 | `go-dev/` | 项目结构、代码规范 |
-| 构建发布 | `build-release/` | 编译参数、manifest |
+# sslctlw Skill 路由
 
-## 知识更新规则
+本文件只负责路由。先按任务选择最小叶子资源；跨平台公共语义始终以 `deploy-spec.md` 为准。
 
-**何时更新**:
-- 解决疑难问题后（记录原因和方案）
-- 发现新的代码模式时
-- API 接口变更时
-- 确定最佳实践时
+| 触发场景 | 读取资源 |
+| --- | --- |
+| 正式发布、测试版发布、发布恢复、版本验收 | `skills/remote-release.md` |
+| 构建、版本注入、产物、Authenticode 签名 | `skills/build-release.md` |
+| 完成检查、提交前验证、finish-check | `skills/finish-check.md` |
+| Deploy API、续签状态、回调、证书选择 | `skills/api.md` |
+| 模块边界、数据流、配置结构 | `skills/architecture.md` |
+| Go 开发、DPAPI、共享 setup、通用陷阱 | `skills/go-dev.md` |
+| IIS、appcmd、netsh、证书绑定与恢复 | `skills/iis-ops.md` |
+| windigo GUI、线程、控件与布局 | `skills/windigo-ui.md` |
 
-**写入原则**:
-- 只记录已验证的信息
-- 保持简洁，代码示例为主
-- 按领域写入对应文件
+需要多个领域时可组合读取，但不得把叶子资源复制进工具指令或 `AGENTS.md`。

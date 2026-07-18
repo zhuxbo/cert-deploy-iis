@@ -113,6 +113,27 @@ verify_file() {
 
     log_info "验证签名: $exe"
     MSYS_NO_PATHCONV=1 "$signtool_path" verify /pa /all "$win_exe"
+    local powershell_path actual_thumbprint expected_thumbprint
+    if command -v powershell.exe &>/dev/null; then
+        powershell_path="powershell.exe"
+    elif command -v powershell &>/dev/null; then
+        powershell_path="powershell"
+    else
+        log_error "找不到 Windows PowerShell，无法核对签名证书指纹"
+        exit 1
+    fi
+    actual_thumbprint=$(SSLCTLW_VERIFY_EXE="$win_exe" MSYS_NO_PATHCONV=1 "$powershell_path" \
+        -NoProfile -NonInteractive -Command \
+        '$s = Get-AuthenticodeSignature -LiteralPath $env:SSLCTLW_VERIFY_EXE; if ($s.Status -ne "Valid" -or $null -eq $s.SignerCertificate) { exit 1 }; $s.SignerCertificate.Thumbprint') || {
+        log_error "PowerShell 无法确认 Authenticode 签名有效"
+        exit 1
+    }
+    actual_thumbprint=$(printf '%s' "$actual_thumbprint" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+    expected_thumbprint=$(printf '%s' "$SIGN_THUMBPRINT" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+    if [ "$actual_thumbprint" != "$expected_thumbprint" ]; then
+        log_error "签名证书指纹与 build.conf 不一致"
+        exit 1
+    fi
     log_success "签名有效: $exe"
 }
 

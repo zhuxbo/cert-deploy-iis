@@ -63,15 +63,7 @@ fi
 [ -n "$UPGRADE_TRUSTED_COUNTRY" ] && TRUSTED_COUNTRY="$UPGRADE_TRUSTED_COUNTRY"
 [ -z "$TRUSTED_COUNTRY" ] && TRUSTED_COUNTRY="CN"
 
-# ========================================
-# 测试
-# ========================================
 cd "$PROJECT_ROOT"
-
-echo -e "${CYAN}Running tests...${NC}"
-go test ./...
-echo -e "${GREEN}Tests passed.${NC}"
-echo ""
 
 # ========================================
 # 发布构建必须配置 TRUSTED_ORG
@@ -99,7 +91,7 @@ echo "  Trusted Org: ${TRUSTED_ORG:-not set}"
 echo "  Country: $TRUSTED_COUNTRY"
 echo ""
 
-go build -trimpath -ldflags="$LDFLAGS" -o "$DIST_DIR/sslctlw.exe"
+GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o "$DIST_DIR/sslctlw.exe"
 
 SIZE=$(du -h "$DIST_DIR/sslctlw.exe" | cut -f1)
 echo -e "${GREEN}Build successful: dist/sslctlw.exe ($SIZE)${NC}"

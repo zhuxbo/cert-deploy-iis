@@ -16,6 +16,18 @@ jobs:
         with:
           go-version: "1.24"
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
       - run: go vet ./...
 
       - run: go test ./...
+
+      - name: Governance drift check
+        shell: bash
+        run: bash build/check-governance.sh
+
+      - name: Release helper tests
+        shell: bash
+        run: bash build/release-helper-test.sh
