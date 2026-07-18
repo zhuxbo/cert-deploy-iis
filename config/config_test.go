@@ -807,3 +807,34 @@ func migrateAndUnmarshal(data []byte) (*Config, error) {
 	}
 	return &cfg, nil
 }
+
+// TestAtomicWriteFile 原子写：新建、覆盖、失败不截断
+func TestAtomicWriteFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	// 新建
+	if err := atomicWriteFile(path, []byte(`{"a":1}`)); err != nil {
+		t.Fatalf("atomicWriteFile() 新建失败: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != `{"a":1}` {
+		t.Fatalf("新建内容 = %q, err = %v", data, err)
+	}
+
+	// 覆盖
+	if err := atomicWriteFile(path, []byte(`{"b":2}`)); err != nil {
+		t.Fatalf("atomicWriteFile() 覆盖失败: %v", err)
+	}
+	data, _ = os.ReadFile(path)
+	if string(data) != `{"b":2}` {
+		t.Fatalf("覆盖内容 = %q", data)
+	}
+
+	// 覆盖后不残留临时/备份文件
+	for _, suffix := range []string{".tmp", ".bak"} {
+		if _, err := os.Stat(path + suffix); !os.IsNotExist(err) {
+			t.Errorf("不应残留 %s 文件", suffix)
+		}
+	}
+}

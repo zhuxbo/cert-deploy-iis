@@ -245,10 +245,11 @@ func GetTaskHealth(taskName string) (*TaskHealth, error) {
 	}
 
 	// 任务名经 ValidateTaskName 白名单校验（字母数字._-），单引号包裹无注入风险
+	// 时间格式化必须用 InvariantCulture：CurrentCulture 下用户自定义时间分隔符会改变输出（如 09.30.00）
 	script := fmt.Sprintf(
 		"$i = Get-ScheduledTaskInfo -TaskName '%s' -ErrorAction Stop; "+
 			"'{0}|{1}' -f [uint32]$i.LastTaskResult, "+
-			"$(if ($i.LastRunTime) { $i.LastRunTime.ToString('yyyy-MM-dd HH:mm:ss') } else { '' })",
+			"$(if ($i.LastRunTime) { $i.LastRunTime.ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) } else { '' })",
 		taskName)
 	output, err := RunPowerShell(script)
 	if err != nil {
@@ -279,10 +280,13 @@ func parseTaskInfoOutput(output string) (*TaskHealth, error) {
 
 	h := &TaskHealth{LastTaskResult: uint32(result)}
 	if timeStr := strings.TrimSpace(parts[1]); timeStr != "" {
-		if ts, parseErr := time.ParseInLocation("2006-01-02 15:04:05", timeStr, time.Local); parseErr == nil {
-			h.LastRunTime = ts
-			h.HasRun = ts.Year() >= taskNeverRunYear
+		// 解析失败显式报错而非静默按"从未运行"处理，避免掩盖格式问题
+		ts, parseErr := time.ParseInLocation("2006-01-02 15:04:05", timeStr, time.Local)
+		if parseErr != nil {
+			return nil, fmt.Errorf("解析上次运行时间失败 (%q): %v", timeStr, parseErr)
 		}
+		h.LastRunTime = ts
+		h.HasRun = ts.Year() >= taskNeverRunYear
 	}
 	return h, nil
 }

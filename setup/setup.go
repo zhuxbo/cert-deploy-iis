@@ -3,6 +3,7 @@ package setup
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -62,19 +63,19 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 
 	client := api.NewClient(opts.URL, opts.Token)
 
-	// 2. 查询证书
+	// 2. 查询证书（独立超时：交互可能长时间阻塞，各 API 调用各自新建 context，
+	// 不再共用一个贯穿全程的 ctx，避免交互后用已过期 ctx 通知服务端失败）
 	report("查询证书...")
 	var certs []api.CertData
 	var err error
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*api.APIQueryTimeout/30)
-	defer cancel()
-
+	queryCtx, queryCancel := context.WithTimeout(context.Background(), 60*api.APIQueryTimeout/30)
 	if opts.Order != "" {
-		certs, err = client.ListCertsByQuery(ctx, opts.Order)
+		certs, err = client.ListCertsByQuery(queryCtx, opts.Order)
 	} else {
-		certs, err = client.ListAllCerts(ctx)
+		certs, err = client.ListAllCerts(queryCtx)
 	}
+	queryCancel()
 	if err != nil {
 		return nil, fmt.Errorf("查询证书失败: %w", err)
 	}
@@ -102,6 +103,16 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 	var certConfigs []config.CertConfig
 	var needKeys []needKeyCert
 
+	// 现有配置：setup 重跑时按订单已配置的续签模式通知服务端（spec 5.2），
+	// 避免把 local 模式订单的服务端自动重签误开为 pull 语义。
+	// 配置存在但加载失败时无法确认既有模式，本次跳过续签模式通知（不通知优于错误通知）
+	existingCfg, cfgErr := config.Load()
+	cfgLoadOK := cfgErr == nil
+	if cfgErr != nil {
+		existingCfg = nil
+		log.Printf("警告: 加载现有配置失败 (%v)，本次 setup 跳过服务端续签模式通知", cfgErr)
+	}
+
 	for _, certData := range activeCerts {
 		// 优先级 3：检查是否已在 Windows 证书存储中
 		serialNumber, _ := cert.GetCertSerialNumber(certData.Certificate)
@@ -109,9 +120,28 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 			exists, certInfo, _ := cert.IsCertExists(serialNumber)
 			if exists {
 				log.Printf("证书 %s 已存在，跳过导入", certData.Domain())
-				result.Skipped++
+				// 已存在证书仍需绑定生效才算部署成功：与新装路径共用 evalBindOutcome 判定，
+				// 查找出错/全部失败/零匹配（含无法取指纹）同样计失败、发 failure 回调、不写入完成配置
+				var br bindResult
+				bindErr := errors.New("无法获取已存在证书的指纹")
 				if certInfo != nil && certInfo.Thumbprint != "" {
-					bindCertToIIS(certData, certInfo.Thumbprint)
+					br, bindErr = bindCertToIIS(certData, certInfo.Thumbprint)
+				}
+				dec := decideExistingCert(br, bindErr)
+				if !dec.Deployed {
+					log.Printf("证书 %s 部署失败: %s", certData.Domain(), dec.Reason)
+					sendSetupCallback(client, certData.OrderID, certData.Domain(), false)
+					result.Failed++
+					continue
+				}
+				if dec.Reason != "" {
+					log.Printf("证书 %s %s", certData.Domain(), dec.Reason)
+				}
+				result.Skipped++
+				// 补通知服务端续签模式：installCert 是新装唯一通知点，首跑绑定失败不通知，
+				// 重跑走本路径绑定生效后补通知，否则 pull 订单服务端 auto_reissue 永不开启（spec 5.2），到期续签停摆
+				if notify, useLocal := decideReissueNotify(existingCfg, cfgLoadOK, certData.OrderID); notify {
+					toggleAutoReissue(client, certData.OrderID, useLocal)
 				}
 				certConfigs = append(certConfigs, makeCertConfig(certData, opts, serialNumber))
 				continue
@@ -128,7 +158,8 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 		}
 
 		log.Printf("证书 %s 使用 %s 私钥", certData.Domain(), source)
-		if ok := installCert(ctx, client, certData, keyPEM, serialNumber, opts, &certConfigs, result); !ok {
+		notify, useLocal := decideReissueNotify(existingCfg, cfgLoadOK, certData.OrderID)
+		if ok := installCert(client, certData, keyPEM, serialNumber, opts, &certConfigs, result, notify, useLocal); !ok {
 			result.Failed++
 		}
 	}
@@ -171,7 +202,8 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 				continue
 			}
 
-			if ok := installCert(ctx, client, nk.certData, keyPEM, nk.serialNumber, opts, &certConfigs, result); !ok {
+			notify, useLocal := decideReissueNotify(existingCfg, cfgLoadOK, nk.certData.OrderID)
+			if ok := installCert(client, nk.certData, keyPEM, nk.serialNumber, opts, &certConfigs, result, notify, useLocal); !ok {
 				result.Failed++
 			}
 			result.NeedKey--
@@ -207,8 +239,10 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 }
 
 // installCert 安装单个证书（PEM→PFX→安装→绑定→通知→回调）
+// notifyReissue：是否通知服务端续签模式（现有配置不可读时跳过）；
+// useLocalKey：订单在现有配置中的生效续签模式（true=local）
 // 成功返回 true 并更新 result.Installed 和 certConfigs
-func installCert(ctx context.Context, client *api.Client, certData api.CertData, keyPEM string, serialNumber string, opts Options, certConfigs *[]config.CertConfig, result *RunResult) bool {
+func installCert(client *api.Client, certData api.CertData, keyPEM string, serialNumber string, opts Options, certConfigs *[]config.CertConfig, result *RunResult, notifyReissue, useLocalKey bool) bool {
 	pfxPath, err := cert.PEMToPFX(certData.Certificate, keyPEM, certData.CACert, "")
 	if err != nil {
 		log.Printf("证书 %s 转换失败: %v", certData.Domain(), err)
@@ -230,7 +264,6 @@ func installCert(ctx context.Context, client *api.Client, certData api.CertData,
 		return false
 	}
 
-	result.Installed++
 	log.Printf("证书 %s 安装成功: %s", certData.Domain(), installResult.Thumbprint)
 
 	// 安装后通过 thumbprint 获取准确的序列号
@@ -240,11 +273,26 @@ func installCert(ctx context.Context, client *api.Client, certData api.CertData,
 		}
 	}
 
-	// IIS 绑定
-	bindCertToIIS(certData, installResult.Thumbprint)
+	// IIS 绑定：按逐绑定结果如实判定部署成败，不再吞掉绑定错误
+	br, bindErr := bindCertToIIS(certData, installResult.Thumbprint)
+	bindOK, bindReason := evalBindOutcome(br, bindErr)
+	if !bindOK {
+		log.Printf("证书 %s 部署失败: %s", certData.Domain(), bindReason)
+		sendSetupCallback(client, certData.OrderID, certData.Domain(), false)
+		return false
+	}
+	if bindReason != "" {
+		log.Printf("证书 %s %s", certData.Domain(), bindReason)
+	}
 
-	// 通知服务端续签模式
-	toggleAutoReissue(ctx, client, certData.OrderID, false)
+	result.Installed++
+
+	// 通知服务端续签模式：按订单现有配置的生效模式（未配置的新订单默认 pull）
+	if notifyReissue {
+		toggleAutoReissue(client, certData.OrderID, useLocalKey)
+	} else {
+		log.Printf("跳过服务端续签模式通知 (订单 %d)：现有配置不可读，无法确认既有模式", certData.OrderID)
+	}
 
 	// 部署完成回调（spec 4.2 / 5.1，非关键路径）
 	sendSetupCallback(client, certData.OrderID, certData.Domain(), true)
@@ -322,8 +370,17 @@ func readKeyFile(path string) (string, error) {
 	return string(data), nil
 }
 
-// bindCertToIIS 将证书绑定到 IIS 匹配的站点
-func bindCertToIIS(certData api.CertData, thumbprint string) {
+// bindResult IIS 绑定尝试结果计数
+type bindResult struct {
+	Succeeded int
+	Failed    int
+}
+
+// bindCertToIIS 将证书绑定到 IIS 匹配的站点，返回逐绑定的成败计数
+// 查找绑定本身失败时返回 error
+func bindCertToIIS(certData api.CertData, thumbprint string) (bindResult, error) {
+	var br bindResult
+
 	allDomains := extractDomainsWithFallback(certData)
 	if len(allDomains) == 0 && certData.Domain() != "" {
 		allDomains = []string{certData.Domain()}
@@ -332,15 +389,17 @@ func bindCertToIIS(certData api.CertData, thumbprint string) {
 	httpsMatches, httpMatches, err := iis.FindMatchingBindings(allDomains)
 	if err != nil {
 		log.Printf("查找 IIS 绑定失败: %v", err)
-		return
+		return br, fmt.Errorf("查找 IIS 绑定失败: %w", err)
 	}
 
 	// 更新已有 HTTPS 绑定
 	for _, match := range httpsMatches {
 		if err := iis.BindCertificate(match.Host, match.Port, thumbprint); err != nil {
 			log.Printf("更新绑定 %s:%d 失败: %v", match.Host, match.Port, err)
+			br.Failed++
 		} else {
 			log.Printf("更新绑定: %s:%d", match.Host, match.Port)
+			br.Succeeded++
 		}
 	}
 
@@ -348,14 +407,53 @@ func bindCertToIIS(certData api.CertData, thumbprint string) {
 	for _, match := range httpMatches {
 		if err := iis.AddHttpsBinding(match.SiteName, match.Host, match.Port); err != nil {
 			log.Printf("添加 HTTPS 绑定 %s 失败: %v", match.Host, err)
+			br.Failed++
 			continue
 		}
 		if err := iis.BindCertificate(match.Host, match.Port, thumbprint); err != nil {
 			log.Printf("绑定证书 %s 失败: %v", match.Host, err)
+			br.Failed++
 		} else {
 			log.Printf("添加绑定: %s:%d (站点: %s)", match.Host, match.Port, match.SiteName)
+			br.Succeeded++
 		}
 	}
+
+	return br, nil
+}
+
+// evalBindOutcome 根据绑定结果判定部署成败（纯函数）
+// 语义与自动部署链路对齐：至少一个绑定成功即视为部署生效（success），
+// 未找到可绑定站点、全部绑定失败或查找出错均为失败（failure）
+func evalBindOutcome(br bindResult, bindErr error) (ok bool, reason string) {
+	if bindErr != nil {
+		return false, bindErr.Error()
+	}
+	if br.Succeeded == 0 && br.Failed == 0 {
+		return false, "未找到可绑定的 IIS 站点"
+	}
+	if br.Succeeded == 0 {
+		return false, fmt.Sprintf("全部 %d 个绑定失败", br.Failed)
+	}
+	if br.Failed > 0 {
+		return true, fmt.Sprintf("部分绑定失败（成功 %d，失败 %d）", br.Succeeded, br.Failed)
+	}
+	return true, ""
+}
+
+// existingBindDecision 已存在证书（跳过导入）路径的绑定判定结果（纯函数产物）
+// Deployed=true：绑定生效，计 Skipped、写入配置、补通知续签模式；
+// Deployed=false：零成功（查找出错/全部失败/零匹配），计 Failed、发 failure 回调、不写入配置
+type existingBindDecision struct {
+	Deployed bool
+	Reason   string
+}
+
+// decideExistingCert 已存在证书绑定结果 → 统计与回调动作（纯函数）
+// 复用新装路径同一 evalBindOutcome，确保两路径零成功政策一致
+func decideExistingCert(br bindResult, bindErr error) existingBindDecision {
+	ok, reason := evalBindOutcome(br, bindErr)
+	return existingBindDecision{Deployed: ok, Reason: reason}
 }
 
 // makeCertConfig 创建证书配置
@@ -417,10 +515,36 @@ func saveSetupConfig(certConfigs []config.CertConfig) error {
 	return cfg.Save()
 }
 
+// decideReissueNotify 决定是否及以何种模式通知服务端续签模式（纯函数）
+// cfgLoadOK=false（配置存在但加载失败）时跳过通知：
+// 无法确认订单既有模式，误通知 pull 会打开 local 订单的服务端自动重签
+func decideReissueNotify(cfg *config.Config, cfgLoadOK bool, orderID int) (notify, useLocalKey bool) {
+	if !cfgLoadOK {
+		return false, false
+	}
+	return true, isOrderLocalMode(cfg, orderID)
+}
+
+// isOrderLocalMode 判断订单在现有配置中是否为 local 续签模式（纯函数）
+// cfg 为 nil 或订单未配置时返回 false：setup 新增证书默认 pull 模式
+func isOrderLocalMode(cfg *config.Config, orderID int) bool {
+	if cfg == nil {
+		return false
+	}
+	certCfg := cfg.GetCertificateByOrderID(orderID)
+	if certCfg == nil {
+		return false
+	}
+	return certCfg.IsLocalMode(cfg.Schedule.RenewMode)
+}
 
 // toggleAutoReissue 通知服务端切换自动续签模式，失败仅记日志
+// 内部各自新建独立超时 context（不复用 Run 的贯穿 ctx），避免交互长时间阻塞后用过期 ctx 通知失败
 // useLocalKey=false（pull 模式）→ autoReissue=true；useLocalKey=true（local 模式）→ autoReissue=false
-func toggleAutoReissue(ctx context.Context, client *api.Client, orderID int, useLocalKey bool) {
+func toggleAutoReissue(client *api.Client, orderID int, useLocalKey bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), api.APISubmitTimeout)
+	defer cancel()
+
 	autoReissue := !useLocalKey
 	if err := client.ToggleAutoReissue(ctx, orderID, autoReissue); err != nil {
 		log.Printf("警告: 通知服务端续签模式失败 (订单 %d): %v", orderID, err)

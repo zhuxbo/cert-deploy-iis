@@ -127,7 +127,7 @@ go build -trimpath -ldflags="-s -w -X main.version=1.0.0" -o dist/sslctlw.exe
 | 证书绑定 | netsh http |
 | 证书操作 | PowerShell |
 | PEM/PFX 转换 | go-pkcs12 |
-| Token 加密 | Windows DPAPI（机器作用域，SYSTEM 计划任务可解密） |
+| Token 加密 | Windows DPAPI（机器作用域，SYSTEM 计划任务可解密；机密性依赖数据目录 ACL，数据目录应仅限管理员访问） |
 
 ## 项目结构
 

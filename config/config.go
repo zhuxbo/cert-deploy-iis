@@ -240,10 +240,12 @@ func Load() (*Config, error) {
 		changed = true
 	}
 
-	// 步骤 5: 持久化写回（失败不影响本次加载）
+	// 步骤 5: 持久化写回（原子写，失败不影响本次加载）
 	if changed {
 		if newData, marshalErr := json.MarshalIndent(raw, "", "  "); marshalErr == nil {
-			_ = os.WriteFile(path, newData, 0600)
+			if writeErr := atomicWriteFile(path, newData); writeErr != nil {
+				fmt.Printf("警告: 迁移后配置写回失败: %v\n", writeErr)
+			}
 		}
 		for _, f := range toDelete {
 			_ = os.Remove(f)
@@ -270,19 +272,24 @@ func (c *Config) Save() error {
 
 	path := GetConfigPath()
 
-	// 1. 序列化
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
 
-	// 2. 写入临时文件
+	return atomicWriteFile(path, data)
+}
+
+// atomicWriteFile 原子写配置文件：临时文件 + 重命名（Windows 先备份旧文件再替换）
+// 写中途崩溃不会截断已有配置
+func atomicWriteFile(path string, data []byte) error {
+	// 1. 写入临时文件
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
 		return fmt.Errorf("写入临时文件失败: %w", err)
 	}
 
-	// 3. 安全替换（Windows 需要先删除目标文件）
+	// 2. 安全替换（Windows 需要先移开目标文件）
 	bakPath := path + ".bak"
 	if _, err := os.Stat(path); err == nil {
 		// 先备份旧文件

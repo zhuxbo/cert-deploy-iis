@@ -236,6 +236,13 @@ func TestParseTaskInfoOutput(t *testing.T) {
 			output:  "abc|2026-07-16 09:30:00",
 			wantErr: true,
 		},
+		{
+			// CurrentCulture 自定义分隔符的产物（如 09.30.00）必须显式报错，
+			// 不允许静默按"从未运行"处理
+			name:    "非法时间分隔符显式报错",
+			output:  "0|2026-07-16 09.30.00",
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
