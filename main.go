@@ -198,6 +198,11 @@ func deploySingleCert(orderID int) error {
 func runStatus() {
 	fmt.Printf("sslctlw v%s\n\n", version)
 
+	// 数据目录 ACL 安全检查：机器作用域加密的机密性依赖数据目录仅限管理员访问
+	for _, w := range util.EvaluateDataDirACL(config.GetDataDir()) {
+		fmt.Printf("[安全告警] %s\n\n", w)
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)

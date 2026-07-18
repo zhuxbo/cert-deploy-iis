@@ -272,6 +272,20 @@ if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
 
+# 收紧安装/数据目录 ACL（在创建子目录前，使子目录继承受限 ACL）
+# 机器作用域 DPAPI 密文的机密性完全依赖文件系统 ACL：C:\ 默认 DACL 含 BUILTIN\Users
+# 读权限且被继承，普通用户可读 config.json（encrypted_token）与 orders\*\private.key 后自行解密。
+# 用 SID 形式授权（SYSTEM=S-1-5-18, Administrators=S-1-5-32-544）保证非英文 locale 可用；
+# /inheritance:r 断开继承，仅保留这两个主体的完全控制。失败必须中止安装。
+Write-Info "收紧安装目录 ACL（仅 SYSTEM 与 Administrators）..."
+& icacls.exe $InstallDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "收紧目录 ACL 失败（icacls 退出码 $LASTEXITCODE）"
+    Write-Err "机器作用域加密要求数据目录仅限管理员访问；ACL 未收紧会使普通用户可读取并解密 Token 与私钥，已中止安装"
+    exit 1
+}
+Write-Info "已收紧安装目录 ACL"
+
 # 数据目录
 $DataDir = Join-Path $InstallDir "sslctlw"
 foreach ($dir in @("logs")) {

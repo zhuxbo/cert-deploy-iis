@@ -814,6 +814,12 @@ func sendCallback(d *Deployer, client APIClient, orderID int, domain string, suc
 
 // CheckAndDeploy 检查并部署（命令行模式入口）
 func CheckAndDeploy() error {
+	// 守护启动时检查数据目录 ACL：机器作用域加密的 Token 与私钥机密性依赖此 ACL，
+	// 弱 ACL 仅告警不阻断（避免存量安装无法续签）
+	for _, w := range util.EvaluateDataDirACL(config.GetDataDir()) {
+		log.Printf("[安全告警] %s", w)
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("加载配置失败: %v", err)
