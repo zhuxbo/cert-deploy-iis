@@ -406,3 +406,143 @@ func TestParseSSLBindings_OnlyWhitespace(t *testing.T) {
 	}
 }
 
+// TestParseBindingByValue 按值解析单条绑定输出（locale 无关）
+func TestParseBindingByValue(t *testing.T) {
+	tests := []struct {
+		name      string
+		output    string
+		wantNil   bool
+		wantHash  string
+		wantAppID string
+		wantStore string
+	}{
+		{
+			name: "英文输出",
+			output: `
+SSL Certificate bindings:
+-------------------------
+
+    Hostname:port                : www.example.com:443
+    Certificate Hash             : abc123def456789012345678901234567890abcd
+    Application ID               : {4dc3e181-e14b-4a21-b022-59fc669b0914}
+    Certificate Store Name       : MY
+    Verify Client Certificate Revocation : Enabled
+`,
+			wantHash:  "abc123def456789012345678901234567890abcd",
+			wantAppID: "{4dc3e181-e14b-4a21-b022-59fc669b0914}",
+			wantStore: "MY",
+		},
+		{
+			name: "中文输出",
+			output: `
+SSL 证书绑定:
+-------------------------
+
+    主机名:端口                  : www.example.com:443
+    证书哈希                     : ABC123DEF456789012345678901234567890ABCD
+    应用程序 ID                  : {4DC3E181-E14B-4A21-B022-59FC669B0914}
+    证书存储名称                 : MY
+`,
+			wantHash:  "abc123def456789012345678901234567890abcd",
+			wantAppID: "{4DC3E181-E14B-4A21-B022-59FC669B0914}",
+			wantStore: "MY",
+		},
+		{
+			name: "未知语言字段名仍可按值解析",
+			output: `
+SSL-Zertifikatbindungen:
+-------------------------
+
+    Hostname:Port                : www.example.com:443
+    Zertifikathash               : 0102030405060708090a0b0c0d0e0f1011121314
+    Anwendungs-ID                : {00112233-4455-6677-8899-aabbccddeeff}
+    Zertifikatspeichername       : MY
+`,
+			wantHash:  "0102030405060708090a0b0c0d0e0f1011121314",
+			wantAppID: "{00112233-4455-6677-8899-aabbccddeeff}",
+			wantStore: "MY", // 字段名不识别时回退默认 MY
+		},
+		{
+			name: "SHA-256 哈希（64 位十六进制）",
+			output: `
+    Hostname:port     : www.example.com:443
+    Certificate Hash  : 0102030405060708090a0b0c0d0e0f10111213140506070809aabbccddeeff00
+    Application ID    : {00112233-4455-6677-8899-aabbccddeeff}
+`,
+			wantHash:  "0102030405060708090a0b0c0d0e0f10111213140506070809aabbccddeeff00",
+			wantAppID: "{00112233-4455-6677-8899-aabbccddeeff}",
+			wantStore: "MY",
+		},
+		{
+			name: "缺 AppID 回退默认",
+			output: `
+    Hostname:port     : www.example.com:443
+    Certificate Hash  : abc123def456789012345678901234567890abcd
+`,
+			wantHash:  "abc123def456789012345678901234567890abcd",
+			wantAppID: defaultAppID,
+			wantStore: "MY",
+		},
+		{
+			name: "绑定不存在（错误消息输出）",
+			output: `
+The system cannot find the file specified.
+`,
+			wantNil: true,
+		},
+		{
+			name:    "空输出",
+			output:  "",
+			wantNil: true,
+		},
+		{
+			name: "GUID 段不会被误认为哈希",
+			output: `
+    Application ID    : {00112233-4455-6677-8899-aabbccddeeff}
+`,
+			wantNil: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseBindingByValue(tt.output)
+			if tt.wantNil {
+				if got != nil {
+					t.Fatalf("parseBindingByValue() = %+v, want nil", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("parseBindingByValue() = nil, want non-nil")
+			}
+			if got.CertHash != tt.wantHash {
+				t.Errorf("CertHash = %q, want %q", got.CertHash, tt.wantHash)
+			}
+			if got.AppID != tt.wantAppID {
+				t.Errorf("AppID = %q, want %q", got.AppID, tt.wantAppID)
+			}
+			if got.CertStoreName != tt.wantStore {
+				t.Errorf("CertStoreName = %q, want %q", got.CertStoreName, tt.wantStore)
+			}
+		})
+	}
+}
+
+// TestNormalizeCertHash 哈希清理
+func TestNormalizeCertHash(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"AB CD 12", "abcd12"},
+		{"ab-cd-12", "abcd12"},
+		{"ABCD1234", "abcd1234"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := normalizeCertHash(tt.in); got != tt.want {
+			t.Errorf("normalizeCertHash(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
