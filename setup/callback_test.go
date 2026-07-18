@@ -4,13 +4,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
 	"sslctlw/api"
 )
 
-// TestSendSetupCallback 验证 setup 部署回调按结果发送 success/failure
+// TestSendSetupCallback 验证 setup 部署回调按结果发送 success/failure，
+// 且 failure 携带脱敏后的原因摘要、success 不含 message（端到端）
 func TestSendSetupCallback(t *testing.T) {
 	var mu sync.Mutex
 	var received []api.CallbackRequest
@@ -29,8 +31,9 @@ func TestSendSetupCallback(t *testing.T) {
 
 	client := api.NewClient(server.URL, "test-token")
 
-	sendSetupCallback(client, 301, "ok.example.com", true)
-	sendSetupCallback(client, 302, "fail.example.com", false)
+	sendSetupCallback(client, 301, "ok.example.com", true, "")
+	// 失败原因内嵌 Bearer 凭据，验证端到端脱敏
+	sendSetupCallback(client, 302, "fail.example.com", false, "安装证书失败: Authorization: Bearer sk-secret-abc123")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -43,7 +46,19 @@ func TestSendSetupCallback(t *testing.T) {
 	if received[0].DeployedAt == "" {
 		t.Error("回调应包含 deployed_at")
 	}
+	if received[0].Message != "" {
+		t.Errorf("success 回调不应携带 message，实际 = %q", received[0].Message)
+	}
 	if received[1].OrderID != 302 || received[1].Status != "failure" {
 		t.Errorf("第二条回调 = %+v, want 302/failure", received[1])
+	}
+	if !strings.Contains(received[1].Message, "安装证书失败") {
+		t.Errorf("failure 回调应携带原因摘要，实际 = %q", received[1].Message)
+	}
+	if strings.Contains(received[1].Message, "sk-secret-abc123") {
+		t.Errorf("failure 回调 message 未脱敏，泄漏凭据: %q", received[1].Message)
+	}
+	if !strings.Contains(received[1].Message, "[REDACTED]") {
+		t.Errorf("failure 回调 message 应包含脱敏占位符，实际 = %q", received[1].Message)
 	}
 }

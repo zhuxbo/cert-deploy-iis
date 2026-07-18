@@ -130,7 +130,7 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 				dec := decideExistingCert(br, bindErr)
 				if !dec.Deployed {
 					log.Printf("证书 %s 部署失败: %s", certData.Domain(), dec.Reason)
-					sendSetupCallback(client, certData.OrderID, certData.Domain(), false)
+					sendSetupCallback(client, certData.OrderID, certData.Domain(), false, dec.Reason)
 					result.Failed++
 					continue
 				}
@@ -189,14 +189,14 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 			matched, err := cert.VerifyKeyPair(nk.certData.Certificate, keyPEM)
 			if err != nil {
 				log.Printf("证书 %s 私钥验证失败: %v", nk.certData.Domain(), err)
-				sendSetupCallback(client, nk.certData.OrderID, nk.certData.Domain(), false)
+				sendSetupCallback(client, nk.certData.OrderID, nk.certData.Domain(), false, fmt.Sprintf("私钥验证失败: %v", err))
 				result.Failed++
 				result.NeedKey--
 				continue
 			}
 			if !matched {
 				log.Printf("证书 %s 私钥与证书不匹配", nk.certData.Domain())
-				sendSetupCallback(client, nk.certData.OrderID, nk.certData.Domain(), false)
+				sendSetupCallback(client, nk.certData.OrderID, nk.certData.Domain(), false, "私钥与证书不匹配")
 				result.Failed++
 				result.NeedKey--
 				continue
@@ -246,7 +246,7 @@ func installCert(client *api.Client, certData api.CertData, keyPEM string, seria
 	pfxPath, err := cert.PEMToPFX(certData.Certificate, keyPEM, certData.CACert, "")
 	if err != nil {
 		log.Printf("证书 %s 转换失败: %v", certData.Domain(), err)
-		sendSetupCallback(client, certData.OrderID, certData.Domain(), false)
+		sendSetupCallback(client, certData.OrderID, certData.Domain(), false, fmt.Sprintf("转换 PFX 失败: %v", err))
 		return false
 	}
 
@@ -260,7 +260,7 @@ func installCert(client *api.Client, certData api.CertData, keyPEM string, seria
 			errMsg = installResult.ErrorMessage
 		}
 		log.Printf("证书 %s 安装失败: %s", certData.Domain(), errMsg)
-		sendSetupCallback(client, certData.OrderID, certData.Domain(), false)
+		sendSetupCallback(client, certData.OrderID, certData.Domain(), false, "安装证书失败: "+errMsg)
 		return false
 	}
 
@@ -278,7 +278,7 @@ func installCert(client *api.Client, certData api.CertData, keyPEM string, seria
 	bindOK, bindReason := evalBindOutcome(br, bindErr)
 	if !bindOK {
 		log.Printf("证书 %s 部署失败: %s", certData.Domain(), bindReason)
-		sendSetupCallback(client, certData.OrderID, certData.Domain(), false)
+		sendSetupCallback(client, certData.OrderID, certData.Domain(), false, bindReason)
 		return false
 	}
 	if bindReason != "" {
@@ -295,14 +295,15 @@ func installCert(client *api.Client, certData api.CertData, keyPEM string, seria
 	}
 
 	// 部署完成回调（spec 4.2 / 5.1，非关键路径）
-	sendSetupCallback(client, certData.OrderID, certData.Domain(), true)
+	sendSetupCallback(client, certData.OrderID, certData.Domain(), true, "")
 
 	*certConfigs = append(*certConfigs, makeCertConfig(certData, opts, serialNumber))
 	return true
 }
 
 // sendSetupCallback 发送 setup 部署回调（同步，非关键路径，失败仅记日志）
-func sendSetupCallback(client *api.Client, orderID int, domain string, success bool) {
+// message 为失败原因摘要，仅 failure 携带；由 api.Client.Callback 统一脱敏 + 按 rune 截断
+func sendSetupCallback(client *api.Client, orderID int, domain string, success bool, message string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -314,6 +315,10 @@ func sendSetupCallback(client *api.Client, orderID int, domain string, success b
 		OrderID:    orderID,
 		Status:     status,
 		DeployedAt: time.Now().Format(time.RFC3339),
+	}
+	// 仅 failure 携带失败原因（成功回调不含 message）
+	if !success {
+		req.Message = message
 	}
 	if err := client.Callback(ctx, req); err != nil {
 		log.Printf("部署回调失败 (订单 %d, %s): %v", orderID, domain, err)

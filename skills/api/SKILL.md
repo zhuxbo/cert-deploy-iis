@@ -84,6 +84,9 @@ Content-Type: application/json
 
 ### 部署回调
 
+请求体为三字段 + 可选 `message`（仅 `status=failure` 时携带失败原因摘要，
+客户端脱敏 + 按 rune 截断 ≤256，服务端上限 500）。`status` 仅用 `success`/`failure`（回调不发 `pending`）。
+
 ```
 POST /api/deploy/callback
 Content-Type: application/json
@@ -92,6 +95,17 @@ Content-Type: application/json
   "order_id": 123,
   "status": "success",
   "deployed_at": "2025-01-01 12:00:00"
+}
+```
+
+失败回调示例：
+
+```
+{
+  "order_id": 123,
+  "status": "failure",
+  "deployed_at": "2025-01-01 12:00:00",
+  "message": "1/2 绑定失败: www.example.com: netsh 绑定失败"
 }
 ```
 

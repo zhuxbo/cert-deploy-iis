@@ -28,8 +28,8 @@ const (
 
 // Local 模式健壮性常量
 const (
-	maxIssueRetries = 10                    // CSR 最大重试次数
-	maxRenewBatch   = 100                   // 单次续签处理上限
+	maxIssueRetries = 10           // CSR 最大重试次数
+	maxRenewBatch   = 100          // 单次续签处理上限
 	timeFormat      = time.RFC3339 // 时间格式（RFC3339）
 )
 
@@ -370,8 +370,7 @@ func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, 
 	log.Printf("证书安装成功: %s", thumbprint)
 
 	// 绑定到 IIS（循环内只收集结果，回调按订单聚合到循环后单发，避免逐绑定竞态上报）
-	anySuccess := false
-	anyFailure := false
+	var outcome bindOutcome
 	for _, rule := range certCfg.BindRules {
 		// 检查是否有域名冲突，如果有则检查是否应该使用此证书
 		if conflictIndexes, hasConflict := conflicts[rule.Domain]; hasConflict {
@@ -400,7 +399,7 @@ func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, 
 				Thumbprint: thumbprint,
 				OrderID:    certData.OrderID,
 			})
-			anyFailure = true
+			outcome.fail(fmt.Sprintf("%s: %v", rule.Domain, bindErr))
 		} else {
 			log.Printf("绑定成功: %s", rule.Domain)
 			results = append(results, Result{
@@ -410,23 +409,54 @@ func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, 
 				Thumbprint: thumbprint,
 				OrderID:    certData.OrderID,
 			})
-			anySuccess = true
+			outcome.ok()
 		}
 	}
 
-	sendAggregatedCallback(d, client, certData.OrderID, certCfg.Domain, anySuccess, anyFailure)
+	sendAggregatedCallback(d, client, certData.OrderID, certCfg.Domain, outcome)
 	return results
 }
 
-// sendAggregatedCallback 按订单聚合部署结果发送单条回调（spec 2.8 三字段契约）：
-// 全部绑定成功→success，任一失败→failure（失败明细已记入 results 与日志）。
+// bindOutcome 聚合一个订单内各绑定的成败，用于生成订单级单条回调
+type bindOutcome struct {
+	success   int
+	failed    int
+	firstFail string // 首个失败绑定的原因（作为聚合 failure 回调的首因）
+}
+
+// ok 记一次绑定成功
+func (o *bindOutcome) ok() { o.success++ }
+
+// fail 记一次绑定失败，保留首个失败原因
+func (o *bindOutcome) fail(reason string) {
+	o.failed++
+	if o.firstFail == "" {
+		o.firstFail = reason
+	}
+}
+
+// aggregatedFailureMessage 生成订单级 failure 回调的原因摘要（纯函数）：
+// "<失败数>/<总数> 绑定失败: <首因>"，无首因时省略冒号后缀。
+// 最终脱敏与截断由 api.Client.Callback 统一处理。
+func aggregatedFailureMessage(total, failed int, firstReason string) string {
+	base := fmt.Sprintf("%d/%d 绑定失败", failed, total)
+	if firstReason == "" {
+		return base
+	}
+	return base + ": " + firstReason
+}
+
+// sendAggregatedCallback 按订单聚合部署结果发送单条回调（spec 2.8）：
+// 全部绑定成功→success（不含 message）；任一失败→failure，message 为
+// "<失败数>/<总数> 绑定失败: <首因>"（首因取首个失败绑定原因）。
 // 无绑定被处理（全部冲突跳过 / 无匹配）时不产生回调，与姊妹仓订单级单发对齐。
-func sendAggregatedCallback(d *Deployer, client APIClient, orderID int, domain string, anySuccess, anyFailure bool) {
-	if !anySuccess && !anyFailure {
+func sendAggregatedCallback(d *Deployer, client APIClient, orderID int, domain string, o bindOutcome) {
+	if o.success == 0 && o.failed == 0 {
 		return
 	}
-	if anyFailure {
-		sendCallback(d, client, orderID, domain, false, "订单存在绑定失败（详见各绑定日志）")
+	if o.failed > 0 {
+		msg := aggregatedFailureMessage(o.success+o.failed, o.failed, o.firstFail)
+		sendCallback(d, client, orderID, domain, false, msg)
 		return
 	}
 	sendCallback(d, client, orderID, domain, true, "")
@@ -783,7 +813,8 @@ func updateCertDomains(certCfg *config.CertConfig, certPEM string) {
 const CallbackTimeout = 60 * time.Second
 
 // sendCallback 发送部署回调（异步，带超时控制）
-// 回调请求仅含 order_id/status/deployed_at（spec 2.8），失败原因 message 记入本地日志；
+// 回调请求含 order_id/status/deployed_at，失败时附带 message 原因摘要（spec 2.8）；
+// message 由 Client.Callback 统一脱敏 + 按 rune 截断，本地同时记 Error 日志留全量；
 // 注意：Client.Callback 内部已有重试机制（doWithRetry），此处不再额外重试
 func sendCallback(d *Deployer, client APIClient, orderID int, domain string, success bool, message string) {
 	if !success && message != "" {
@@ -804,6 +835,10 @@ func sendCallback(d *Deployer, client APIClient, orderID int, domain string, suc
 			OrderID:    orderID,
 			Status:     status,
 			DeployedAt: time.Now().Format(timeFormat),
+		}
+		// 仅 failure 携带失败原因（成功回调不含 message）
+		if !success {
+			req.Message = message
 		}
 
 		if err := client.Callback(ctx, req); err != nil {
@@ -916,8 +951,7 @@ func deployCertAutoMode(d *Deployer, client APIClient, certData *api.CertData, p
 	}
 
 	// 3. 更新匹配的绑定（循环内只收集结果，回调按订单聚合到循环后单发）
-	anySuccess := false
-	anyFailure := false
+	var outcome bindOutcome
 	for domain, binding := range matchedBindings {
 		host := iis.ParseHostFromBinding(binding.HostnamePort)
 		port := iis.ParsePortFromBinding(binding.HostnamePort)
@@ -934,15 +968,15 @@ func deployCertAutoMode(d *Deployer, client APIClient, certData *api.CertData, p
 		if bindErr != nil {
 			log.Printf("绑定失败: %v", bindErr)
 			results = append(results, Result{Domain: domain, Success: false, Message: bindErr.Error(), Thumbprint: thumbprint, OrderID: certData.OrderID})
-			anyFailure = true
+			outcome.fail(fmt.Sprintf("%s: %v", domain, bindErr))
 		} else {
 			log.Printf("绑定成功: %s", domain)
 			results = append(results, Result{Domain: domain, Success: true, Message: "部署成功", Thumbprint: thumbprint, OrderID: certData.OrderID})
-			anySuccess = true
+			outcome.ok()
 		}
 	}
 
-	sendAggregatedCallback(d, client, certData.OrderID, certCfg.Domain, anySuccess, anyFailure)
+	sendAggregatedCallback(d, client, certData.OrderID, certCfg.Domain, outcome)
 	return results
 }
 

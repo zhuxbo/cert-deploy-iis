@@ -94,7 +94,7 @@ gofmt 要求：本次改动的行必须符合项目 go.mod 对应版本的 gofmt
 - [ ] **HTTP 错误处理**：API 调用是否检查了 HTTP 状态码？错误响应的 body 是否被读取并关闭？
 - [ ] **超时设置**：HTTP Client 是否设置了合理的超时？
 - [ ] **Token 安全**：Token 是否仅通过 Authorization header 传输？日志中是否避免打印 Token？
-- [ ] **回调契约**：回调请求体是否严格保持 spec §2.8 三字段（order_id/status/deployed_at）？status 是否仅用 success/failure/pending？
+- [ ] **回调契约**：回调请求体是否保持 spec §2.8 三字段 + 可选 message（仅 failure）（order_id/status/deployed_at/message）？message 是否经客户端脱敏 + 按 rune 截断 ≤256？status 是否仅用 success/failure（回调不发 pending）？
 - [ ] **失败回调覆盖**：新增的失败路径是否都发送 failure 回调（client 可用时）？是否存在"只记本地日志"的静默失败让服务端视图错位？
 - [ ] **假成功语义**：success 回调与成功统计是否以实际生效（绑定/部署校验通过）为前提？部分失败是否如实反映在结果与统计中？
 

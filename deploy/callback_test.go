@@ -271,6 +271,85 @@ func TestDeployCertWithRules_AllSuccess_SingleSuccessCallback(t *testing.T) {
 	}
 }
 
+// TestAggregatedFailureMessage 聚合失败原因摘要纯函数
+func TestAggregatedFailureMessage(t *testing.T) {
+	tests := []struct {
+		name        string
+		total       int
+		failed      int
+		firstReason string
+		want        string
+	}{
+		{"2/3 带首因", 3, 2, "www.example.com: netsh 绑定失败", "2/3 绑定失败: www.example.com: netsh 绑定失败"},
+		{"1/1 带首因", 1, 1, "证书与私钥不匹配", "1/1 绑定失败: 证书与私钥不匹配"},
+		{"无首因省略后缀", 2, 1, "", "1/2 绑定失败"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := aggregatedFailureMessage(tt.total, tt.failed, tt.firstReason); got != tt.want {
+				t.Errorf("aggregatedFailureMessage(%d,%d,%q) = %q, want %q", tt.total, tt.failed, tt.firstReason, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDeployCertWithRules_AggregatedFailureMessage 规则模式聚合 failure 回调携带 "N/M 绑定失败: 首因"
+func TestDeployCertWithRules_AggregatedFailureMessage(t *testing.T) {
+	// 规则顺序确定（slice）：ok 先成功，fail 后失败 → 1/2 绑定失败，首因取 fail
+	certData, keyPEM, certCfg := rulesCertData(t, 220, "multi.example.com", "ok.example.com", "fail.example.com")
+	rec := &callbackRecorder{}
+
+	d := &Deployer{
+		Converter: &MockCertConverter{},
+		Installer: &MockCertInstaller{},
+		Binder: &MockIISBinder{BindCertificateFunc: func(hostname string, port int, certHash string) error {
+			if hostname == "fail.example.com" {
+				return fmt.Errorf("netsh 绑定失败")
+			}
+			return nil
+		}},
+		Store: &MockOrderStore{},
+	}
+	client := newRecordingClient(rec)
+
+	deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
+	d.WaitCallbacks()
+
+	cbs := rec.all()
+	if len(cbs) != 1 || cbs[0].Status != "failure" {
+		t.Fatalf("应仅一条 failure 回调: %+v", cbs)
+	}
+	wantMsg := "1/2 绑定失败: fail.example.com: netsh 绑定失败"
+	if cbs[0].Message != wantMsg {
+		t.Errorf("聚合 failure message = %q, want %q", cbs[0].Message, wantMsg)
+	}
+}
+
+// TestDeployCertWithRules_SuccessCallbackNoMessage 全成功聚合 success 回调不携带 message
+func TestDeployCertWithRules_SuccessCallbackNoMessage(t *testing.T) {
+	certData, keyPEM, certCfg := rulesCertData(t, 221, "allok.example.com", "a.example.com", "b.example.com")
+	rec := &callbackRecorder{}
+
+	d := &Deployer{
+		Converter: &MockCertConverter{},
+		Installer: &MockCertInstaller{},
+		Binder:    &MockIISBinder{}, // 默认全部绑定成功
+		Store:     &MockOrderStore{},
+	}
+	client := newRecordingClient(rec)
+
+	deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
+	d.WaitCallbacks()
+
+	cbs := rec.all()
+	if len(cbs) != 1 || cbs[0].Status != "success" {
+		t.Fatalf("应仅一条 success 回调: %+v", cbs)
+	}
+	if cbs[0].Message != "" {
+		t.Errorf("success 回调不应携带 message，实际 = %q", cbs[0].Message)
+	}
+}
+
 // TestDeployCertAutoMode_MixedBindings_SingleFailureCallback 自动模式多绑定一成一败：仅一条 failure 回调
 func TestDeployCertAutoMode_MixedBindings_SingleFailureCallback(t *testing.T) {
 	certData, keyPEM, certCfg := autoModeCertData(t, 212, "auto.example.com")

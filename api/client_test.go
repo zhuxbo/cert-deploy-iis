@@ -1002,3 +1002,139 @@ func TestHandleHTTPError(t *testing.T) {
 		}
 	})
 }
+
+// TestSanitizeCallbackMessage 验证回调 message 脱敏与截断（纯函数）
+func TestSanitizeCallbackMessage(t *testing.T) {
+	t.Run("空串直通", func(t *testing.T) {
+		if got := SanitizeCallbackMessage(""); got != "" {
+			t.Errorf("空串应返回空，实际 = %q", got)
+		}
+	})
+
+	t.Run("普通原因不改动", func(t *testing.T) {
+		in := "绑定失败: netsh 返回错误码 183"
+		if got := SanitizeCallbackMessage(in); got != in {
+			t.Errorf("普通原因应原样返回，实际 = %q", got)
+		}
+	})
+
+	t.Run("Bearer 凭据脱敏", func(t *testing.T) {
+		in := "回调失败: Authorization: Bearer sk-live-0123456789abcdef"
+		got := SanitizeCallbackMessage(in)
+		if strings.Contains(got, "sk-live-0123456789abcdef") {
+			t.Errorf("Bearer 凭据未脱敏: %q", got)
+		}
+		if !strings.Contains(got, "Bearer [REDACTED]") {
+			t.Errorf("应保留方案名并脱敏凭据: %q", got)
+		}
+	})
+
+	t.Run("Basic 凭据脱敏", func(t *testing.T) {
+		in := "basic dXNlcjpwYXNzd29yZA=="
+		got := SanitizeCallbackMessage(in)
+		if strings.Contains(got, "dXNlcjpwYXNzd29yZA==") {
+			t.Errorf("Basic 凭据未脱敏: %q", got)
+		}
+		if !strings.Contains(got, "[REDACTED]") {
+			t.Errorf("应包含脱敏占位符: %q", got)
+		}
+	})
+
+	t.Run("完整私钥块脱敏", func(t *testing.T) {
+		in := "转换失败 -----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIabc123secretkeymaterial\n-----END EC PRIVATE KEY----- 结束"
+		got := SanitizeCallbackMessage(in)
+		if strings.Contains(got, "secretkeymaterial") {
+			t.Errorf("私钥本体未脱敏: %q", got)
+		}
+		if !strings.Contains(got, "[REDACTED_PRIVATE_KEY]") {
+			t.Errorf("应包含私钥脱敏占位符: %q", got)
+		}
+	})
+
+	t.Run("残缺私钥块脱敏", func(t *testing.T) {
+		// 有 BEGIN 无 END（上游已截断），从 BEGIN 起整段脱敏，不残留密钥本体
+		in := "错误 -----BEGIN PRIVATE KEY-----\nMHcCAQEEIdanglingsecret"
+		got := SanitizeCallbackMessage(in)
+		if strings.Contains(got, "danglingsecret") {
+			t.Errorf("残缺私钥本体未脱敏: %q", got)
+		}
+		if !strings.Contains(got, "[REDACTED_PRIVATE_KEY]") {
+			t.Errorf("应包含私钥脱敏占位符: %q", got)
+		}
+	})
+
+	t.Run("按 rune 截断至上限", func(t *testing.T) {
+		// 300 个中文 rune，截断后应为 256 个 rune（非字节）
+		in := strings.Repeat("错", 300)
+		got := SanitizeCallbackMessage(in)
+		if n := len([]rune(got)); n != CallbackMessageMaxRunes {
+			t.Errorf("截断后 rune 数 = %d, want %d", n, CallbackMessageMaxRunes)
+		}
+		// 截断不得切裂多字节字符（每个 rune 完整）
+		for _, r := range got {
+			if r != '错' {
+				t.Fatalf("截断产生了非法字符: %q", r)
+			}
+		}
+	})
+
+	t.Run("换行折叠为空格", func(t *testing.T) {
+		got := SanitizeCallbackMessage("第一行\n第二行\r\n第三行")
+		if strings.ContainsAny(got, "\r\n") {
+			t.Errorf("换行未折叠: %q", got)
+		}
+	})
+
+	t.Run("私钥跨 256 截断边界不泄漏", func(t *testing.T) {
+		// 密钥材料落在 256 截断点之内、END 标记在点外；
+		// 无论实现顺序如何（本仓另有残缺 BEGIN 兜底正则），最终 message 不得含任何密钥片段
+		in := strings.Repeat("x", 150) + "-----BEGIN RSA PRIVATE KEY-----\nLEAKMATERIAL" + strings.Repeat("A", 80) + "\n-----END RSA PRIVATE KEY-----"
+		got := SanitizeCallbackMessage(in)
+		if strings.Contains(got, "LEAKMATERIAL") {
+			t.Errorf("跨界私钥不应泄漏任何片段: %q", got)
+		}
+		if !strings.Contains(got, "[REDACTED_PRIVATE_KEY]") {
+			t.Errorf("应包含私钥脱敏占位符: %q", got)
+		}
+	})
+}
+
+// TestCallback_MessageOnlyOnFailure 验证 Callback 仅在 failure 携带 message，success 清空
+func TestCallback_MessageOnlyOnFailure(t *testing.T) {
+	var received []CallbackRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req CallbackRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		received = append(received, req)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+
+	// success 即使传入 message 也应被清空
+	if err := client.Callback(context.Background(), &CallbackRequest{
+		OrderID: 1, Status: "success", Message: "不应上报的内容",
+	}); err != nil {
+		t.Fatalf("success Callback error = %v", err)
+	}
+	// failure 携带并脱敏 message
+	if err := client.Callback(context.Background(), &CallbackRequest{
+		OrderID: 2, Status: "failure", Message: "安装失败 Bearer sk-secret-xyz",
+	}); err != nil {
+		t.Fatalf("failure Callback error = %v", err)
+	}
+
+	if len(received) != 2 {
+		t.Fatalf("收到回调数 = %d, want 2", len(received))
+	}
+	if received[0].Message != "" {
+		t.Errorf("success 回调 message 应为空，实际 = %q", received[0].Message)
+	}
+	if !strings.Contains(received[1].Message, "安装失败") {
+		t.Errorf("failure 回调应携带原因，实际 = %q", received[1].Message)
+	}
+	if strings.Contains(received[1].Message, "sk-secret-xyz") {
+		t.Errorf("failure 回调 message 未脱敏: %q", received[1].Message)
+	}
+}

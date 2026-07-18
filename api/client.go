@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -482,11 +483,56 @@ type CallbackRequest struct {
 	OrderID    int    `json:"order_id"`
 	Status     string `json:"status"` // success or failure
 	DeployedAt string `json:"deployed_at,omitempty"`
+	// Message 失败原因摘要，仅 status=failure 时携带（spec §2.8）。
+	// 由 Callback 统一脱敏 + 按 rune 截断至 CallbackMessageMaxRunes，服务端上限 500。
+	Message string `json:"message,omitempty"`
+}
+
+// CallbackMessageMaxRunes 回调 message 客户端截断上限（按 rune 计，服务端上限 500）
+const CallbackMessageMaxRunes = 256
+
+var (
+	// pemPrivateKeyBlockRe 匹配完整 PEM 私钥块（BEGIN..END，含各类私钥类型）
+	pemPrivateKeyBlockRe = regexp.MustCompile(`(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
+	// pemPrivateKeyDanglingRe 匹配残缺私钥块（有 BEGIN 无 END，截断后可能残留），从 BEGIN 起整段脱敏
+	pemPrivateKeyDanglingRe = regexp.MustCompile(`(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*`)
+	// bearerBasicRe 匹配 Authorization 中的 Bearer/Basic 凭据，保留方案名脱敏凭据本身
+	bearerBasicRe = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+`)
+)
+
+// SanitizeCallbackMessage 清洗失败原因摘要用于回调上报（纯函数，跨平台可测）：
+// 先脱敏（去除 PEM 私钥块与 Bearer/Basic 凭据），折叠换行，再按 rune 截断至上限。
+// 脱敏先于截断，避免截断切断私钥块导致 END 缺失后残留密钥本体。
+func SanitizeCallbackMessage(msg string) string {
+	if msg == "" {
+		return ""
+	}
+	// 1. 脱敏：完整私钥块优先，再清理残缺 BEGIN 段，最后处理凭据
+	msg = pemPrivateKeyBlockRe.ReplaceAllString(msg, "[REDACTED_PRIVATE_KEY]")
+	msg = pemPrivateKeyDanglingRe.ReplaceAllString(msg, "[REDACTED_PRIVATE_KEY]")
+	msg = bearerBasicRe.ReplaceAllString(msg, "$1 [REDACTED]")
+	// 2. 折叠换行为空格，回调 message 保持单行，规避下游日志/存储注入
+	msg = strings.ReplaceAll(msg, "\r", " ")
+	msg = strings.ReplaceAll(msg, "\n", " ")
+	msg = strings.TrimSpace(msg)
+	// 3. 按 rune 截断（多字节安全）
+	if runes := []rune(msg); len(runes) > CallbackMessageMaxRunes {
+		msg = string(runes[:CallbackMessageMaxRunes])
+	}
+	return msg
 }
 
 // Callback 部署回调
 func (c *Client) Callback(ctx context.Context, req *CallbackRequest) error {
 	apiURL := c.BaseURL + "/callback"
+
+	// 统一在客户端出口处理 message：仅 failure 携带，脱敏 + 按 rune 截断（防调用方遗漏）。
+	// req 为调用方一次性构造的临时对象，此处就地清洗不影响其他状态。
+	if req.Status == "failure" {
+		req.Message = SanitizeCallbackMessage(req.Message)
+	} else {
+		req.Message = ""
+	}
 
 	data, err := json.Marshal(req)
 	if err != nil {
