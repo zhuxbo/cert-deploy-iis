@@ -85,7 +85,8 @@ dev 发布只执行发布数据路径，不修改 Git 或 GitHub：
 
 - 版本 tag 创建前失败：可重新执行 `prepare`；若已有合格 bundle，也可继续复用。
 - 版本 tag 创建后失败：禁止 `prepare`、`build/build.sh`、`build/sign.sh`；只读取原 bundle，先核对 manifest 的 commit 等于 tag target，再幂等执行 `stage`，从失败点继续 GitHub upload、`publish` 或 `verify`。
-- `publish` 中断并导致节点处于不同阶段时，先用 `verify` 判断是否已经全节点一致；若未一致，运行 `rollback <bundle-dir>` 恢复全部节点，再用同一 bundle 重新 `stage`/`publish`，不得重建。
+- `publish` 中断并导致节点处于不同阶段时，保留 bundle 内的 `.publish-token`，先运行 `resume-publish <bundle-dir>` 幂等完成公开并重新验收；若确认不能继续，再运行 `rollback <bundle-dir>` 恢复全部节点，然后用同一 bundle 重新 `stage`/`publish`，不得重建。普通 `publish` 不得接管已有 attempt。
+- `stage` 会在每个发布根留下绑定 release ID、manifest 和 commit 的持久所有权；`publish` 再绑定唯一 attempt token。中断后只有持有原 bundle 和 token 的协调器可以继续。回滚必须先全节点预检并绑定排他的回滚阶段；部分节点完成时依靠完成标记重试。成功 `cleanup` 或完整 `rollback` 才释放 owner 和本地 token，禁止手工删除它们绕过恢复核查。
 - GitHub draft、节点暂存、索引更新、分支回同步任一步失败，都保留不可变对象和 bundle。修复失败节点后重新做全节点与公网验收。
 - 任一节点索引出现部分推进，立即停止新发布并用同一 bundle 完成其余节点或恢复到发布前索引；不得长期保留分裂的 `latest`。
 - 已完成正式版不得删除 tag、覆盖资产或重写同版本；修复和回滚均发布更高版本。

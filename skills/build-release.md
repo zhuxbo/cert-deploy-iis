@@ -50,6 +50,8 @@ build/recovery/v<version>-<source_commit>/
 └── sslctlw-windows-amd64.exe
 ```
 
+首次执行 `publish` 时会在该目录原子创建 `.publish-token` 恢复元数据；它不属于正式资产或 manifest。成功 `cleanup` 或完整 `rollback` 后脚本删除该 token；协调器中断时必须保留，并用 `resume-publish` 继续。
+
 `manifest.json` 固定绑定：
 
 - `schema_version`
@@ -71,6 +73,7 @@ bash build/release.sh --dry-run <version>       # 无构建、签名、网络或
 bash build/release.sh prepare <version>         # 只生成持久化 bundle
 bash build/release.sh stage <bundle-dir>        # 全节点隐藏暂存并校验
 bash build/release.sh publish <bundle-dir>      # 提升目录并原子替换全节点索引
+bash build/release.sh resume-publish <bundle-dir> # 协调器中断后复用原 publish token
 bash build/release.sh verify <bundle-dir>       # 全节点、索引与哈希对账
 bash build/release.sh rollback <bundle-dir>     # 中断造成部分提升时恢复全部节点
 bash build/release.sh cleanup <bundle-dir>      # 验收后清理远端恢复数据与超额历史目录
@@ -78,12 +81,13 @@ bash build/release.sh dev <prerelease-version>  # prepare → stage → publish 
 bash build/release.sh test                      # 只测试所有节点 SSH 与依赖
 ```
 
-脚本不创建或移动 Git tag，不操作 GitHub Release，不合并或推送分支。`main` 不允许跳过构建/签名、单节点公开发布、覆盖已有正式目录或更新已有同版本索引；`stage` 可幂等重试，并要求所有节点生成的下一版索引字节一致。`publish` 只接受校验通过的 bundle，索引通过同目录临时文件原子替换，并在任一节点失败时返回非零。`verify` 保留暂存与回滚数据供恢复，只有完整验收后才运行 `cleanup`。
+脚本不创建或移动 Git tag，不操作 GitHub Release，不合并或推送分支。`main` 不允许跳过构建/签名、单节点公开发布、覆盖已有正式目录或更新已有同版本索引；`stage` 可幂等重试，并要求所有节点生成的下一版索引字节一致。每个节点的发布根从 `stage` 到 `cleanup` 或成功 `rollback` 由同一 bundle 持久占用，其他发布必须失败；本地协调器互斥与首次 `publish` 生成的唯一 attempt token 共同阻止同一 bundle 的并发操作。回滚先在全部节点完成只读 CAS/备份预检，再绑定 `rolling-back` 阶段，最后才恢复公开状态；已完成节点保留可验证完成标记，支持另一节点失败后的幂等重试。`publish` 比较生成待发布索引时的基线代际，拒绝覆盖已变化的索引。索引通过同目录临时文件原子替换，任一节点失败时返回非零。`verify` 保留暂存与回滚数据供恢复，只有完整验收后才运行 `cleanup`；节点根目录的薄 helper 与完成标记只服务中断恢复，并在同 release ID 下次 `stage` 时核对后轮换。
 
 ## 本地可执行验证
 
 ```bash
-bash -n build/build.sh build/sign.sh build/release.sh build/check-governance.sh
+bash -n build/build.sh build/sign.sh build/release.sh build/check-governance.sh build/release-helper-test.sh
+bash build/release-helper-test.sh
 bash build/release.sh --dry-run 1.2.3-rc.1
 bash build/release.sh --dry-run 1.2.3
 bash build/check-governance.sh

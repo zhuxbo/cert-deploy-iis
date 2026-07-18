@@ -4,7 +4,8 @@ on:
   push:
     branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
+  workflow_dispatch:
 
 jobs:
   test:
@@ -20,14 +21,22 @@ jobs:
         with:
           python-version: "3.13"
 
-      - run: go vet ./...
-
-      - run: go test ./...
-
       - name: Governance drift check
         shell: bash
         run: bash build/check-governance.sh
 
+      - name: Release static checks
+        shell: bash
+        run: |
+          bash -n build/build.sh build/sign.sh build/release.sh build/check-governance.sh build/release-helper-test.sh
+          python -m py_compile build/release-helper.py
+          bash build/release.sh --dry-run 1.2.3-rc.1
+          bash build/release.sh --dry-run 1.2.3
+
       - name: Release helper tests
         shell: bash
         run: bash build/release-helper-test.sh
+
+      - run: go vet ./...
+
+      - run: go test -count=1 ./...

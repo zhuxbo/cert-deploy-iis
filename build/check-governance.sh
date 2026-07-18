@@ -9,6 +9,22 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 cd "$PROJECT_ROOT"
 
+require_regular_file() {
+    local path="$1"
+    [ -f "$path" ] && [ ! -L "$path" ] || {
+        echo "$path 必须是普通文件" >&2
+        exit 1
+    }
+}
+
+require_literal() {
+    local path="$1" value="$2"
+    grep -Fq -- "$value" "$path" || {
+        echo "$path 缺少必需契约: $value" >&2
+        exit 1
+    }
+}
+
 cat >"$TMP_DIR/CLAUDE.md" <<'EOF'
 # 项目智能体规则
 
@@ -27,30 +43,53 @@ cat >"$TMP_DIR/remote-release.md" <<'EOF'
 将用户参数 `$ARGUMENTS` 原样作为版本参数传入该流程。
 EOF
 
+require_regular_file AGENTS.md
+require_regular_file CLAUDE.md
+require_regular_file .claude/commands/finish-check.md
+require_regular_file .claude/commands/remote-release.md
+
 cmp -s CLAUDE.md "$TMP_DIR/CLAUDE.md" || { echo "CLAUDE.md 不符合固定模板" >&2; exit 1; }
 cmp -s .claude/commands/finish-check.md "$TMP_DIR/finish-check.md" || { echo "finish-check 工具入口发生漂移" >&2; exit 1; }
 cmp -s .claude/commands/remote-release.md "$TMP_DIR/remote-release.md" || { echo "remote-release 工具入口发生漂移" >&2; exit 1; }
 
-if find skills -mindepth 1 -type d -print -quit | grep -q .; then
-    echo "skills/ 下不得存在二级目录" >&2
-    exit 1
-fi
-
 while IFS= read -r path; do
+    [ -f "$path" ] && [ ! -L "$path" ] || {
+        echo "skills/ 一级项必须是普通文件: $path" >&2
+        exit 1
+    }
     name="$(basename "$path")"
     if [ "$name" != "SKILL.md" ] && ! printf '%s' "$name" | grep -Eq '^[a-z0-9]+(-[a-z0-9]+)*\.md$'; then
         echo "skill 叶子文件名不符合 kebab-case: $path" >&2
         exit 1
     fi
-done < <(find skills -mindepth 1 -maxdepth 1 -type f | sort)
+done < <(find skills -mindepth 1 -maxdepth 1 -print | sort)
 
-head -1 skills/SKILL.md | grep -qx -- '---' || { echo "skills/SKILL.md 缺少入口元数据" >&2; exit 1; }
+require_regular_file skills/SKILL.md
+[ "$(sed -n '1p' skills/SKILL.md)" = "---" ] || { echo "skills/SKILL.md frontmatter 起始无效" >&2; exit 1; }
+[ "$(sed -n '2p' skills/SKILL.md)" = "name: sslctlw" ] || { echo "skills/SKILL.md name 无效" >&2; exit 1; }
+[ "$(sed -n '3p' skills/SKILL.md)" = "description: 路由 sslctlw 的 Go、IIS、Deploy API、windigo、构建发布和完成检查工作流。" ] || { echo "skills/SKILL.md description 无效" >&2; exit 1; }
+[ "$(sed -n '4p' skills/SKILL.md)" = "---" ] || { echo "skills/SKILL.md frontmatter 未闭合" >&2; exit 1; }
 
-while IFS= read -r leaf; do
-    [ -f "$leaf" ] || { echo "Skill 路由引用不存在: $leaf" >&2; exit 1; }
-done < <(grep -Eo 'skills/[a-z0-9]+(-[a-z0-9]+)*\.md' skills/SKILL.md | sort -u)
+find skills -mindepth 1 -maxdepth 1 -type f ! -name SKILL.md | sort >"$TMP_DIR/actual-leaves"
+awk -F'|' '
+    /^\|/ {
+        trigger = $2
+        resource = $3
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", trigger)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", resource)
+        if (trigger != "" && resource ~ /^`skills\/[a-z0-9]+(-[a-z0-9]+)*\.md`$/) {
+            gsub(/`/, "", resource)
+            print resource
+        }
+    }
+' skills/SKILL.md | sort -u >"$TMP_DIR/routed-leaves"
+if ! cmp -s "$TMP_DIR/actual-leaves" "$TMP_DIR/routed-leaves"; then
+    echo "Skill 路由与实际叶子不一致" >&2
+    diff -u "$TMP_DIR/routed-leaves" "$TMP_DIR/actual-leaves" >&2 || true
+    exit 1
+fi
 
-if grep -R -n -E 'skills/[a-z0-9-]+/(SKILL\.md)?' \
+if grep -R -n -E 'skills/[^/[:space:]`<>]+/(SKILL\.md)?' \
     --include='*.md' --exclude-dir=.git --exclude-dir=.superpowers --exclude-dir=recovery .; then
     echo "文档仍引用旧的二级 skill 路径" >&2
     exit 1
@@ -59,6 +98,27 @@ fi
 for leaf in skills/finish-check.md skills/remote-release.md; do
     [ -f "$leaf" ] || { echo "工具入口引用不存在: $leaf" >&2; exit 1; }
 done
+
+for contract in \
+    '跨仓公共行为以 `deploy-spec.md` 为准' \
+    '由 `skills/SKILL.md` 路由到对应叶子资源' \
+    '任务命中某领域时，必须先读根路由及选中的叶子资源' \
+    'Windows 运行期行为以 GitHub Actions 的 `windows-latest` 结果为准' \
+    '不得削弱 Authenticode、DPAPI、数据目录 ACL、证书私钥配对或 IIS 绑定恢复校验' \
+    '未经明确发布指令，不创建或移动 tag、GitHub Release，不上传发布节点' \
+    'GOOS=windows GOARCH=amd64 go build -o /dev/null .' \
+    'GOOS=windows GOARCH=amd64 go vet ./...' \
+    'go test ./...' \
+    'bash build/check-governance.sh' \
+    '只记录长期有效、项目级、会影响智能体行为的规则' \
+    '跨仓公共行为写入 `deploy-spec.md`' \
+    '只直接维护 `AGENTS.md`' \
+    '新增、删除或重命名 skill 时，同步更新 `skills/SKILL.md`' \
+    '修改后删除失效或重复内容'; do
+    require_literal AGENTS.md "$contract"
+done
+
+require_literal README.md 'GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=1.0.0" -o dist/sslctlw.exe .'
 
 hash_file() {
     if command -v sha256sum >/dev/null 2>&1; then

@@ -13,8 +13,8 @@
 | `build.sh` | 构建 Windows amd64 EXE，注入版本和升级签名信任配置，不承担 CI 门禁 |
 | `sign.sh` | 对一个 EXE 执行或验证 Authenticode 签名 |
 | `release.sh` | 生成持久化 bundle；对全部发布节点执行 stage/publish/verify/cleanup |
-| `release-helper.py` | 确定性校验 manifest、生成索引、节点提交/回滚/验收 |
-| `release-helper-test.sh` | 在临时目录测试 main 不可变、dev 覆盖和回滚 |
+| `release-helper.py` | 校验 manifest、维护协调器/发布根互斥和索引代际、执行节点提交/回滚/验收 |
+| `release-helper-test.sh` | 在临时双节点测试不可变发布、并发拒绝、中断续跑、清理重试和部分失败回滚 |
 | `check-governance.sh` | 检查智能体配置、skill 路由和薄工具入口漂移 |
 | `install.ps1` | Windows 安装/升级入口 |
 

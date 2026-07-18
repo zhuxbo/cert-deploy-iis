@@ -32,6 +32,7 @@ bash build/release.sh --dry-run 1.2.3
 - manifest 的正式资产集合只有 `sslctlw-windows-amd64.exe`，哈希在签名后计算。
 - main 已存在版本目录或索引条目时拒绝覆盖；dev 同版本可替换。
 - `stage` 先全节点隐藏暂存并校验，`publish` 才更新公开目录/索引；失败返回非零并保留 bundle。
+- 并发发布被发布根 owner 与 publish token 拒绝；中断后的 `resume-publish` 只能复用原 token，其他协调器不能提交或回滚。
 - tag 后恢复只复用原 bundle，不调用构建或签名。
 
 ## 2. Windows amd64 编译与静态分析
@@ -65,12 +66,14 @@ go test -count=1 ./...
 非 Windows 环境无法运行本仓依赖 windigo/Windows syscall 的测试；编译每个 Windows 测试包，并明确把运行期验证留给 Windows CI：
 
 ```bash
-for d in $(GOOS=windows GOARCH=amd64 go list ./...); do
-  GOOS=windows GOARCH=amd64 go test -count=1 -c -o /dev/null "$d" || exit 1
-done
+packages="$(GOOS=windows GOARCH=amd64 go list ./...)" || exit 1
+[ -n "$packages" ] || { echo "未发现 Windows 测试包" >&2; exit 1; }
+while IFS= read -r package; do
+  GOOS=windows GOARCH=amd64 go test -count=1 -c -o /dev/null "$package" || exit 1
+done <<<"$packages"
 ```
 
-最终必须引用同一 commit 的 GitHub `windows-latest` 运行结果作为 Windows 行为证据。测试暴露生产缺陷时修复生产代码，不削弱安全校验或篡改断言迎合错误行为。
+最终必须引用同一 commit 的 GitHub `windows-latest` 运行结果作为 Windows 行为证据。只要求本地提交且明确禁止推送时，将该项标为“待推送后验证”，不得声称 Windows 运行测试通过；它不阻止本地提交，但仍阻止合并和发布。测试暴露生产缺陷时修复生产代码，不削弱安全校验或篡改断言迎合错误行为。
 
 ## 5. 变更面专项审查
 
@@ -99,7 +102,7 @@ git diff --stat
 git diff
 ```
 
-逐文件确认无意外改动、无调试代码、无失效引用、无秘密配置、无过期说明，`deploy-spec.md` 未被修改。提交信息遵循仓库历史的 `type: 中文主题`，body 2–10 条总结性要点，不添加 AI 署名。
+逐文件确认无意外改动、无调试代码、无失效引用、无秘密配置、无过期说明；按第 6 节确认 `deploy-spec.md` 是否属于本任务授权范围。提交信息遵循仓库历史的 `type: 中文主题`，body 2–10 条总结性要点，不添加 AI 署名。
 
 ## 输出
 
