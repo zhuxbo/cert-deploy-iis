@@ -93,8 +93,8 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 
 	// 遍历证书配置
 	processed := 0
-	for i, certCfg := range cfg.Certificates {
-		if !certCfg.Enabled {
+	for i := range cfg.Certificates {
+		if !cfg.Certificates[i].Enabled {
 			continue
 		}
 		if processed >= maxRenewBatch {
@@ -110,151 +110,18 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 		}
 		processedIndex++
 
-		// per-cert client
-		client, clientErr := NewClientForCert(&cfg.Certificates[i])
-		if clientErr != nil {
-			log.Printf("创建证书 %s 的 API 客户端失败: %v", certCfg.Domain, clientErr)
-			results = append(results, Result{
-				Domain:  certCfg.Domain,
-				Success: false,
-				Message: fmt.Sprintf("API 配置错误: %v", clientErr),
-				OrderID: certCfg.OrderID,
-			})
-			continue
+		certResults, attempted := processOneCert(cfg, d, i, conflicts)
+		results = append(results, certResults...)
+
+		// 逐证书持久化：状态变更（重试计数/CSR 哈希/订单号等）立即落盘，
+		// 中途中断不丢失，避免重试上限被绕过、CSR 去重失效
+		if err := cfg.Save(); err != nil {
+			log.Printf("警告: 保存配置失败: %v", err)
 		}
 
-		isLocal := certCfg.IsLocalMode(cfg.Schedule.RenewMode)
-		log.Printf("检查证书: %s (订单: %d, 模式: %s)", certCfg.Domain, certCfg.OrderID, map[bool]string{true: "local", false: "pull"}[isLocal])
-
-		var certData *api.CertData
-		// 安全警告: privateKey 包含敏感的私钥数据，严禁在日志中打印
-		var privateKey string
-		var err error
-
-		if isLocal {
-			// 本机提交：到期前 <= RenewBeforeDays 天发起续签
-			var reason string
-			certData, privateKey, reason, err = handleLocalKeyMode(d, client, &cfg.Certificates[i], cfg.Schedule.RenewBeforeDays)
-			// API 调用完成后更新续签提前天数（无论成功或跳过）
-			updateRenewBeforeDays(cfg, client)
-			if err != nil {
-				log.Printf("本机提交处理失败: %v", err)
-				results = append(results, Result{
-					Domain:  certCfg.Domain,
-					Success: false,
-					Message: fmt.Sprintf("本机提交失败: %v", err),
-					OrderID: certCfg.OrderID,
-				})
-				continue
-			}
-			if certData == nil {
-				if reason != "" {
-					log.Printf("证书 %s 跳过: %s", certCfg.Domain, reason)
-				}
-				continue
-			}
-		} else {
-			// 自动签发：到期前 <= RenewBeforeDays 天开始拉取
-			ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
-			certData, err = client.GetCertByOrderID(ctx, certCfg.OrderID)
-			cancel()
-			if err != nil {
-				log.Printf("获取证书失败: %v", err)
-				results = append(results, Result{
-					Domain:  certCfg.Domain,
-					Success: false,
-					Message: fmt.Sprintf("获取证书失败: %v", err),
-					OrderID: certCfg.OrderID,
-				})
-				continue
-			}
-
-			// API 调用成功，更新服务端返回的续签提前天数
-			updateRenewBeforeDays(cfg, client)
-
-			// 检查证书状态
-			if certData.Status == "processing" {
-				log.Printf("证书 %s 处理中，等待下次检查", certData.Domain())
-				continue
-			}
-			if certData.Status != "active" {
-				log.Printf("证书状态非活跃: %s", certData.Status)
-				results = append(results, Result{
-					Domain:  certCfg.Domain,
-					Success: false,
-					Message: fmt.Sprintf("证书状态: %s", certData.Status),
-					OrderID: certData.OrderID,
-				})
-				continue
-			}
-
-			// 检查是否到了拉取时间
-			expiresAt, err := time.Parse("2006-01-02", certData.ExpiresAt)
-			if err != nil {
-				log.Printf("解析证书 %s (订单 %d) 过期时间失败（值: %q）: %v", certData.Domain(), certData.OrderID, certData.ExpiresAt, err)
-				continue
-			}
-
-			daysUntilExpiry := int(time.Until(expiresAt).Hours() / 24)
-			if daysUntilExpiry < 0 {
-				log.Printf("证书 %s 已过期 %d 天，跳过（需人工介入）", certData.Domain(), -daysUntilExpiry)
-				continue
-			}
-			if daysUntilExpiry > cfg.Schedule.RenewBeforeDays {
-				log.Printf("证书 %s 还有 %d 天过期，未到续签时间（<=%d天后拉取）", certData.Domain(), daysUntilExpiry, cfg.Schedule.RenewBeforeDays)
-				continue
-			}
-
-			log.Printf("证书 %s 将在 %d 天后过期，开始拉取部署...", certData.Domain(), daysUntilExpiry)
-			privateKey = certData.PrivateKey
+		if attempted {
+			processed++
 		}
-
-		// 安全校验：中间证书非空 + 证书链大小限制
-		if certData.CACert == "" {
-			log.Printf("证书 %s 中间证书为空，跳过部署", certData.Domain())
-			results = append(results, Result{
-				Domain:  certCfg.Domain,
-				Success: false,
-				Message: "中间证书为空，等待下次检查",
-				OrderID: certData.OrderID,
-			})
-			continue
-		}
-		chainSize := len(certData.Certificate) + len(certData.CACert)
-		if chainSize > cert.MaxCertChainSize {
-			log.Printf("证书 %s 证书链大小 %d 超过上限 %d", certData.Domain(), chainSize, cert.MaxCertChainSize)
-			continue
-		}
-		if certData.PrivateKey != "" && len(certData.PrivateKey) > cert.MaxPrivateKeySize {
-			log.Printf("证书 %s 私钥大小 %d 超过上限 %d", certData.Domain(), len(certData.PrivateKey), cert.MaxPrivateKeySize)
-			continue
-		}
-
-		log.Printf("证书 %s 开始部署...", certData.Domain())
-
-		// 根据模式选择部署方式
-		var deployResults []Result
-		if certCfg.AutoBindMode {
-			// 自动绑定模式：按已有绑定更换证书
-			deployResults = deployCertAutoMode(d, client, certData, privateKey, certCfg)
-		} else {
-			// 规则绑定模式：按配置的绑定规则部署
-			deployResults = deployCertWithRules(d, client, certData, privateKey, certCfg, conflicts, cfg.Certificates)
-		}
-		results = append(results, deployResults...)
-
-		// 更新配置中的订单 ID（续费后 API 返回新订单号）
-		if certCfg.OrderID != certData.OrderID {
-			log.Printf("订单号更新: %d -> %d", certCfg.OrderID, certData.OrderID)
-			cfg.Certificates[i].OrderID = certData.OrderID
-		}
-
-		// 部署成功后更新配置
-		if hasSuccessResult(deployResults) && certData.Certificate != "" {
-			updateCertDomains(&cfg.Certificates[i], certData.Certificate)
-			updateCertSerial(&cfg.Certificates[i], certData.Certificate)
-		}
-		processed++
 	}
 
 	// 更新检查时间
@@ -266,9 +133,191 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 	return results
 }
 
+// processOneCert 处理单个证书的续签检查与部署
+// 返回该证书的部署结果与是否实际执行了部署尝试（用于单次批量上限统计）
+func processOneCert(cfg *config.Config, d *Deployer, i int, conflicts map[string][]int) (certResults []Result, attempted bool) {
+	results := make([]Result, 0)
+	certCfg := cfg.Certificates[i]
+
+	// per-cert client
+	client, clientErr := NewClientForCert(&cfg.Certificates[i])
+	if clientErr != nil {
+		log.Printf("创建证书 %s 的 API 客户端失败: %v", certCfg.Domain, clientErr)
+		results = append(results, Result{
+			Domain:  certCfg.Domain,
+			Success: false,
+			Message: fmt.Sprintf("API 配置错误: %v", clientErr),
+			OrderID: certCfg.OrderID,
+		})
+		return results, false
+	}
+
+	isLocal := certCfg.IsLocalMode(cfg.Schedule.RenewMode)
+	log.Printf("检查证书: %s (订单: %d, 模式: %s)", certCfg.Domain, certCfg.OrderID, map[bool]string{true: "local", false: "pull"}[isLocal])
+
+	var certData *api.CertData
+	// 安全警告: privateKey 包含敏感的私钥数据，严禁在日志中打印
+	var privateKey string
+	var err error
+
+	if isLocal {
+		// 本机提交：到期前 <= RenewBeforeDays 天发起续签
+		var reason string
+		certData, privateKey, reason, err = handleLocalKeyMode(d, client, &cfg.Certificates[i], cfg.Schedule.RenewBeforeDays)
+		// API 调用完成后更新续签提前天数（无论成功或跳过）
+		updateRenewBeforeDays(cfg, client)
+		if err != nil {
+			log.Printf("本机提交处理失败: %v", err)
+			results = append(results, Result{
+				Domain:  certCfg.Domain,
+				Success: false,
+				Message: fmt.Sprintf("本机提交失败: %v", err),
+				OrderID: certCfg.OrderID,
+			})
+			return results, false
+		}
+		if certData == nil {
+			if reason != "" {
+				log.Printf("证书 %s 跳过: %s", certCfg.Domain, reason)
+			}
+			return results, false
+		}
+	} else {
+		// 自动签发：到期前 <= RenewBeforeDays 天开始拉取
+		ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
+		certData, err = client.GetCertByOrderID(ctx, certCfg.OrderID)
+		cancel()
+		if err != nil {
+			log.Printf("获取证书失败: %v", err)
+			results = append(results, Result{
+				Domain:  certCfg.Domain,
+				Success: false,
+				Message: fmt.Sprintf("获取证书失败: %v", err),
+				OrderID: certCfg.OrderID,
+			})
+			return results, false
+		}
+
+		// API 调用成功，更新服务端返回的续签提前天数
+		updateRenewBeforeDays(cfg, client)
+
+		// 检查证书状态
+		if certData.Status == "processing" {
+			log.Printf("证书 %s 处理中，等待下次检查", certData.Domain())
+			return results, false
+		}
+		if certData.Status != "active" {
+			log.Printf("证书状态非活跃: %s", certData.Status)
+			results = append(results, Result{
+				Domain:  certCfg.Domain,
+				Success: false,
+				Message: fmt.Sprintf("证书状态: %s", certData.Status),
+				OrderID: certData.OrderID,
+			})
+			return results, false
+		}
+
+		// 检查是否到了拉取时间
+		expiresAt, err := time.Parse("2006-01-02", certData.ExpiresAt)
+		if err != nil {
+			log.Printf("解析证书 %s (订单 %d) 过期时间失败（值: %q）: %v", certData.Domain(), certData.OrderID, certData.ExpiresAt, err)
+			return results, false
+		}
+
+		daysUntilExpiry := int(time.Until(expiresAt).Hours() / 24)
+		if daysUntilExpiry < 0 {
+			log.Printf("证书 %s 已过期 %d 天，跳过（需人工介入）", certData.Domain(), -daysUntilExpiry)
+			return results, false
+		}
+		if daysUntilExpiry > cfg.Schedule.RenewBeforeDays {
+			log.Printf("证书 %s 还有 %d 天过期，未到续签时间（<=%d天后拉取）", certData.Domain(), daysUntilExpiry, cfg.Schedule.RenewBeforeDays)
+			return results, false
+		}
+
+		log.Printf("证书 %s 将在 %d 天后过期，开始拉取部署...", certData.Domain(), daysUntilExpiry)
+		privateKey = certData.PrivateKey
+	}
+
+	// 安全校验：中间证书非空 + 证书链大小限制
+	if certData.CACert == "" {
+		log.Printf("证书 %s 中间证书为空，跳过部署", certData.Domain())
+		results = append(results, Result{
+			Domain:  certCfg.Domain,
+			Success: false,
+			Message: "中间证书为空，等待下次检查",
+			OrderID: certData.OrderID,
+		})
+		return results, false
+	}
+	chainSize := len(certData.Certificate) + len(certData.CACert)
+	if chainSize > cert.MaxCertChainSize {
+		log.Printf("证书 %s 证书链大小 %d 超过上限 %d", certData.Domain(), chainSize, cert.MaxCertChainSize)
+		return results, false
+	}
+	if certData.PrivateKey != "" && len(certData.PrivateKey) > cert.MaxPrivateKeySize {
+		log.Printf("证书 %s 私钥大小 %d 超过上限 %d", certData.Domain(), len(certData.PrivateKey), cert.MaxPrivateKeySize)
+		return results, false
+	}
+
+	log.Printf("证书 %s 开始部署...", certData.Domain())
+
+	// 根据模式选择部署方式
+	var deployResults []Result
+	if certCfg.AutoBindMode {
+		// 自动绑定模式：按已有绑定更换证书
+		deployResults = deployCertAutoMode(d, client, certData, privateKey, certCfg)
+	} else {
+		// 规则绑定模式：按配置的绑定规则部署
+		deployResults = deployCertWithRules(d, client, certData, privateKey, certCfg, conflicts, cfg.Certificates)
+	}
+	results = append(results, deployResults...)
+
+	// 更新配置中的订单 ID（续费后 API 返回新订单号）
+	if certCfg.OrderID != certData.OrderID {
+		log.Printf("订单号更新: %d -> %d", certCfg.OrderID, certData.OrderID)
+		cfg.Certificates[i].OrderID = certData.OrderID
+	}
+
+	// 部署成功后更新配置
+	if hasSuccessResult(deployResults) && certData.Certificate != "" {
+		updateCertDomains(&cfg.Certificates[i], certData.Certificate)
+		updateCertSerial(&cfg.Certificates[i], certData.Certificate)
+	}
+	return results, true
+}
+
+// verifyDeployKeyPair 部署前校验证书与私钥配对（spec 5.1 步骤 1）
+// 通过返回 (true, "")；不通过返回 false 与失败原因，
+// 防止服务端返回错配数据时安装绑定成功导致站点 TLS 握手全挂
+func verifyDeployKeyPair(certPEM, keyPEM string) (bool, string) {
+	matched, err := cert.VerifyKeyPair(certPEM, keyPEM)
+	if err != nil {
+		return false, fmt.Sprintf("证书私钥配对校验失败: %v", err)
+	}
+	if !matched {
+		return false, "证书与私钥不匹配"
+	}
+	return true, ""
+}
+
 // deployCertWithRules 使用绑定规则部署证书
 func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, privateKey string, certCfg config.CertConfig, conflicts map[string][]int, allCerts []config.CertConfig) []Result {
 	results := make([]Result, 0)
+
+	// 配对校验：转换/安装前确认证书与私钥匹配
+	if ok, reason := verifyDeployKeyPair(certData.Certificate, privateKey); !ok {
+		log.Printf("证书 %s %s", certData.Domain(), reason)
+		sendCallback(d, client, certData.OrderID, certCfg.Domain, false, reason)
+		for _, rule := range certCfg.BindRules {
+			results = append(results, Result{
+				Domain:  rule.Domain,
+				Success: false,
+				Message: reason,
+				OrderID: certData.OrderID,
+			})
+		}
+		return results
+	}
 
 	// 转换 PEM 到 PFX
 	pfxPath, err := d.Converter.PEMToPFX(
@@ -780,6 +829,13 @@ func CheckAndDeploy() error {
 // 查找 IIS 中已有的 SSL 绑定，更换证书
 func deployCertAutoMode(d *Deployer, client APIClient, certData *api.CertData, privateKey string, certCfg config.CertConfig) []Result {
 	results := make([]Result, 0)
+
+	// 配对校验：转换/安装前确认证书与私钥匹配
+	if ok, reason := verifyDeployKeyPair(certData.Certificate, privateKey); !ok {
+		log.Printf("证书 %s %s", certData.Domain(), reason)
+		sendCallback(d, client, certData.OrderID, certCfg.Domain, false, reason)
+		return []Result{{Domain: certCfg.Domain, Success: false, Message: reason, OrderID: certData.OrderID}}
+	}
 
 	// 1. 转换并安装证书
 	pfxPath, err := d.Converter.PEMToPFX(certData.Certificate, privateKey, certData.CACert, "")
