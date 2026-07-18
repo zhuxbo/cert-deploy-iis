@@ -256,9 +256,14 @@ result, err := client.GetCertByOrderID(ctx, orderID)
 
 这意味着 IIS7 兼容模式下，多级子域名的证书会绑定到其上一级通配符，而非根域名通配符。
 
-### DPAPI 加密绑定到当前用户/机器
+### DPAPI 机器作用域加密
 
-私钥使用 Windows DPAPI 加密存储。DPAPI 加密数据绑定到当前 Windows 用户和机器，迁移到其他用户或机器后无法解密。
+Token 与私钥使用 Windows DPAPI 加密存储，采用**机器作用域**（`CRYPTPROTECT_LOCAL_MACHINE`）。
+加密数据绑定到本机（迁移到其他机器无法解密），但同机上的任意账户（含 SYSTEM 计划任务与交互管理员）均可解密——
+这是自动续签能在 SYSTEM 计划任务下正常工作的前提。
+
+旧版本用用户作用域加密的密文（前缀 `v1:` / `v1:dpapi:`）仍兼容解密：能解密时会在配置加载或私钥读取时透明重加密为机器作用域；
+若由其他账户加密而无法解密，`GetToken()` 会显式报错提示重新 setup 重录 Token，不再静默失败。
 
 ## 扩展点
 

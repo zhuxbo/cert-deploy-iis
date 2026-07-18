@@ -70,9 +70,9 @@ func TestEncryptDecrypt_RoundTrip(t *testing.T) {
 				t.Fatalf("EncryptToken() error = %v", err)
 			}
 
-			// 验证加密后的格式
-			if !strings.HasPrefix(encrypted, EncryptionPrefix) {
-				t.Errorf("加密结果应以 %q 开头", EncryptionPrefix)
+			// 验证加密后的格式（当前输出机器作用域前缀）
+			if !strings.HasPrefix(encrypted, EncryptionPrefixMachine) {
+				t.Errorf("加密结果应以 %q 开头", EncryptionPrefixMachine)
 			}
 
 			// 验证可以解密回原文
@@ -122,4 +122,50 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func TestTokenNeedsMigration(t *testing.T) {
+	tests := []struct {
+		name      string
+		encrypted string
+		want      bool
+	}{
+		{"空串", "", false},
+		{"机器作用域", EncryptionPrefixMachine + "abc", false},
+		{"旧用户作用域", EncryptionPrefix + "abc", true},
+		{"未知前缀", "v9:abc", false},
+		{"无前缀", "abc", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := TokenNeedsMigration(tt.encrypted); got != tt.want {
+				t.Errorf("TokenNeedsMigration(%q) = %v, want %v", tt.encrypted, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDecryptToken_AcceptsBothScopePrefixes 验证解密同时兼容机器作用域与旧用户作用域前缀
+// 依赖 Windows DPAPI，仅在 Windows 上运行
+func TestDecryptToken_AcceptsBothScopePrefixes(t *testing.T) {
+	const plaintext = "scope-compat-token"
+
+	encrypted, err := EncryptToken(plaintext)
+	if err != nil {
+		t.Fatalf("EncryptToken() error = %v", err)
+	}
+	if !strings.HasPrefix(encrypted, EncryptionPrefixMachine) {
+		t.Fatalf("加密结果应以 %q 开头, got %q", EncryptionPrefixMachine, encrypted)
+	}
+
+	// 机器作用域前缀可解密
+	if got, err := DecryptToken(encrypted); err != nil || got != plaintext {
+		t.Fatalf("DecryptToken(机器前缀) = %q, err = %v; want %q", got, err, plaintext)
+	}
+
+	// 将标签换成旧用户作用域前缀，底层密文不变，仍应能解密
+	legacy := EncryptionPrefix + strings.TrimPrefix(encrypted, EncryptionPrefixMachine)
+	if got, err := DecryptToken(legacy); err != nil || got != plaintext {
+		t.Fatalf("DecryptToken(旧前缀) = %q, err = %v; want %q", got, err, plaintext)
+	}
 }

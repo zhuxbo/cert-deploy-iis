@@ -222,8 +222,9 @@ func runStatus() {
 		if c.API.URL != "" {
 			hasAPI = "已配置"
 		}
-		fmt.Printf("  %-30s 订单:%-8d 过期:%s 状态:%s 模式:%s API:%s\n",
-			c.Domain, c.OrderID, c.Metadata.CertExpiresAt, status, mode, hasAPI)
+		tokenHealth := certTokenHealth(&c.API)
+		fmt.Printf("  %-30s 订单:%-8d 过期:%s 状态:%s 模式:%s API:%s Token:%s\n",
+			c.Domain, c.OrderID, c.Metadata.CertExpiresAt, status, mode, hasAPI, tokenHealth)
 	}
 
 	// 计划任务状态
@@ -237,6 +238,18 @@ func runStatus() {
 	} else {
 		fmt.Printf("计划任务: %s (未创建)\n", taskName)
 	}
+}
+
+// certTokenHealth 返回证书 API Token 的健康描述
+// 用于 status 命令呈现 Token 是否可解密（解密失败通常是配置由其他账户加密）
+func certTokenHealth(apiCfg *config.CertAPIConfig) string {
+	if apiCfg.EncryptedToken == "" {
+		return "未配置"
+	}
+	if _, err := apiCfg.GetToken(); err != nil {
+		return "解密失败(请重新 setup 重录)"
+	}
+	return "正常"
 }
 
 // runUpgrade 升级

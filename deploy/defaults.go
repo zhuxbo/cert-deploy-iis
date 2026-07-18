@@ -88,7 +88,11 @@ func DefaultDeployer(cfg *config.Config, store *cert.OrderStore) *Deployer {
 // NewClientForCert 为单个证书创建 API 客户端
 func NewClientForCert(certCfg *config.CertConfig) (*api.Client, error) {
 	apiURL := certCfg.API.URL
-	token := certCfg.API.GetToken()
+	token, err := certCfg.API.GetToken()
+	if err != nil {
+		// 解密失败（如 SYSTEM 计划任务读取交互账户加密的密文）显式暴露，不再当作"未配置"
+		return nil, fmt.Errorf("证书 %s (订单 %d) %w", certCfg.Domain, certCfg.OrderID, err)
+	}
 
 	if apiURL == "" {
 		return nil, fmt.Errorf("证书 %s (订单 %d) 未配置 API 地址", certCfg.Domain, certCfg.OrderID)

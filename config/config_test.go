@@ -256,7 +256,10 @@ func TestConfig_UpdateCertificate(t *testing.T) {
 
 func TestCertAPIConfig_GetToken_Empty(t *testing.T) {
 	api := &CertAPIConfig{}
-	token := api.GetToken()
+	token, err := api.GetToken()
+	if err != nil {
+		t.Errorf("GetToken() 未配置时不应返回错误, got %v", err)
+	}
 	if token != "" {
 		t.Errorf("GetToken() = %q, want empty string", token)
 	}
@@ -275,7 +278,10 @@ func TestCertAPIConfig_SetToken(t *testing.T) {
 	}
 
 	// 验证可以正确解密
-	decrypted := api.GetToken()
+	decrypted, err := api.GetToken()
+	if err != nil {
+		t.Fatalf("GetToken() error = %v", err)
+	}
 	if decrypted != "test-token-12345" {
 		t.Errorf("GetToken() = %q, want %q", decrypted, "test-token-12345")
 	}
@@ -556,7 +562,10 @@ func TestConfig_Save_And_Load(t *testing.T) {
 			if cert.API.URL != "https://test.example.com/api" {
 				t.Errorf("cert.API.URL = %q", cert.API.URL)
 			}
-			token := cert.API.GetToken()
+			token, tokenErr := cert.API.GetToken()
+			if tokenErr != nil {
+				t.Errorf("cert.API.GetToken() error = %v", tokenErr)
+			}
 			if token != "test-token-12345" {
 				t.Errorf("cert.API.GetToken() = %q, want %q", token, "test-token-12345")
 			}
@@ -689,7 +698,7 @@ func TestCertAPIConfig_SetToken_Multiple(t *testing.T) {
 		t.Fatalf("SetToken(token1) error = %v", err)
 	}
 
-	token1 := api.GetToken()
+	token1, _ := api.GetToken()
 	if token1 != "token1" {
 		t.Errorf("GetToken() = %q, want %q", token1, "token1")
 	}
@@ -700,7 +709,7 @@ func TestCertAPIConfig_SetToken_Multiple(t *testing.T) {
 		t.Fatalf("SetToken(token2) error = %v", err)
 	}
 
-	token2 := api.GetToken()
+	token2, _ := api.GetToken()
 	if token2 != "token2" {
 		t.Errorf("GetToken() = %q, want %q", token2, "token2")
 	}

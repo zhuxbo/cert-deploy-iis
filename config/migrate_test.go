@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -270,6 +271,73 @@ func TestMigrateConfig_Idempotent(t *testing.T) {
 	}
 	if changed2 {
 		t.Error("第二次迁移不应产生变化（幂等性）")
+	}
+}
+
+// === Token 作用域迁移测试 ===
+
+// tokenScopeRaw 构造带单个证书 encrypted_token 的 raw 配置
+func tokenScopeRaw(encToken string) map[string]interface{} {
+	return map[string]interface{}{
+		"certificates": []interface{}{
+			map[string]interface{}{
+				"order_id": float64(1),
+				"api":      map[string]interface{}{"encrypted_token": encToken},
+			},
+		},
+	}
+}
+
+func tokenScopeValue(raw map[string]interface{}) string {
+	api := raw["certificates"].([]interface{})[0].(map[string]interface{})["api"].(map[string]interface{})
+	s, _ := api["encrypted_token"].(string)
+	return s
+}
+
+// TestMigrateTokenScope_MachineScopeUnchanged 机器作用域 Token 不触发迁移
+func TestMigrateTokenScope_MachineScopeUnchanged(t *testing.T) {
+	raw := tokenScopeRaw(EncryptionPrefixMachine + "abc")
+	if migrateTokenScope(raw) {
+		t.Error("机器作用域 Token 不应触发迁移")
+	}
+}
+
+// TestMigrateTokenScope_UndecryptableLegacyUnchanged 无法解密的旧作用域 Token 保留原值
+func TestMigrateTokenScope_UndecryptableLegacyUnchanged(t *testing.T) {
+	orig := EncryptionPrefix + "bm90LWEtcmVhbC1ibG9i" // base64("not-a-real-blob")，DPAPI 解密必失败
+	raw := tokenScopeRaw(orig)
+	if migrateTokenScope(raw) {
+		t.Error("无法解密的 Token 不应产生变化")
+	}
+	if got := tokenScopeValue(raw); got != orig {
+		t.Errorf("encrypted_token 被意外修改: %q", got)
+	}
+}
+
+// TestMigrateTokenScope_ReencryptsLegacy 旧作用域可解密 Token 迁移为机器作用域
+// 依赖 Windows DPAPI，仅在 Windows 上运行
+func TestMigrateTokenScope_ReencryptsLegacy(t *testing.T) {
+	const plaintext = "migrate-me-token"
+	enc, err := EncryptToken(plaintext)
+	if err != nil {
+		t.Fatalf("EncryptToken() error = %v", err)
+	}
+	// 将标签换成旧用户作用域前缀模拟历史数据（底层密文不变，可解密）
+	legacy := EncryptionPrefix + strings.TrimPrefix(enc, EncryptionPrefixMachine)
+	raw := tokenScopeRaw(legacy)
+
+	if !migrateTokenScope(raw) {
+		t.Fatal("旧作用域可解密 Token 应触发迁移")
+	}
+	got := tokenScopeValue(raw)
+	if !strings.HasPrefix(got, EncryptionPrefixMachine) {
+		t.Errorf("迁移后应为机器作用域前缀, got %q", got)
+	}
+	if TokenNeedsMigration(got) {
+		t.Error("迁移后不应再需要迁移（幂等）")
+	}
+	if dec, err := DecryptToken(got); err != nil || dec != plaintext {
+		t.Errorf("迁移后解密 = %q, err = %v; want %q", dec, err, plaintext)
 	}
 }
 

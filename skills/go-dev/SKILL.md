@@ -106,16 +106,25 @@ password = strings.ReplaceAll(password, "$", "`$")  // 不需要
 
 ### Token 加密存储
 
-配置中 Token 可能是加密的，必须用 `GetToken()` 获取解密值：
+配置中 Token 用 DPAPI **机器作用域**（`CRYPTPROTECT_LOCAL_MACHINE`）加密，
+使 SYSTEM 计划任务与交互账户都能解密。必须用 `GetToken()` 获取解密值，
+且要处理解密错误（不再静默返回空串）：
 
 ```go
-// 正确
-token := cfg.GetToken()
-client := api.NewClient(cfg.APIBaseURL, token)
+// 正确：区分“未配置”与“解密失败”
+token, err := certCfg.API.GetToken()
+if err != nil {
+    // 解密失败：通常是配置由其他账户加密，提示重新 setup 重录 Token
+    return err
+}
+client := api.NewClient(certCfg.API.URL, token)
 
-// 错误：cfg.Token 可能是加密后的值
-client := api.NewClient(cfg.APIBaseURL, cfg.Token)
+// 错误：直接读 EncryptedToken（是密文），或忽略解密错误
+client := api.NewClient(certCfg.API.URL, certCfg.API.EncryptedToken)
 ```
+
+- 加密输出机器作用域前缀（Token `vm:`、私钥 `vm:dpapi:`）；旧用户作用域前缀（`v1:` / `v1:dpapi:`）仅兼容解密。
+- 透明迁移：配置加载（`migrateTokenScope`）与私钥读取（`LoadPrivateKey`）时，能解密的旧密文会自动重加密为机器作用域（幂等）；无法解密则保留原值并由 `GetToken()` 显式报错。
 
 ### 路径安全校验
 

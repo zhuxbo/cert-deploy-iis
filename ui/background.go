@@ -182,7 +182,14 @@ func CheckCertExpiry(cfg *config.Config) []CertExpiryInfo {
 			continue
 		}
 
-		token := certCfg.API.GetToken()
+		token, tokenErr := certCfg.API.GetToken()
+		if tokenErr != nil {
+			results = append(results, CertExpiryInfo{
+				Domain: certCfg.Domain,
+				Error:  tokenErr.Error(),
+			})
+			continue
+		}
 		if token == "" || certCfg.API.URL == "" {
 			results = append(results, CertExpiryInfo{
 				Domain: certCfg.Domain,

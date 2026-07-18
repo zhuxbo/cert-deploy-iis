@@ -13,8 +13,11 @@ import (
 	"sslctlw/config"
 )
 
-// KeyEncryptionPrefix 私钥加密版本前缀
+// KeyEncryptionPrefix 旧的用户作用域私钥前缀（仅用于兼容解密）
 const KeyEncryptionPrefix = "v1:dpapi:"
+
+// KeyEncryptionPrefixMachine 机器作用域私钥前缀（当前加密输出）
+const KeyEncryptionPrefixMachine = "vm:dpapi:"
 
 // 文件大小限制（spec 11）
 const (
@@ -22,7 +25,7 @@ const (
 	MaxCertChainSize  = 64 * 1024 // 64KB - 证书链（cert + intermediate）大小上限
 )
 
-// EncryptPrivateKey 使用 DPAPI 加密私钥
+// EncryptPrivateKey 使用 DPAPI（机器作用域）加密私钥
 func EncryptPrivateKey(keyPEM string) (string, error) {
 	if keyPEM == "" {
 		return "", nil
@@ -31,21 +34,35 @@ func EncryptPrivateKey(keyPEM string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// 替换前缀为私钥专用前缀
-	return KeyEncryptionPrefix + strings.TrimPrefix(encrypted, config.EncryptionPrefix), nil
+	// config.EncryptToken 当前输出机器作用域前缀，替换为私钥专用机器前缀
+	return KeyEncryptionPrefixMachine + strings.TrimPrefix(encrypted, config.EncryptionPrefixMachine), nil
 }
 
-// DecryptPrivateKey 使用 DPAPI 解密私钥
+// DecryptPrivateKey 使用 DPAPI 解密私钥，兼容机器作用域与旧用户作用域两种前缀
 func DecryptPrivateKey(encrypted string) (string, error) {
 	if encrypted == "" {
 		return "", nil
 	}
-	if !strings.HasPrefix(encrypted, KeyEncryptionPrefix) {
+	// 提取 base64 数据后交给底层 DecryptToken（解密作用域由密文自身决定）
+	switch {
+	case strings.HasPrefix(encrypted, KeyEncryptionPrefixMachine):
+		base64Data := strings.TrimPrefix(encrypted, KeyEncryptionPrefixMachine)
+		return config.DecryptToken(config.EncryptionPrefixMachine + base64Data)
+	case strings.HasPrefix(encrypted, KeyEncryptionPrefix):
+		base64Data := strings.TrimPrefix(encrypted, KeyEncryptionPrefix)
+		return config.DecryptToken(config.EncryptionPrefix + base64Data)
+	default:
 		return "", errors.New("无效的私钥格式")
 	}
-	// 提取 base64 数据，直接用底层 DecryptToken 解密
-	base64Data := strings.TrimPrefix(encrypted, KeyEncryptionPrefix)
-	return config.DecryptToken(config.EncryptionPrefix + base64Data)
+}
+
+// KeyNeedsMigration 判断私钥密文是否为旧用户作用域格式（需迁移到机器作用域）
+// 纯字符串判定，不触发 DPAPI，便于测试
+func KeyNeedsMigration(encrypted string) bool {
+	if strings.HasPrefix(encrypted, KeyEncryptionPrefixMachine) {
+		return false
+	}
+	return strings.HasPrefix(encrypted, KeyEncryptionPrefix)
 }
 
 // OrderMeta 订单元数据
@@ -108,13 +125,21 @@ func (s *OrderStore) LoadPrivateKey(orderID int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	keyPEM, err := DecryptPrivateKey(string(data))
+	stored := string(data)
+	keyPEM, err := DecryptPrivateKey(stored)
 	if err != nil {
 		return "", err
 	}
 	// 验证解密后的数据是有效 PEM 格式
 	if block, _ := pem.Decode([]byte(keyPEM)); block == nil {
 		return "", errors.New("私钥文件可能已损坏")
+	}
+	// 透明迁移：旧用户作用域密文成功解密后，重新以机器作用域加密落盘
+	// 迁移失败不影响本次读取，下次加载再尝试
+	if KeyNeedsMigration(stored) {
+		if reEncrypted, encErr := EncryptPrivateKey(keyPEM); encErr == nil {
+			_ = os.WriteFile(keyPath, []byte(reEncrypted), 0600)
+		}
 	}
 	return keyPEM, nil
 }

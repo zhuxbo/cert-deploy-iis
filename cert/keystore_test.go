@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -465,6 +466,133 @@ func TestOrderStore_MultipleOrders(t *testing.T) {
 func TestKeyEncryptionPrefix(t *testing.T) {
 	if KeyEncryptionPrefix != "v1:dpapi:" {
 		t.Errorf("KeyEncryptionPrefix = %q, want %q", KeyEncryptionPrefix, "v1:dpapi:")
+	}
+	if KeyEncryptionPrefixMachine != "vm:dpapi:" {
+		t.Errorf("KeyEncryptionPrefixMachine = %q, want %q", KeyEncryptionPrefixMachine, "vm:dpapi:")
+	}
+}
+
+// genTestKeyPEM 生成测试用 EC 私钥 PEM（避免硬编码私钥触发 secret scanning）
+func genTestKeyPEM(t *testing.T) string {
+	t.Helper()
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("生成测试密钥失败: %v", err)
+	}
+	derBytes, err := x509.MarshalECPrivateKey(ecKey)
+	if err != nil {
+		t.Fatalf("编码测试密钥失败: %v", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: derBytes}))
+}
+
+// TestKeyNeedsMigration 纯逻辑：识别需迁移的旧用户作用域私钥前缀
+func TestKeyNeedsMigration(t *testing.T) {
+	tests := []struct {
+		name      string
+		encrypted string
+		want      bool
+	}{
+		{"空串", "", false},
+		{"机器作用域", KeyEncryptionPrefixMachine + "abc", false},
+		{"旧用户作用域", KeyEncryptionPrefix + "abc", true},
+		{"token 前缀非私钥", "v1:abc", false},
+		{"无前缀", "abc", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := KeyNeedsMigration(tt.encrypted); got != tt.want {
+				t.Errorf("KeyNeedsMigration(%q) = %v, want %v", tt.encrypted, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEncryptPrivateKey_MachinePrefix 验证加密输出机器作用域前缀且可解密（依赖 DPAPI，Windows 运行）
+func TestEncryptPrivateKey_MachinePrefix(t *testing.T) {
+	keyPEM := genTestKeyPEM(t)
+
+	encrypted, err := EncryptPrivateKey(keyPEM)
+	if err != nil {
+		t.Fatalf("EncryptPrivateKey() error = %v", err)
+	}
+	if !strings.HasPrefix(encrypted, KeyEncryptionPrefixMachine) {
+		t.Fatalf("加密结果应以机器作用域前缀 %q 开头", KeyEncryptionPrefixMachine)
+	}
+	if KeyNeedsMigration(encrypted) {
+		t.Errorf("机器作用域私钥不应被判定为需迁移")
+	}
+
+	decrypted, err := DecryptPrivateKey(encrypted)
+	if err != nil {
+		t.Fatalf("DecryptPrivateKey() error = %v", err)
+	}
+	if decrypted != keyPEM {
+		t.Errorf("解密后私钥与原文不匹配")
+	}
+}
+
+// TestDecryptPrivateKey_LegacyPrefixCompat 验证旧用户作用域私钥前缀仍可解密（依赖 DPAPI，Windows 运行）
+func TestDecryptPrivateKey_LegacyPrefixCompat(t *testing.T) {
+	keyPEM := genTestKeyPEM(t)
+
+	encrypted, err := EncryptPrivateKey(keyPEM)
+	if err != nil {
+		t.Fatalf("EncryptPrivateKey() error = %v", err)
+	}
+	// 换成旧前缀模拟历史数据（底层密文不变）
+	legacy := KeyEncryptionPrefix + strings.TrimPrefix(encrypted, KeyEncryptionPrefixMachine)
+	if !KeyNeedsMigration(legacy) {
+		t.Fatalf("旧前缀应被判定为需迁移")
+	}
+	decrypted, err := DecryptPrivateKey(legacy)
+	if err != nil {
+		t.Fatalf("DecryptPrivateKey(旧前缀) error = %v", err)
+	}
+	if decrypted != keyPEM {
+		t.Errorf("解密后私钥与原文不匹配")
+	}
+}
+
+// TestLoadPrivateKey_MigratesLegacyScope 验证加载旧作用域私钥时透明迁移为机器作用域（依赖 DPAPI，Windows 运行）
+func TestLoadPrivateKey_MigratesLegacyScope(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := &OrderStore{BaseDir: tmpDir}
+	keyPEM := genTestKeyPEM(t)
+
+	// 构造旧用户作用域格式的私钥文件
+	encrypted, err := EncryptPrivateKey(keyPEM)
+	if err != nil {
+		t.Fatalf("EncryptPrivateKey() error = %v", err)
+	}
+	legacy := KeyEncryptionPrefix + strings.TrimPrefix(encrypted, KeyEncryptionPrefixMachine)
+	if err := store.EnsureOrderDir(123); err != nil {
+		t.Fatalf("EnsureOrderDir() error = %v", err)
+	}
+	keyPath := filepath.Join(store.GetOrderPath(123), "private.key")
+	if err := os.WriteFile(keyPath, []byte(legacy), 0600); err != nil {
+		t.Fatalf("写入旧私钥失败: %v", err)
+	}
+
+	// 加载应成功且内容正确
+	loaded, err := store.LoadPrivateKey(123)
+	if err != nil {
+		t.Fatalf("LoadPrivateKey() error = %v", err)
+	}
+	if loaded != keyPEM {
+		t.Errorf("加载的私钥与原文不匹配")
+	}
+
+	// 加载后文件应已迁移为机器作用域前缀
+	data, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("读取迁移后私钥失败: %v", err)
+	}
+	if !strings.HasPrefix(string(data), KeyEncryptionPrefixMachine) {
+		t.Errorf("加载后私钥应迁移为机器作用域前缀 %q", KeyEncryptionPrefixMachine)
+	}
+	if KeyNeedsMigration(string(data)) {
+		t.Errorf("迁移后不应再被判定为需迁移")
 	}
 }
 

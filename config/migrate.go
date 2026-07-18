@@ -43,6 +43,7 @@ var customMigrations = []func(map[string]interface{}) bool{
 	migrateCertName,
 	migrateUpgradeChannel,
 	migrateAPIToken,
+	migrateTokenScope,
 }
 
 // migrateUseLocalKey 将 use_local_key bool 转换为 renew_mode string
@@ -145,6 +146,42 @@ func migrateAPIToken(raw map[string]interface{}) bool {
 			apiObj["encrypted_token"] = encrypted
 		}
 		delete(apiObj, "token")
+		changed = true
+	}
+	return changed
+}
+
+// migrateTokenScope 将旧用户作用域的 encrypted_token 透明迁移为机器作用域
+// 仅当能成功解密（当前为加密时的交互账户）才重新加密落盘，实现幂等迁移；
+// 无法解密（例如密文由其他账户加密）时保留原值，由 GetToken 显式报错提示重录
+func migrateTokenScope(raw map[string]interface{}) bool {
+	certs := getSlice(raw, "certificates")
+	if len(certs) == 0 {
+		return false
+	}
+	changed := false
+	for _, elem := range certs {
+		node, ok := elem.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		apiObj, ok := getMap(node, "api")
+		if !ok {
+			continue
+		}
+		enc, ok := apiObj["encrypted_token"].(string)
+		if !ok || !TokenNeedsMigration(enc) {
+			continue
+		}
+		plain, err := DecryptToken(enc)
+		if err != nil {
+			continue // 无法解密，保留原值
+		}
+		reEncrypted, err := EncryptToken(plain)
+		if err != nil {
+			continue
+		}
+		apiObj["encrypted_token"] = reEncrypted
 		changed = true
 	}
 	return changed

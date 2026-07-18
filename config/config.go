@@ -43,13 +43,17 @@ type CertAPIConfig struct {
 }
 
 // GetToken 获取解密后的 Token
-func (c *CertAPIConfig) GetToken() string {
-	if c.EncryptedToken != "" {
-		if decrypted, err := DecryptToken(c.EncryptedToken); err == nil {
-			return decrypted
-		}
+// 未配置 Token 时返回 ("", nil)；配置存在但解密失败时返回明确错误，
+// 不再静默返回空串（解密失败通常是配置由其他账户加密，如 SYSTEM 计划任务读取交互账户密文）
+func (c *CertAPIConfig) GetToken() (string, error) {
+	if c.EncryptedToken == "" {
+		return "", nil
 	}
-	return ""
+	decrypted, err := DecryptToken(c.EncryptedToken)
+	if err != nil {
+		return "", fmt.Errorf("Token 解密失败：配置可能由其他账户加密，请重新运行 setup 重录 Token: %w", err)
+	}
+	return decrypted, nil
 }
 
 // SetToken 加密并设置 Token
