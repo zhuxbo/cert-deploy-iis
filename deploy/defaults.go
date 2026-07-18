@@ -59,6 +59,30 @@ func (d *defaultOrderStore) SavePrivateKey(orderID int, keyPEM string) error {
 	return d.store.SavePrivateKey(orderID, keyPEM)
 }
 
+func (d *defaultOrderStore) HasPendingPrivateKey(certName string) bool {
+	return d.store.HasPendingPrivateKey(certName)
+}
+
+func (d *defaultOrderStore) LoadPendingPrivateKey(certName string) (string, error) {
+	return d.store.LoadPendingPrivateKey(certName)
+}
+
+func (d *defaultOrderStore) SavePendingPrivateKey(certName, keyPEM string) error {
+	return d.store.SavePendingPrivateKey(certName, keyPEM)
+}
+
+func (d *defaultOrderStore) SavePendingCSR(certName, csrPEM string) error {
+	return d.store.SavePendingCSR(certName, csrPEM)
+}
+
+func (d *defaultOrderStore) LoadPendingCSR(certName string) (string, error) {
+	return d.store.LoadPendingCSR(certName)
+}
+
+func (d *defaultOrderStore) PromotePendingPrivateKey(certName string, orderID int, deployedKey string) error {
+	return d.store.PromotePendingPrivateKey(certName, orderID, deployedKey)
+}
+
 func (d *defaultOrderStore) SaveCertificate(orderID int, certPEM, chainPEM string) error {
 	return d.store.SaveCertificate(orderID, certPEM, chainPEM)
 }

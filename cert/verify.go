@@ -32,21 +32,43 @@ func VerifyKeyPair(certPEM, keyPEM string) (bool, error) {
 		return false, fmt.Errorf("解析私钥失败: %w", err)
 	}
 
-	// 比较公钥
-	certPubKey := cert.PublicKey
+	return privateKeyMatchesPublicKey(privateKey, cert.PublicKey)
+}
+
+// VerifyCSRKeyPair 验证 CSR 自签名，并确认其公钥与私钥匹配。
+func VerifyCSRKeyPair(csrPEM, keyPEM string) (bool, error) {
+	csrBlock, _ := pem.Decode([]byte(csrPEM))
+	if csrBlock == nil || csrBlock.Type != "CERTIFICATE REQUEST" {
+		return false, fmt.Errorf("无法解析 CSR PEM")
+	}
+	csr, err := x509.ParseCertificateRequest(csrBlock.Bytes)
+	if err != nil {
+		return false, fmt.Errorf("解析 CSR 失败: %w", err)
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return false, fmt.Errorf("CSR 签名验证失败: %w", err)
+	}
+	privateKey, err := parsePrivateKeyFromPEM(keyPEM, "")
+	if err != nil {
+		return false, fmt.Errorf("解析私钥失败: %w", err)
+	}
+	return privateKeyMatchesPublicKey(privateKey, csr.PublicKey)
+}
+
+func privateKeyMatchesPublicKey(privateKey, publicKey any) (bool, error) {
 	switch priv := privateKey.(type) {
 	case *rsa.PrivateKey:
-		if rsaPub, ok := certPubKey.(*rsa.PublicKey); ok {
+		if rsaPub, ok := publicKey.(*rsa.PublicKey); ok {
 			return priv.PublicKey.N.Cmp(rsaPub.N) == 0 && priv.PublicKey.E == rsaPub.E, nil
 		}
 		return false, nil
 	case *ecdsa.PrivateKey:
-		if ecdsaPub, ok := certPubKey.(*ecdsa.PublicKey); ok {
+		if ecdsaPub, ok := publicKey.(*ecdsa.PublicKey); ok {
 			return priv.PublicKey.X.Cmp(ecdsaPub.X) == 0 && priv.PublicKey.Y.Cmp(ecdsaPub.Y) == 0, nil
 		}
 		return false, nil
 	case ed25519.PrivateKey:
-		if edPub, ok := certPubKey.(ed25519.PublicKey); ok {
+		if edPub, ok := publicKey.(ed25519.PublicKey); ok {
 			pub := priv.Public().(ed25519.PublicKey)
 			return bytes.Equal(pub, edPub), nil
 		}

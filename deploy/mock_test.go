@@ -63,13 +63,19 @@ func (m *MockAPIClient) Callback(ctx context.Context, req *api.CallbackRequest) 
 
 // MockOrderStore 模拟订单存储
 type MockOrderStore struct {
-	HasPrivateKeyFunc   func(orderID int) bool
-	LoadPrivateKeyFunc  func(orderID int) (string, error)
-	SavePrivateKeyFunc  func(orderID int, keyPEM string) error
-	SaveCertificateFunc func(orderID int, certPEM, chainPEM string) error
-	LoadCertificateFunc func(orderID int) (certPEM, chainPEM string, err error)
-	ListOrdersFunc      func() ([]int, error)
-	DeleteOrderFunc     func(orderID int) error
+	HasPrivateKeyFunc            func(orderID int) bool
+	LoadPrivateKeyFunc           func(orderID int) (string, error)
+	SavePrivateKeyFunc           func(orderID int, keyPEM string) error
+	HasPendingPrivateKeyFunc     func(certName string) bool
+	LoadPendingPrivateKeyFunc    func(certName string) (string, error)
+	SavePendingPrivateKeyFunc    func(certName, keyPEM string) error
+	SavePendingCSRFunc           func(certName, csrPEM string) error
+	LoadPendingCSRFunc           func(certName string) (string, error)
+	PromotePendingPrivateKeyFunc func(certName string, orderID int, deployedKey string) error
+	SaveCertificateFunc          func(orderID int, certPEM, chainPEM string) error
+	LoadCertificateFunc          func(orderID int) (certPEM, chainPEM string, err error)
+	ListOrdersFunc               func() ([]int, error)
+	DeleteOrderFunc              func(orderID int) error
 }
 
 func (m *MockOrderStore) HasPrivateKey(orderID int) bool {
@@ -89,6 +95,48 @@ func (m *MockOrderStore) LoadPrivateKey(orderID int) (string, error) {
 func (m *MockOrderStore) SavePrivateKey(orderID int, keyPEM string) error {
 	if m.SavePrivateKeyFunc != nil {
 		return m.SavePrivateKeyFunc(orderID, keyPEM)
+	}
+	return nil
+}
+
+func (m *MockOrderStore) HasPendingPrivateKey(certName string) bool {
+	if m.HasPendingPrivateKeyFunc != nil {
+		return m.HasPendingPrivateKeyFunc(certName)
+	}
+	return false
+}
+
+func (m *MockOrderStore) LoadPendingPrivateKey(certName string) (string, error) {
+	if m.LoadPendingPrivateKeyFunc != nil {
+		return m.LoadPendingPrivateKeyFunc(certName)
+	}
+	return "", nil
+}
+
+func (m *MockOrderStore) SavePendingPrivateKey(certName, keyPEM string) error {
+	if m.SavePendingPrivateKeyFunc != nil {
+		return m.SavePendingPrivateKeyFunc(certName, keyPEM)
+	}
+	return nil
+}
+
+func (m *MockOrderStore) SavePendingCSR(certName, csrPEM string) error {
+	if m.SavePendingCSRFunc != nil {
+		return m.SavePendingCSRFunc(certName, csrPEM)
+	}
+	return nil
+}
+
+func (m *MockOrderStore) LoadPendingCSR(certName string) (string, error) {
+	if m.LoadPendingCSRFunc != nil {
+		return m.LoadPendingCSRFunc(certName)
+	}
+	return "", nil
+}
+
+func (m *MockOrderStore) PromotePendingPrivateKey(certName string, orderID int, deployedKey string) error {
+	if m.PromotePendingPrivateKeyFunc != nil {
+		return m.PromotePendingPrivateKeyFunc(certName, orderID, deployedKey)
 	}
 	return nil
 }
@@ -208,8 +256,8 @@ func (m *MockCertInstaller) SetFriendlyName(thumbprint, friendlyName string) err
 
 // MockIISBinder 模拟 IIS 绑定器
 type MockIISBinder struct {
-	BindCertificateFunc       func(hostname string, port int, certHash string) error
-	BindCertificateByIPFunc   func(ip string, port int, certHash string) error
+	BindCertificateFunc        func(hostname string, port int, certHash string) error
+	BindCertificateByIPFunc    func(ip string, port int, certHash string) error
 	FindBindingsForDomainsFunc func(domains []string) (map[string]*iis.SSLBinding, error)
 }
 
@@ -233,8 +281,6 @@ func (m *MockIISBinder) FindBindingsForDomains(domains []string) (map[string]*ii
 	}
 	return make(map[string]*iis.SSLBinding), nil
 }
-
-
 
 // NewMockDeployer 创建用于测试的 Mock 部署器
 func NewMockDeployer() *Deployer {

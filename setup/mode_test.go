@@ -72,7 +72,8 @@ func TestIsOrderLocalMode(t *testing.T) {
 	}
 }
 
-// TestEvalBindOutcome 绑定结果判定：至少一个成功为部署生效，无匹配/全败/查错为失败
+// TestEvalBindOutcome 绑定结果判定：必须全部成功才算部署生效，
+// 无匹配、部分失败、全败或查找出错均为失败
 func TestEvalBindOutcome(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -85,7 +86,7 @@ func TestEvalBindOutcome(t *testing.T) {
 		{"未找到可绑定站点", bindResult{}, nil, false, "未找到可绑定"},
 		{"全部绑定失败", bindResult{Failed: 3}, nil, false, "全部 3 个绑定失败"},
 		{"全部成功", bindResult{Succeeded: 2}, nil, true, ""},
-		{"部分成功视为生效", bindResult{Succeeded: 1, Failed: 2}, nil, true, "部分绑定失败"},
+		{"部分绑定失败视为整体失败", bindResult{Succeeded: 1, Failed: 2}, nil, false, "部分绑定失败"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -133,7 +134,7 @@ func TestDecideReissueNotify(t *testing.T) {
 
 // TestDecideExistingCert 已存在证书路径与新装路径共用 evalBindOutcome：
 // 零成功（查找出错/全部失败/零匹配）判失败（发 failure 回调、计 Failed、不写配置），
-// 至少一个成功判部署生效（计 Skipped、补通知、写配置）
+// 仅全部成功判部署生效（计 Skipped、补通知、写配置）
 func TestDecideExistingCert(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -146,7 +147,7 @@ func TestDecideExistingCert(t *testing.T) {
 		{"全部失败→失败", bindResult{Failed: 2}, nil, false},
 		{"无法取指纹（bindErr）→失败", bindResult{}, errors.New("无法获取已存在证书的指纹"), false},
 		{"全部成功→部署生效", bindResult{Succeeded: 2}, nil, true},
-		{"部分成功→部署生效", bindResult{Succeeded: 1, Failed: 1}, nil, true},
+		{"部分绑定失败→整体失败", bindResult{Succeeded: 1, Failed: 1}, nil, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

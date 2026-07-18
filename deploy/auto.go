@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -25,6 +26,8 @@ const (
 	spreadMax      = 120 // 最大延迟（秒）
 	spreadTotalMax = 600 // 总延迟上限（秒）
 )
+
+var errPendingKeyMismatch = errors.New("pending 私钥与目标证书不匹配")
 
 // Local 模式健壮性常量
 const (
@@ -123,6 +126,11 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 			processed++
 		}
 	}
+
+	// 回调响应同样携带 renew_before_days。等待非关键回调结束后统一应用，
+	// 避免 goroutine 与证书循环并发修改配置，也覆盖 GUI 未显式 WaitCallbacks 的入口。
+	d.WaitCallbacks()
+	d.ApplyCallbackRenewBeforeDays(cfg)
 
 	// 更新检查时间
 	cfg.LastCheck = time.Now().Format("2006-01-02 15:04:05")
@@ -281,8 +289,12 @@ func processOneCert(cfg *config.Config, d *Deployer, i int, conflicts map[string
 		cfg.Certificates[i].OrderID = certData.OrderID
 	}
 
-	// 部署成功后更新配置
+	// 部署成功后更新本地证书、转正 pending 私钥并收敛签发状态。
 	if hasSuccessResult(deployResults) && certData.Certificate != "" {
+		if err := d.Store.SaveCertificate(certData.OrderID, certData.Certificate, certData.CACert); err != nil {
+			log.Printf("警告: 保存已部署证书失败: %v", err)
+		}
+		finalizeSuccessfulDeployment(d, &cfg.Certificates[i], certData, privateKey, isLocal)
 		updateCertDomains(&cfg.Certificates[i], certData.Certificate)
 		updateCertSerial(&cfg.Certificates[i], certData.Certificate)
 	}
@@ -515,13 +527,18 @@ func checkRenewalNeeded(certData *api.CertData, renewDays int) (bool, string) {
 	return true, ""
 }
 
-// tryUseLocalKey 尝试使用本地私钥
+// tryUseLocalKey 尝试使用与目标证书配对的正式本地私钥。
+// 配对失败只视为该来源不可用，不删除正式订单目录或任何私钥。
 // 返回: 证书数据, 私钥, 是否成功
 func tryUseLocalKey(d *Deployer, certData *api.CertData, certCfg *config.CertConfig) (*api.CertData, string, bool) {
-	if !d.Store.HasPrivateKey(certCfg.OrderID) {
+	orderID := certData.OrderID
+	if orderID == 0 {
+		orderID = certCfg.OrderID
+	}
+	if !d.Store.HasPrivateKey(orderID) {
 		return nil, "", false
 	}
-	localKey, err := d.Store.LoadPrivateKey(certCfg.OrderID)
+	localKey, err := d.Store.LoadPrivateKey(orderID)
 	if err != nil {
 		log.Printf("加载本地私钥失败: %v", err)
 		return nil, "", false
@@ -532,20 +549,53 @@ func tryUseLocalKey(d *Deployer, certData *api.CertData, certCfg *config.CertCon
 		return nil, "", false
 	}
 	if !matched {
-		log.Printf("本地私钥与证书不匹配，需要重新生成 CSR")
-		d.Store.DeleteOrder(certCfg.OrderID)
+		log.Printf("正式本地私钥与目标证书不匹配，保留原私钥并尝试 pending 私钥")
 		return nil, "", false
 	}
-	log.Printf("使用本地私钥（订单 %d）", certCfg.OrderID)
-	if err := d.Store.SaveCertificate(certCfg.OrderID, certData.Certificate, certData.CACert); err != nil {
-		log.Printf("警告: 保存证书失败: %v", err)
-	}
-	updateCertMetadata(certCfg, certData)
+	log.Printf("使用本地私钥（订单 %d）", orderID)
 	return certData, localKey, true
+}
+
+// selectIssuedPrivateKey 为 local 在途签发结果选择配对私钥。
+// pending 是本次 CSR 的唯一权威私钥，存在时必须优先校验；只有 pending 已在崩溃窗口中转正/清理时，
+// 才回退 API 或正式本地私钥完成恢复。
+func selectIssuedPrivateKey(d *Deployer, certData *api.CertData, certCfg *config.CertConfig) (string, error) {
+	if d.Store.HasPendingPrivateKey(certCfg.CertName) {
+		pendingKey, err := d.Store.LoadPendingPrivateKey(certCfg.CertName)
+		if err != nil {
+			return "", fmt.Errorf("加载 pending 私钥失败: %w", err)
+		}
+		matched, err := cert.VerifyKeyPair(certData.Certificate, pendingKey)
+		if err != nil {
+			return "", fmt.Errorf("验证 pending 私钥配对失败: %w", err)
+		}
+		if matched {
+			log.Printf("使用 pending 私钥（证书 %s，部署成功后转正）", certCfg.CertName)
+			return pendingKey, nil
+		}
+		return "", fmt.Errorf("%w，已保留并等待重放同一 CSR", errPendingKeyMismatch)
+	}
+	if certData.PrivateKey != "" {
+		matched, err := cert.VerifyKeyPair(certData.Certificate, certData.PrivateKey)
+		if err == nil && matched {
+			return certData.PrivateKey, nil
+		}
+		log.Printf("API 私钥与目标证书不匹配，尝试本地私钥来源")
+	}
+	if _, key, ok := tryUseLocalKey(d, certData, certCfg); ok {
+		return key, nil
+	}
+	return "", errors.New("没有与目标证书配对的可用私钥")
 }
 
 // submitNewCSR 生成并提交新的 CSR
 func submitNewCSR(d *Deployer, client APIClient, certCfg *config.CertConfig) (*api.CertData, string, string, error) {
+	if certCfg.CertName == "" {
+		certCfg.CertName = fmt.Sprintf("%s-%d", certCfg.Domain, certCfg.OrderID)
+	}
+	if d.Store.HasPendingPrivateKey(certCfg.CertName) {
+		return retryPendingCSR(d, client, certCfg)
+	}
 	// 检查重试计数（从 config metadata 读取）
 	retryCount := certCfg.Metadata.IssueRetryCount
 	if retryCount >= maxIssueRetries {
@@ -564,6 +614,48 @@ func submitNewCSR(d *Deployer, client APIClient, certCfg *config.CertConfig) (*a
 		log.Printf("CSR 与上次相同，跳过重复提交")
 		return nil, "", "CSR 未变化，等待签发", nil
 	}
+	if err := d.Store.SavePendingCSR(certCfg.CertName, csrPEM); err != nil {
+		return nil, "", "", fmt.Errorf("保存 pending CSR 失败: %w", err)
+	}
+	if err := d.Store.SavePendingPrivateKey(certCfg.CertName, keyPEM); err != nil {
+		return nil, "", "", fmt.Errorf("保存 pending 私钥失败: %w", err)
+	}
+	return submitPendingCSR(d, client, certCfg, csrPEM)
+}
+
+// retryPendingCSR 重放与现存 pending 私钥严格配对的原始 CSR。
+// 网络结果不确定时绝不生成新密钥，避免覆盖服务端可能已经受理的唯一私钥。
+func retryPendingCSR(d *Deployer, client APIClient, certCfg *config.CertConfig) (*api.CertData, string, string, error) {
+	csrPEM, err := d.Store.LoadPendingCSR(certCfg.CertName)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("加载 pending CSR 失败，无法安全重试: %w", err)
+	}
+	keyPEM, err := d.Store.LoadPendingPrivateKey(certCfg.CertName)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("加载 pending 私钥失败，无法安全重试: %w", err)
+	}
+	matched, err := cert.VerifyCSRKeyPair(csrPEM, keyPEM)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("验证 pending CSR 失败，无法安全重试: %w", err)
+	}
+	if !matched {
+		return nil, "", "", errors.New("pending CSR 与 pending 私钥不匹配，无法安全重试")
+	}
+	return submitPendingCSR(d, client, certCfg, csrPEM)
+}
+
+func submitPendingCSR(d *Deployer, client APIClient, certCfg *config.CertConfig, csrPEM string) (*api.CertData, string, string, error) {
+	retryCount := certCfg.Metadata.IssueRetryCount
+	if retryCount >= maxIssueRetries {
+		return nil, "", "", fmt.Errorf("CSR 重试次数已达上限 (%d)，需人工处理", maxIssueRetries)
+	}
+	csrHash := fmt.Sprintf("%x", sha256.Sum256([]byte(csrPEM)))
+
+	// 提交尝试在请求前落入内存状态；调用方无论成功失败都会逐证书持久化配置。
+	certCfg.Metadata.CSRSubmittedAt = time.Now().Format(timeFormat)
+	certCfg.Metadata.IssueRetryCount = retryCount + 1
+	certCfg.Metadata.LastCSRHash = csrHash
+	certCfg.Metadata.LastIssueState = "pending"
 
 	csrReq := &api.UpdateRequest{
 		OrderID:          certCfg.OrderID,
@@ -580,33 +672,18 @@ func submitNewCSR(d *Deployer, client APIClient, certCfg *config.CertConfig) (*a
 	}
 
 	newOrderID := csrResp.Data.OrderID
-	if err := d.Store.SavePrivateKey(newOrderID, keyPEM); err != nil {
-		return nil, "", "", fmt.Errorf("保存私钥失败: %w", err)
-	}
-
 	certCfg.OrderID = newOrderID
 	log.Printf("CSR 已提交，订单 ID: %d，状态: %s", newOrderID, csrResp.Data.Status)
 
 	// 更新 metadata：记录重试计数、提交时间和 CSR 哈希
-	certCfg.Metadata.CSRSubmittedAt = time.Now().Format(timeFormat)
-	certCfg.Metadata.IssueRetryCount = retryCount + 1
 	certCfg.Metadata.LastIssueState = csrResp.Data.Status
-	certCfg.Metadata.LastCSRHash = csrHash
 
-	if csrResp.Data.Status == "active" {
-		queryCtx, queryCancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
-		certData, err := client.GetCertByOrderID(queryCtx, newOrderID)
-		queryCancel()
-		if err == nil && certData.Status == "active" {
-			if err := d.Store.SaveCertificate(newOrderID, certData.Certificate, certData.CACert); err != nil {
-				log.Printf("警告: 保存证书失败: %v", err)
-			}
-			updateCertMetadata(certCfg, certData)
-			return certData, keyPEM, "", nil
-		}
+	if csrResp.Data.Status == "processing" {
+		reason, err := handleProcessingOrder(d, certCfg, &csrResp.Data.CertData)
+		return nil, "", reason, err
 	}
 
-	return nil, "", "CSR 已提交，等待签发", nil
+	return nil, "", fmt.Sprintf("CSR 已提交，等待后续查询（当前状态: %s）", csrResp.Data.Status), nil
 }
 
 // handleLocalKeyMode 处理本机提交模式
@@ -619,7 +696,8 @@ func handleLocalKeyMode(d *Deployer, client APIClient, certCfg *config.CertConfi
 		return nil, "", "", err
 	}
 
-	// 2. 检查现有订单
+	// 2. 检查现有订单。LastIssueState 非空表示已有 CSR 在途，此时 active 是新签发完成，
+	// 必须直接读取 pending 私钥部署，不能再按新证书的长期有效期判断是否需要续签。
 	if certCfg.OrderID > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
 		certData, err := client.GetCertByOrderID(ctx, certCfg.OrderID)
@@ -627,7 +705,12 @@ func handleLocalKeyMode(d *Deployer, client APIClient, certCfg *config.CertConfi
 		if err != nil {
 			// API 请求失败时返回错误，不要静默提交新 CSR（防止重复生成订单）
 			return nil, "", "", fmt.Errorf("获取订单 %d 证书失败: %w", certCfg.OrderID, err)
-		} else if certData.Status == "processing" {
+		}
+
+		waitingForIssue := certCfg.Metadata.LastIssueState != "" || d.Store.HasPendingPrivateKey(certCfg.CertName)
+		switch certData.Status {
+		case "processing":
+			certCfg.Metadata.LastIssueState = certData.Status
 			// 证书已过期则停止，等待人工处理
 			if certData.ExpiresAt != "" {
 				if expiresAt, err := time.Parse("2006-01-02", certData.ExpiresAt); err == nil {
@@ -641,9 +724,24 @@ func handleLocalKeyMode(d *Deployer, client APIClient, certCfg *config.CertConfi
 				return nil, "", "", handleErr
 			}
 			return nil, "", reason, nil
-		} else if certData.Status == "active" {
+		case "pending":
+			certCfg.Metadata.LastIssueState = certData.Status
+			return nil, "", "CSR 已提交，等待服务端进入验证流程", nil
+		case "active":
 			// 证书已签发，清理之前可能残留的验证文件
 			cleanupValidationFiles(certCfg.Domain)
+			if waitingForIssue {
+				certCfg.Metadata.LastIssueState = certData.Status
+				privateKey, err := selectIssuedPrivateKey(d, certData, certCfg)
+				if err != nil {
+					if errors.Is(err, errPendingKeyMismatch) {
+						log.Printf("当前 active 证书尚未匹配 pending 私钥，重放同一 CSR 查询/推进签发")
+						return retryPendingCSR(d, client, certCfg)
+					}
+					return nil, "", "", err
+				}
+				return certData, privateKey, "", nil
+			}
 
 			// 检查是否需要续签
 			needRenew, skipReason := checkRenewalNeeded(certData, renewDays)
@@ -651,18 +749,12 @@ func handleLocalKeyMode(d *Deployer, client APIClient, certCfg *config.CertConfi
 				return nil, "", skipReason, nil
 			}
 
-			// 尝试使用本地私钥
-			if cd, pk, ok := tryUseLocalKey(d, certData, certCfg); ok {
-				return cd, pk, "", nil
-			}
-
-			// 没有本地私钥，使用 API 返回的私钥
-			if certData.PrivateKey != "" {
-				log.Printf("使用 API 返回的私钥")
-				return certData, certData.PrivateKey, "", nil
-			}
-		} else {
+			// 当前 active 是旧证书；进入续签窗口后提交新 CSR，不重部署旧证书。
+			certCfg.Metadata.LastIssueState = ""
+			return submitNewCSR(d, client, certCfg)
+		default:
 			// 非预期状态（pending/unpaid/cancelled 等），不提交新 CSR 防止重复下单
+			certCfg.Metadata.LastIssueState = certData.Status
 			log.Printf("订单 %d 状态为 %q，跳过", certCfg.OrderID, certData.Status)
 			return nil, "", fmt.Sprintf("订单状态: %s", certData.Status), nil
 		}
@@ -670,6 +762,19 @@ func handleLocalKeyMode(d *Deployer, client APIClient, certCfg *config.CertConfi
 
 	// 3. 提交新的 CSR
 	return submitNewCSR(d, client, certCfg)
+}
+
+// finalizeSuccessfulDeployment 在至少一个 IIS 绑定成功后转正 pending 私钥并清理签发状态。
+// 转正失败时保留 LastIssueState 与 pending 文件，使下一轮仍能重试收敛。
+func finalizeSuccessfulDeployment(d *Deployer, certCfg *config.CertConfig, certData *api.CertData, privateKey string, isLocal bool) bool {
+	if isLocal && d.Store.HasPendingPrivateKey(certCfg.CertName) {
+		if err := d.Store.PromotePendingPrivateKey(certCfg.CertName, certData.OrderID, privateKey); err != nil {
+			log.Printf("警告: pending 私钥转正失败，保留签发状态供下次重试: %v", err)
+			return false
+		}
+	}
+	updateCertMetadata(certCfg, certData)
+	return true
 }
 
 // checkDomainConflicts 检查域名冲突（同一域名配置在多个证书中）
@@ -817,9 +922,12 @@ const CallbackTimeout = 60 * time.Second
 // message 由 Client.Callback 统一脱敏 + 按 rune 截断，本地同时记 Error 日志留全量；
 // 注意：Client.Callback 内部已有重试机制（doWithRetry），此处不再额外重试
 func sendCallback(d *Deployer, client APIClient, orderID int, domain string, success bool, message string) {
+	message = api.SanitizeCallbackMessage(message)
 	if !success && message != "" {
 		log.Printf("上报失败回调 (订单 %d, %s): %s", orderID, domain, message)
 	}
+	seq := d.nextCallbackSequence()
+	beforeRenewDays := clientRenewBeforeDays(client)
 	d.callbackWg.Add(1)
 	go func() {
 		defer d.callbackWg.Done()
@@ -843,8 +951,19 @@ func sendCallback(d *Deployer, client APIClient, orderID int, domain string, suc
 
 		if err := client.Callback(ctx, req); err != nil {
 			log.Printf("回调失败 (%s): %v", domain, err)
+			return
+		}
+		if days := clientRenewBeforeDays(client); days != beforeRenewDays {
+			d.recordCallbackRenewBeforeDays(seq, days)
 		}
 	}()
+}
+
+func clientRenewBeforeDays(client APIClient) int {
+	if apiClient, ok := client.(*api.Client); ok {
+		return apiClient.LastRenewBeforeDays
+	}
+	return 0
 }
 
 // CheckAndDeploy 检查并部署（命令行模式入口）
@@ -1137,7 +1256,10 @@ func updateRenewBeforeDays(cfg *config.Config, client APIClient) {
 	if !ok {
 		return
 	}
-	days := apiClient.LastRenewBeforeDays
+	updateRenewBeforeDaysValue(cfg, apiClient.LastRenewBeforeDays)
+}
+
+func updateRenewBeforeDaysValue(cfg *config.Config, days int) {
 	if days > config.MaxRenewBeforeDays {
 		log.Printf("服务端返回的 renew_before_days=%d 超过上限 %d（续签应在到期前 30 天内），保留本地配置", days, config.MaxRenewBeforeDays)
 		return

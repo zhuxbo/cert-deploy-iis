@@ -6,6 +6,7 @@ import (
 
 	"sslctlw/api"
 	"sslctlw/cert"
+	"sslctlw/config"
 	"sslctlw/iis"
 )
 
@@ -58,6 +59,18 @@ type OrderStore interface {
 	LoadPrivateKey(orderID int) (string, error)
 	// SavePrivateKey 保存私钥
 	SavePrivateKey(orderID int, keyPEM string) error
+	// HasPendingPrivateKey 检查是否有待确认私钥
+	HasPendingPrivateKey(certName string) bool
+	// LoadPendingPrivateKey 加载待确认私钥
+	LoadPendingPrivateKey(certName string) (string, error)
+	// SavePendingPrivateKey 保存待确认私钥
+	SavePendingPrivateKey(certName, keyPEM string) error
+	// SavePendingCSR 保存与待确认私钥配对、可安全重放的 CSR
+	SavePendingCSR(certName, csrPEM string) error
+	// LoadPendingCSR 加载可安全重放的 CSR
+	LoadPendingCSR(certName string) (string, error)
+	// PromotePendingPrivateKey 将本次已成功部署的待确认私钥转正
+	PromotePendingPrivateKey(certName string, orderID int, deployedKey string) error
 	// SaveCertificate 保存证书
 	SaveCertificate(orderID int, certPEM, chainPEM string) error
 	// LoadCertificate 加载证书
@@ -70,14 +83,45 @@ type OrderStore interface {
 
 // Deployer 部署器，聚合所有依赖（不含 API Client，每个证书独立创建）
 type Deployer struct {
-	Converter  CertConverter
-	Installer  CertInstaller
-	Binder     IISBinder
-	Store      OrderStore
-	callbackWg sync.WaitGroup
+	Converter   CertConverter
+	Installer   CertInstaller
+	Binder      IISBinder
+	Store       OrderStore
+	callbackWg  sync.WaitGroup
+	callbackMu  sync.Mutex
+	callbackSeq uint64
+	renewSeq    uint64
+	renewDays   int
 }
 
 // WaitCallbacks 等待所有回调 goroutine 完成
 func (d *Deployer) WaitCallbacks() {
 	d.callbackWg.Wait()
+}
+
+func (d *Deployer) nextCallbackSequence() uint64 {
+	d.callbackMu.Lock()
+	defer d.callbackMu.Unlock()
+	d.callbackSeq++
+	return d.callbackSeq
+}
+
+func (d *Deployer) recordCallbackRenewBeforeDays(seq uint64, days int) {
+	if days <= 0 || days > config.MaxRenewBeforeDays {
+		return
+	}
+	d.callbackMu.Lock()
+	defer d.callbackMu.Unlock()
+	if seq >= d.renewSeq {
+		d.renewSeq = seq
+		d.renewDays = days
+	}
+}
+
+// ApplyCallbackRenewBeforeDays 将已完成回调中最后一条有效响应应用到本地配置。
+func (d *Deployer) ApplyCallbackRenewBeforeDays(cfg *config.Config) {
+	d.callbackMu.Lock()
+	days := d.renewDays
+	d.callbackMu.Unlock()
+	updateRenewBeforeDaysValue(cfg, days)
 }

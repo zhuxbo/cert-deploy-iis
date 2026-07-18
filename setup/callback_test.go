@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"sslctlw/api"
+	"sslctlw/config"
 )
 
 // TestSendSetupCallback 验证 setup 部署回调按结果发送 success/failure，
@@ -60,5 +61,17 @@ func TestSendSetupCallback(t *testing.T) {
 	}
 	if !strings.Contains(received[1].Message, "[REDACTED]") {
 		t.Errorf("failure 回调 message 应包含脱敏占位符，实际 = %q", received[1].Message)
+	}
+}
+
+func TestApplySetupRenewBeforeDays(t *testing.T) {
+	cfg := &config.Config{Schedule: config.Schedule{RenewBeforeDays: config.DefaultRenewBeforeDays}}
+	applySetupRenewBeforeDays(cfg, 22)
+	if cfg.Schedule.RenewBeforeDays != 22 {
+		t.Fatalf("有效响应值未应用，got %d", cfg.Schedule.RenewBeforeDays)
+	}
+	applySetupRenewBeforeDays(cfg, config.MaxRenewBeforeDays+1)
+	if cfg.Schedule.RenewBeforeDays != 22 {
+		t.Fatalf("超限响应值不应覆盖配置，got %d", cfg.Schedule.RenewBeforeDays)
 	}
 }

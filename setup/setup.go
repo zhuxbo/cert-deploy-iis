@@ -213,7 +213,7 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 	// 6. 保存配置
 	report(fmt.Sprintf("保存配置（安装 %d, 已存在 %d, 失败 %d, 需要私钥 %d）...",
 		result.Installed, result.Skipped, result.Failed, result.NeedKey))
-	if err := saveSetupConfig(certConfigs); err != nil {
+	if err := saveSetupConfig(certConfigs, client.LastRenewBeforeDays); err != nil {
 		log.Printf("警告: 保存配置失败: %v", err)
 	}
 
@@ -428,8 +428,8 @@ func bindCertToIIS(certData api.CertData, thumbprint string) (bindResult, error)
 }
 
 // evalBindOutcome 根据绑定结果判定部署成败（纯函数）
-// 语义与自动部署链路对齐：至少一个绑定成功即视为部署生效（success），
-// 未找到可绑定站点、全部绑定失败或查找出错均为失败（failure）
+// 语义与自动部署链路对齐：全部绑定成功才视为部署生效（success），
+// 未找到可绑定站点、部分/全部绑定失败或查找出错均为失败（failure）
 func evalBindOutcome(br bindResult, bindErr error) (ok bool, reason string) {
 	if bindErr != nil {
 		return false, bindErr.Error()
@@ -441,7 +441,7 @@ func evalBindOutcome(br bindResult, bindErr error) (ok bool, reason string) {
 		return false, fmt.Sprintf("全部 %d 个绑定失败", br.Failed)
 	}
 	if br.Failed > 0 {
-		return true, fmt.Sprintf("部分绑定失败（成功 %d，失败 %d）", br.Succeeded, br.Failed)
+		return false, fmt.Sprintf("部分绑定失败（成功 %d，失败 %d）", br.Succeeded, br.Failed)
 	}
 	return true, ""
 }
@@ -497,7 +497,7 @@ func extractDomainsWithFallback(certData api.CertData) []string {
 }
 
 // saveSetupConfig 保存 setup 生成的证书配置
-func saveSetupConfig(certConfigs []config.CertConfig) error {
+func saveSetupConfig(certConfigs []config.CertConfig, renewBeforeDays int) error {
 	cfg, err := config.Load()
 	if err != nil {
 		cfg = config.DefaultConfig()
@@ -517,7 +517,14 @@ func saveSetupConfig(certConfigs []config.CertConfig) error {
 	}
 
 	cfg.AutoCheckEnabled = true
+	applySetupRenewBeforeDays(cfg, renewBeforeDays)
 	return cfg.Save()
+}
+
+func applySetupRenewBeforeDays(cfg *config.Config, days int) {
+	if days > 0 && days <= config.MaxRenewBeforeDays {
+		cfg.Schedule.RenewBeforeDays = days
+	}
 }
 
 // decideReissueNotify 决定是否及以何种模式通知服务端续签模式（纯函数）

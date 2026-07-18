@@ -1099,6 +1099,66 @@ func TestSanitizeCallbackMessage(t *testing.T) {
 	})
 }
 
+func TestSanitizeCallbackMessage_RedactsKeyValueSecretsAndAbsolutePaths(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		secrets []string
+	}{
+		{"键值与普通绝对路径", `token=token-secret api_token: api-secret password="pwd-secret"`, []string{"token-secret", "api-secret", "pwd-secret"}},
+		{"Windows反斜杠带空格", `写入 C:\Program Files\sslctlw\private.key 失败`, []string{`C:\Program Files`, `sslctlw\private.key`}},
+		{"Windows正斜杠", `写入 C:/ProgramData/sslctlw/private.key 失败`, []string{"C:/ProgramData", "sslctlw/private.key"}},
+		{"UNC路径", `读取 \\server\share\sslctlw\private.key 失败`, []string{`\\server\share`, `sslctlw\private.key`}},
+		{"Unix带空格", `备份 /var/lib/ssl ctl/key.pem 失败`, []string{"/var/lib/ssl", "ctl/key.pem"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SanitizeCallbackMessage(tt.input)
+			for _, secret := range tt.secrets {
+				if strings.Contains(got, secret) {
+					t.Fatalf("敏感信息未脱敏 %q: %q", secret, got)
+				}
+			}
+			if !strings.Contains(got, "[REDACTED") {
+				t.Fatalf("应包含脱敏占位符: %q", got)
+			}
+		})
+	}
+}
+
+func TestToggleAutoReissue_RecordsRenewBeforeDays(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":1,"msg":"ok","data":{"renew_before_days":22}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token")
+	if err := client.ToggleAutoReissue(context.Background(), 123, true); err != nil {
+		t.Fatalf("ToggleAutoReissue() error = %v", err)
+	}
+	if client.LastRenewBeforeDays != 22 {
+		t.Fatalf("LastRenewBeforeDays = %d, want 22", client.LastRenewBeforeDays)
+	}
+}
+
+func TestClientRejectsRenewBeforeDaysAboveCap(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":1,"msg":"ok","data":{"total":0,"data":[],"renew_before_days":31}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token")
+	client.LastRenewBeforeDays = 14
+	if _, err := client.ListAllCerts(context.Background()); err != nil {
+		t.Fatalf("ListAllCerts() error = %v", err)
+	}
+	if client.LastRenewBeforeDays != 14 {
+		t.Fatalf("超限值不应覆盖本地候选值，got %d", client.LastRenewBeforeDays)
+	}
+}
+
 // TestCallback_MessageOnlyOnFailure 验证 Callback 仅在 failure 携带 message，success 清空
 func TestCallback_MessageOnlyOnFailure(t *testing.T) {
 	var received []CallbackRequest

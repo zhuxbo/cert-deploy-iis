@@ -193,6 +193,36 @@ func TestVerifyKeyPair_Mismatch(t *testing.T) {
 	}
 }
 
+func TestVerifyCSRKeyPair(t *testing.T) {
+	keyPEM, csrPEM, err := GenerateCSR("example.com")
+	if err != nil {
+		t.Fatalf("GenerateCSR() error = %v", err)
+	}
+	matched, err := VerifyCSRKeyPair(csrPEM, keyPEM)
+	if err != nil || !matched {
+		t.Fatalf("匹配的 CSR 与私钥应通过，matched=%v err=%v", matched, err)
+	}
+
+	otherKey, _, err := GenerateCSR("other.example.com")
+	if err != nil {
+		t.Fatalf("GenerateCSR(other) error = %v", err)
+	}
+	matched, err = VerifyCSRKeyPair(csrPEM, otherKey)
+	if err != nil {
+		t.Fatalf("不匹配私钥不应导致解析错误: %v", err)
+	}
+	if matched {
+		t.Fatal("CSR 与其他私钥不应匹配")
+	}
+
+	block, _ := pem.Decode([]byte(csrPEM))
+	block.Bytes[len(block.Bytes)-1] ^= 0xff
+	badCSR := string(pem.EncodeToMemory(block))
+	if _, err := VerifyCSRKeyPair(badCSR, keyPEM); err == nil {
+		t.Fatal("签名被篡改的 CSR 应被拒绝")
+	}
+}
+
 func TestExtractDomainsFromPEM_Valid(t *testing.T) {
 	certPEM, _ := generateTestCertAndKey()
 

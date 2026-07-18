@@ -397,6 +397,101 @@ func TestOrderStore_LoadPrivateKey_NotExists(t *testing.T) {
 	}
 }
 
+func TestOrderStore_PendingPrivateKeyLifecycle(t *testing.T) {
+	dataDir := t.TempDir()
+	store := &OrderStore{BaseDir: filepath.Join(dataDir, "orders")}
+	keyPEM := generateTestPrivateKey(t)
+	csrPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: []byte("test-csr")}))
+
+	if err := store.SavePendingCSR("example.com-123", csrPEM); err != nil {
+		t.Fatalf("SavePendingCSR() error = %v", err)
+	}
+	if err := store.SavePendingPrivateKey("example.com-123", keyPEM); err != nil {
+		t.Fatalf("SavePendingPrivateKey() error = %v", err)
+	}
+	if !store.HasPendingPrivateKey("example.com-123") {
+		t.Fatal("保存后应存在 pending 私钥")
+	}
+	loaded, err := store.LoadPendingPrivateKey("example.com-123")
+	if err != nil {
+		t.Fatalf("LoadPendingPrivateKey() error = %v", err)
+	}
+	if loaded != keyPEM {
+		t.Fatal("pending 私钥与保存内容不一致")
+	}
+	loadedCSR, err := store.LoadPendingCSR("example.com-123")
+	if err != nil {
+		t.Fatalf("LoadPendingCSR() error = %v", err)
+	}
+	if loadedCSR != csrPEM {
+		t.Fatal("pending CSR 与保存内容不一致")
+	}
+
+	if err := store.PromotePendingPrivateKey("example.com-123", 456, keyPEM); err != nil {
+		t.Fatalf("PromotePendingPrivateKey() error = %v", err)
+	}
+	if store.HasPendingPrivateKey("example.com-123") {
+		t.Fatal("转正成功后应删除 pending 私钥")
+	}
+	if _, err := store.LoadPendingCSR("example.com-123"); !os.IsNotExist(err) {
+		t.Fatalf("转正成功后应删除 pending CSR，got error = %v", err)
+	}
+	formal, err := store.LoadPrivateKey(456)
+	if err != nil {
+		t.Fatalf("LoadPrivateKey() error = %v", err)
+	}
+	if formal != keyPEM {
+		t.Fatal("转正后的正式私钥内容不一致")
+	}
+}
+
+func TestOrderStore_PendingMismatchPreservesBothKeys(t *testing.T) {
+	dataDir := t.TempDir()
+	store := &OrderStore{BaseDir: filepath.Join(dataDir, "orders")}
+	formalKey := generateTestPrivateKey(t)
+	pendingKey := generateTestPrivateKey(t)
+
+	if err := store.SavePrivateKey(456, formalKey); err != nil {
+		t.Fatalf("SavePrivateKey() error = %v", err)
+	}
+	if err := store.SavePendingPrivateKey("example.com-123", pendingKey); err != nil {
+		t.Fatalf("SavePendingPrivateKey() error = %v", err)
+	}
+	if err := store.PromotePendingPrivateKey("example.com-123", 456, formalKey); err == nil {
+		t.Fatal("pending 内容与已部署私钥不一致时应拒绝转正")
+	}
+	if !store.HasPendingPrivateKey("example.com-123") {
+		t.Fatal("转正拒绝后应保留 pending 私钥")
+	}
+	loadedFormal, err := store.LoadPrivateKey(456)
+	if err != nil {
+		t.Fatalf("LoadPrivateKey() error = %v", err)
+	}
+	if loadedFormal != formalKey {
+		t.Fatal("转正拒绝后不应覆盖正式私钥")
+	}
+}
+
+func TestOrderStore_PendingPrivateKeyRejectsUnsafeName(t *testing.T) {
+	store := &OrderStore{BaseDir: filepath.Join(t.TempDir(), "orders")}
+	if err := store.SavePendingPrivateKey("../escape", generateTestPrivateKey(t)); err == nil {
+		t.Fatal("包含路径遍历的 cert_name 应被拒绝")
+	}
+}
+
+func generateTestPrivateKey(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("生成测试私钥失败: %v", err)
+	}
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("编码测试私钥失败: %v", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}))
+}
+
 // TestOrderStore_DeleteOrder_Twice 测试重复删除
 func TestOrderStore_DeleteOrder_Twice(t *testing.T) {
 	tmpDir := t.TempDir()

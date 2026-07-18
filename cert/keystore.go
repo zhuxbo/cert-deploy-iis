@@ -24,6 +24,7 @@ const KeyEncryptionPrefixMachine = "vm:dpapi:"
 const (
 	MaxPrivateKeySize = 16 * 1024 // 16KB - 私钥 PEM 大小上限
 	MaxCertChainSize  = 64 * 1024 // 64KB - 证书链（cert + intermediate）大小上限
+	MaxCSRSize        = 64 * 1024 // 64KB - pending CSR PEM 大小上限
 )
 
 // EncryptPrivateKey 使用 DPAPI（机器作用域）加密私钥
@@ -117,6 +118,139 @@ func (s *OrderStore) SavePrivateKey(orderID int, keyPEM string) error {
 	}
 	keyPath := filepath.Join(s.GetOrderPath(orderID), "private.key")
 	return atomicWriteKey(keyPath, []byte(encrypted))
+}
+
+// GetPendingKeyPath 返回按证书名称组织的待确认私钥路径。
+func (s *OrderStore) GetPendingKeyPath(certName string) (string, error) {
+	if certName == "" || filepath.IsAbs(certName) || filepath.Base(certName) != certName || certName == "." || certName == ".." {
+		return "", fmt.Errorf("无效的证书名称 %q", certName)
+	}
+	return filepath.Join(filepath.Dir(s.BaseDir), "pending-keys", certName, "pending-key.pem"), nil
+}
+
+// GetPendingCSRPath 返回与待确认私钥成对保存的 CSR 路径。
+func (s *OrderStore) GetPendingCSRPath(certName string) (string, error) {
+	keyPath, err := s.GetPendingKeyPath(certName)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(keyPath), "pending.csr"), nil
+}
+
+// SavePendingPrivateKey 将 local 模式新私钥保存到待确认目录，不触碰正式私钥。
+func (s *OrderStore) SavePendingPrivateKey(certName, keyPEM string) error {
+	if len(keyPEM) > MaxPrivateKeySize {
+		return fmt.Errorf("私钥大小 %d 超过上限 %d 字节", len(keyPEM), MaxPrivateKeySize)
+	}
+	keyPath, err := s.GetPendingKeyPath(certName)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
+		return fmt.Errorf("创建 pending 私钥目录失败: %w", err)
+	}
+	encrypted, err := EncryptPrivateKey(keyPEM)
+	if err != nil {
+		return fmt.Errorf("加密 pending 私钥失败: %w", err)
+	}
+	return atomicWriteKey(keyPath, []byte(encrypted))
+}
+
+// LoadPendingPrivateKey 加载待确认私钥。
+func (s *OrderStore) LoadPendingPrivateKey(certName string) (string, error) {
+	keyPath, err := s.GetPendingKeyPath(certName)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(keyPath)
+	if err != nil {
+		return "", err
+	}
+	keyPEM, err := DecryptPrivateKey(string(data))
+	if err != nil {
+		return "", err
+	}
+	if block, _ := pem.Decode([]byte(keyPEM)); block == nil {
+		return "", errors.New("pending 私钥文件可能已损坏")
+	}
+	return keyPEM, nil
+}
+
+// HasPendingPrivateKey 检查证书是否存在待确认私钥。
+func (s *OrderStore) HasPendingPrivateKey(certName string) bool {
+	keyPath, err := s.GetPendingKeyPath(certName)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(keyPath)
+	return err == nil
+}
+
+// SavePendingCSR 保存可安全重放的原始 CSR，避免不确定请求结果后生成新密钥覆盖 pending key。
+func (s *OrderStore) SavePendingCSR(certName, csrPEM string) error {
+	if len(csrPEM) > MaxCSRSize {
+		return fmt.Errorf("CSR 大小 %d 超过上限 %d 字节", len(csrPEM), MaxCSRSize)
+	}
+	csrPath, err := s.GetPendingCSRPath(certName)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(csrPath), 0700); err != nil {
+		return fmt.Errorf("创建 pending CSR 目录失败: %w", err)
+	}
+	return atomicWriteKey(csrPath, []byte(csrPEM))
+}
+
+// LoadPendingCSR 加载与 pending 私钥配对的原始 CSR。
+func (s *OrderStore) LoadPendingCSR(certName string) (string, error) {
+	csrPath, err := s.GetPendingCSRPath(certName)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(csrPath)
+	if err != nil {
+		return "", err
+	}
+	if len(data) > MaxCSRSize {
+		return "", fmt.Errorf("CSR 大小 %d 超过上限 %d 字节", len(data), MaxCSRSize)
+	}
+	if block, _ := pem.Decode(data); block == nil || block.Type != "CERTIFICATE REQUEST" {
+		return "", errors.New("pending CSR 文件可能已损坏")
+	}
+	return string(data), nil
+}
+
+// PromotePendingPrivateKey 在部署成功后将本次实际使用的 pending 私钥转正。
+// 内容不一致或正式写入失败时保留 pending 与原正式私钥，供后续重试或人工确认。
+func (s *OrderStore) PromotePendingPrivateKey(certName string, orderID int, deployedKey string) error {
+	pendingKey, err := s.LoadPendingPrivateKey(certName)
+	if err != nil {
+		return fmt.Errorf("加载 pending 私钥失败: %w", err)
+	}
+	if pendingKey != deployedKey {
+		return errors.New("pending 私钥与本次部署使用的私钥不一致")
+	}
+	if err := s.SavePrivateKey(orderID, pendingKey); err != nil {
+		return fmt.Errorf("转正 pending 私钥失败: %w", err)
+	}
+	keyPath, err := s.GetPendingKeyPath(certName)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(keyPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("清理 pending 私钥失败: %w", err)
+	}
+	csrPath, err := s.GetPendingCSRPath(certName)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(csrPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("清理 pending CSR 失败: %w", err)
+	}
+	if err := os.Remove(filepath.Dir(keyPath)); err != nil && !os.IsNotExist(err) {
+		log.Printf("警告: 清理空 pending 私钥目录失败: %v", err)
+	}
+	return nil
 }
 
 // atomicWriteKey 原子写私钥密文（spec §10.3）：临时文件 + Rename 替换。

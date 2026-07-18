@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"sslctlw/config"
 	"sslctlw/util"
 )
 
@@ -498,10 +499,16 @@ var (
 	pemPrivateKeyDanglingRe = regexp.MustCompile(`(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*`)
 	// bearerBasicRe 匹配 Authorization 中的 Bearer/Basic 凭据，保留方案名脱敏凭据本身
 	bearerBasicRe = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+`)
+	// secretKeyValueRe 匹配常见 token/password 键值形式。
+	secretKeyValueRe = regexp.MustCompile(`(?i)\b(api[_-]?token|token|password|passwd|pwd)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)`)
+	// absolutePathRe 匹配 Windows 与 Unix 绝对路径；保留前导分隔字符用于可读性。
+	windowsAbsolutePathRe = regexp.MustCompile(`(?i)(^|[\s("'=])([a-z]:[\\/][^,;\r\n]*)`)
+	uncAbsolutePathRe     = regexp.MustCompile(`(^|[\s("'=])(\\\\[^,;\r\n]+)`)
+	unixAbsolutePathRe    = regexp.MustCompile(`(^|[\s("'=])(/[^,;\r\n]+)`)
 )
 
 // SanitizeCallbackMessage 清洗失败原因摘要用于回调上报（纯函数，跨平台可测）：
-// 先脱敏（去除 PEM 私钥块与 Bearer/Basic 凭据），折叠换行，再按 rune 截断至上限。
+// 先脱敏（去除私钥、凭据、密码和绝对路径），折叠换行，再按 rune 截断至上限。
 // 脱敏先于截断，避免截断切断私钥块导致 END 缺失后残留密钥本体。
 func SanitizeCallbackMessage(msg string) string {
 	if msg == "" {
@@ -511,6 +518,10 @@ func SanitizeCallbackMessage(msg string) string {
 	msg = pemPrivateKeyBlockRe.ReplaceAllString(msg, "[REDACTED_PRIVATE_KEY]")
 	msg = pemPrivateKeyDanglingRe.ReplaceAllString(msg, "[REDACTED_PRIVATE_KEY]")
 	msg = bearerBasicRe.ReplaceAllString(msg, "$1 [REDACTED]")
+	msg = secretKeyValueRe.ReplaceAllString(msg, "$1=[REDACTED]")
+	msg = windowsAbsolutePathRe.ReplaceAllString(msg, "$1[REDACTED_PATH]")
+	msg = uncAbsolutePathRe.ReplaceAllString(msg, "$1[REDACTED_PATH]")
+	msg = unixAbsolutePathRe.ReplaceAllString(msg, "$1[REDACTED_PATH]")
 	// 2. 折叠换行为空格，回调 message 保持单行，规避下游日志/存储注入
 	msg = strings.ReplaceAll(msg, "\r", " ")
 	msg = strings.ReplaceAll(msg, "\n", " ")
@@ -520,6 +531,14 @@ func SanitizeCallbackMessage(msg string) string {
 		msg = string(runes[:CallbackMessageMaxRunes])
 	}
 	return msg
+}
+
+// recordRenewBeforeDays 统一接收各 API 响应中的提前续签天数。
+// 超过共享上限的异常值直接拒绝，保留最近一次有效值供调用方持久化。
+func (c *Client) recordRenewBeforeDays(days int) {
+	if days > 0 && days <= config.MaxRenewBeforeDays {
+		c.LastRenewBeforeDays = days
+	}
 }
 
 // Callback 部署回调
@@ -569,8 +588,8 @@ func (c *Client) Callback(ctx context.Context, req *CallbackRequest) error {
 				RenewBeforeDays int `json:"renew_before_days"`
 			} `json:"data"`
 		}
-		if json.Unmarshal(body, &cbResp) == nil && cbResp.Data.RenewBeforeDays > 0 {
-			c.LastRenewBeforeDays = cbResp.Data.RenewBeforeDays
+		if json.Unmarshal(body, &cbResp) == nil {
+			c.recordRenewBeforeDays(cbResp.Data.RenewBeforeDays)
 		}
 	}
 
@@ -644,9 +663,7 @@ func (c *Client) SubmitCSR(ctx context.Context, req *UpdateRequest) (*UpdateResp
 		}
 	}
 
-	if updateResp.Data.RenewBeforeDays > 0 {
-		c.LastRenewBeforeDays = updateResp.Data.RenewBeforeDays
-	}
+	c.recordRenewBeforeDays(updateResp.Data.RenewBeforeDays)
 
 	return &updateResp, nil
 }
@@ -693,9 +710,7 @@ func (c *Client) queryCerts(ctx context.Context, order string) ([]CertData, erro
 		return nil, err
 	}
 
-	if apiResp.Data.RenewBeforeDays > 0 {
-		c.LastRenewBeforeDays = apiResp.Data.RenewBeforeDays
-	}
+	c.recordRenewBeforeDays(apiResp.Data.RenewBeforeDays)
 
 	return apiResp.Data.Data, nil
 }
@@ -755,9 +770,7 @@ func (c *Client) ListAllCerts(ctx context.Context) ([]CertData, error) {
 			return nil, err
 		}
 
-		if apiResp.Data.RenewBeforeDays > 0 {
-			c.LastRenewBeforeDays = apiResp.Data.RenewBeforeDays
-		}
+		c.recordRenewBeforeDays(apiResp.Data.RenewBeforeDays)
 
 		allCerts = append(allCerts, apiResp.Data.Data...)
 		totalPages := (apiResp.Data.Total + pageSize - 1) / pageSize
@@ -817,6 +830,26 @@ func (c *Client) ToggleAutoReissue(ctx context.Context, orderID int, autoReissue
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 		return handleHTTPError(resp.StatusCode, body)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+	if err != nil {
+		return fmt.Errorf("读取响应失败: %w", err)
+	}
+	if len(body) > 0 {
+		var apiResp struct {
+			Code int    `json:"code"`
+			Msg  string `json:"msg"`
+			Data struct {
+				RenewBeforeDays int `json:"renew_before_days"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &apiResp); err != nil {
+			return fmt.Errorf("解析响应失败: %w", err)
+		}
+		if apiResp.Code != 1 {
+			return &APIError{StatusCode: resp.StatusCode, Code: apiResp.Code, Message: apiResp.Msg}
+		}
+		c.recordRenewBeforeDays(apiResp.Data.RenewBeforeDays)
 	}
 
 	return nil
