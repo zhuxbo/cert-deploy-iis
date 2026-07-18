@@ -1104,6 +1104,10 @@ func updateRenewBeforeDays(cfg *config.Config, client APIClient) {
 		return
 	}
 	days := apiClient.LastRenewBeforeDays
+	if days > config.MaxRenewBeforeDays {
+		log.Printf("服务端返回的 renew_before_days=%d 超过上限 %d（续签应在到期前 30 天内），保留本地配置", days, config.MaxRenewBeforeDays)
+		return
+	}
 	if days > 0 && days != cfg.Schedule.RenewBeforeDays {
 		log.Printf("根据服务端配置更新续签提前天数: %d -> %d", cfg.Schedule.RenewBeforeDays, days)
 		cfg.Schedule.RenewBeforeDays = days

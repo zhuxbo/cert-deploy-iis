@@ -20,6 +20,10 @@ const (
 	// DefaultRenewBeforeDays 提前续签天数（两种模式统一）
 	DefaultRenewBeforeDays = 14
 
+	// MaxRenewBeforeDays renew_before_days 的合理上限（deploy-spec 2.9）：
+	// 无论续费还是重签，续签动作都应发生在到期前 30 天以内，服务端返回超限视为异常值拒绝
+	MaxRenewBeforeDays = 30
+
 	// DefaultTaskName 默认任务计划名称
 	DefaultTaskName = "SSLCtlW"
 
