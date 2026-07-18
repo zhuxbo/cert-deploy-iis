@@ -802,8 +802,14 @@ func TestDeployCertAutoMode(t *testing.T) {
 
 		results := deployCertAutoMode(d, NewMockClient(), certData, certData.PrivateKey, certCfg)
 
-		if len(results) != 0 {
-			t.Errorf("无匹配绑定时期望 0 个结果，得到 %d 个", len(results))
+		if len(results) != 1 {
+			t.Fatalf("无匹配绑定时期望 1 个失败结果，得到 %d 个", len(results))
+		}
+		if results[0].Success {
+			t.Fatal("无匹配绑定时不应报告成功")
+		}
+		if !strings.Contains(results[0].Message, "未找到匹配") {
+			t.Fatalf("失败原因应说明未找到匹配绑定，得到 %q", results[0].Message)
 		}
 	})
 
