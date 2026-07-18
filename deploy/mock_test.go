@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"testing"
 
 	"sslctlw/api"
 	"sslctlw/cert"
@@ -170,14 +171,16 @@ func (m *MockOrderStore) DeleteOrder(orderID int) error {
 }
 
 // 测试用的证书数据
-func makeTestCertData(orderID int, domain, status, expiresAt string) *api.CertData {
+func makeTestCertData(t *testing.T, orderID int, domain, status, expiresAt string) *api.CertData {
+	t.Helper()
+	certPEM, keyPEM := genSelfSignedPair(t, domain)
 	return &api.CertData{
 		OrderID:     orderID,
 		Domains:     domain,
 		Status:      status,
 		ExpiresAt:   expiresAt,
-		Certificate: testCertPEM,
-		PrivateKey:  testKeyPEM,
+		Certificate: certPEM,
+		PrivateKey:  keyPEM,
 		CACert:      testCACertPEM,
 	}
 }

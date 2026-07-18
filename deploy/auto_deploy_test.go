@@ -251,7 +251,7 @@ func TestTryUseLocalKey(t *testing.T) {
 		d := NewMockDeployer()
 		d.Store.(*MockOrderStore).HasPrivateKeyFunc = func(orderID int) bool { return false }
 
-		certData := makeTestCertData(123, "example.com", "active", "2025-01-01")
+		certData := makeTestCertData(t, 123, "example.com", "active", "2025-01-01")
 		certCfg := &config.CertConfig{OrderID: 123, Domain: "example.com"}
 		_, _, ok := tryUseLocalKey(d, certData, certCfg)
 		if ok {
@@ -266,7 +266,7 @@ func TestTryUseLocalKey(t *testing.T) {
 			return "", errors.New("load failed")
 		}
 
-		certData := makeTestCertData(123, "example.com", "active", "2025-01-01")
+		certData := makeTestCertData(t, 123, "example.com", "active", "2025-01-01")
 		certCfg := &config.CertConfig{OrderID: 123, Domain: "example.com"}
 		_, _, ok := tryUseLocalKey(d, certData, certCfg)
 		if ok {
@@ -572,12 +572,12 @@ func TestDeployCertWithRules(t *testing.T) {
 	t.Run("成功路径", func(t *testing.T) {
 		d := NewMockDeployer()
 
-		certData := makeTestCertData(100, "example.com", "active", "2025-12-31")
+		certData := makeTestCertData(t, 100, "example.com", "active", "2025-12-31")
 		certCfg := makeTestCertConfig(100, "example.com", true)
 		conflicts := map[string][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results := deployCertWithRules(d, NewMockClient(), certData, testKeyPEM, certCfg, conflicts, allCerts)
+		results := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -603,7 +603,7 @@ func TestDeployCertWithRules(t *testing.T) {
 			return "", errors.New("PFX 转换错误")
 		}
 
-		certData := makeTestCertData(100, "example.com", "active", "2025-12-31")
+		certData := makeTestCertData(t, 100, "example.com", "active", "2025-12-31")
 		certCfg := config.CertConfig{
 			OrderID: 100,
 			Domain:  "example.com",
@@ -616,7 +616,7 @@ func TestDeployCertWithRules(t *testing.T) {
 		conflicts := map[string][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results := deployCertWithRules(d, NewMockClient(), certData, testKeyPEM, certCfg, conflicts, allCerts)
+		results := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
 
 		if len(results) != 2 {
 			t.Fatalf("期望 2 个结果（每个 BindRule 域名一个），得到 %d 个", len(results))
@@ -640,12 +640,12 @@ func TestDeployCertWithRules(t *testing.T) {
 			}, nil
 		}
 
-		certData := makeTestCertData(100, "example.com", "active", "2025-12-31")
+		certData := makeTestCertData(t, 100, "example.com", "active", "2025-12-31")
 		certCfg := makeTestCertConfig(100, "example.com", true)
 		conflicts := map[string][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results := deployCertWithRules(d, NewMockClient(), certData, testKeyPEM, certCfg, conflicts, allCerts)
+		results := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -671,7 +671,7 @@ func TestDeployCertWithRules(t *testing.T) {
 			return nil
 		}
 
-		certData := makeTestCertData(100, "example.com", "active", "2025-12-31")
+		certData := makeTestCertData(t, 100, "example.com", "active", "2025-12-31")
 		certCfg := config.CertConfig{
 			OrderID: 100,
 			Domain:  "example.com",
@@ -684,7 +684,7 @@ func TestDeployCertWithRules(t *testing.T) {
 		conflicts := map[string][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results := deployCertWithRules(d, NewMockClient(), certData, testKeyPEM, certCfg, conflicts, allCerts)
+		results := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
 
 		if len(results) != 2 {
 			t.Fatalf("期望 2 个结果，得到 %d 个", len(results))
@@ -707,7 +707,7 @@ func TestDeployCertWithRules(t *testing.T) {
 	t.Run("域名冲突跳过", func(t *testing.T) {
 		d := NewMockDeployer()
 
-		certData := makeTestCertData(100, "example.com", "active", "2025-12-31")
+		certData := makeTestCertData(t, 100, "example.com", "active", "2025-12-31")
 		// 证书1: OrderID=100, 域名 shared.com 和 unique.com
 		certCfg := config.CertConfig{
 			OrderID: 100,
@@ -734,7 +734,7 @@ func TestDeployCertWithRules(t *testing.T) {
 			"shared.com": {0, 1},
 		}
 
-		results := deployCertWithRules(d, NewMockClient(), certData, testKeyPEM, certCfg, conflicts, allCerts)
+		results := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
 
 		// shared.com 应该被跳过（certCfg2 的 ExpiresAt 更晚，OrderID=200 优先）
 		// 只有 unique.com 会被处理
@@ -763,7 +763,7 @@ func TestDeployCertAutoMode(t *testing.T) {
 			}, nil
 		}
 
-		certData := makeTestCertData(100, "example.com", "active", "2025-12-31")
+		certData := makeTestCertData(t, 100, "example.com", "active", "2025-12-31")
 		certCfg := config.CertConfig{
 			OrderID:      100,
 			Domain:       "example.com",
@@ -772,7 +772,7 @@ func TestDeployCertAutoMode(t *testing.T) {
 			AutoBindMode: true,
 		}
 
-		results := deployCertAutoMode(d, NewMockClient(), certData, testKeyPEM, certCfg)
+		results := deployCertAutoMode(d, NewMockClient(), certData, certData.PrivateKey, certCfg)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -791,7 +791,7 @@ func TestDeployCertAutoMode(t *testing.T) {
 			return map[string]*iis.SSLBinding{}, nil
 		}
 
-		certData := makeTestCertData(100, "example.com", "active", "2025-12-31")
+		certData := makeTestCertData(t, 100, "example.com", "active", "2025-12-31")
 		certCfg := config.CertConfig{
 			OrderID:      100,
 			Domain:       "example.com",
@@ -800,7 +800,7 @@ func TestDeployCertAutoMode(t *testing.T) {
 			AutoBindMode: true,
 		}
 
-		results := deployCertAutoMode(d, NewMockClient(), certData, testKeyPEM, certCfg)
+		results := deployCertAutoMode(d, NewMockClient(), certData, certData.PrivateKey, certCfg)
 
 		if len(results) != 0 {
 			t.Errorf("无匹配绑定时期望 0 个结果，得到 %d 个", len(results))
@@ -818,7 +818,7 @@ func TestDeployCertAutoMode(t *testing.T) {
 			return errors.New("netsh 绑定失败")
 		}
 
-		certData := makeTestCertData(100, "example.com", "active", "2025-12-31")
+		certData := makeTestCertData(t, 100, "example.com", "active", "2025-12-31")
 		certCfg := config.CertConfig{
 			OrderID:      100,
 			Domain:       "example.com",
@@ -827,7 +827,7 @@ func TestDeployCertAutoMode(t *testing.T) {
 			AutoBindMode: true,
 		}
 
-		results := deployCertAutoMode(d, NewMockClient(), certData, testKeyPEM, certCfg)
+		results := deployCertAutoMode(d, NewMockClient(), certData, certData.PrivateKey, certCfg)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
