@@ -1,6 +1,7 @@
 package cert
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -90,9 +91,10 @@ func TestSimplifyPFXError(t *testing.T) {
 }
 
 func TestInstallPFX_FileNotExists(t *testing.T) {
-	_, err := InstallPFX("/nonexistent/file.pfx", "")
+	missingPath := filepath.Join(t.TempDir(), "missing", "file.pfx")
+	_, err := InstallPFX(missingPath, "")
 	if err == nil {
-		t.Error("InstallPFX() 应该对不存在的文件返回错误")
+		t.Fatal("InstallPFX() 应该对不存在的文件返回错误")
 	}
 	if !strings.Contains(err.Error(), "不存在") {
 		t.Errorf("错误消息应包含'不存在', got: %v", err)
@@ -100,10 +102,10 @@ func TestInstallPFX_FileNotExists(t *testing.T) {
 }
 
 func TestInstallPEM_FileNotExists(t *testing.T) {
-	// 测试证书文件不存在
-	_, err := InstallPEM("/nonexistent/cert.pem", "/nonexistent/key.pem", "")
+	missingDir := filepath.Join(t.TempDir(), "missing")
+	_, err := InstallPEM(filepath.Join(missingDir, "cert.pem"), filepath.Join(missingDir, "key.pem"), "")
 	if err == nil {
-		t.Error("InstallPEM() 应该对不存在的证书文件返回错误")
+		t.Fatal("InstallPEM() 应该对不存在的证书文件返回错误")
 	}
 	if !strings.Contains(err.Error(), "不存在") {
 		t.Errorf("错误消息应包含'不存在', got: %v", err)
