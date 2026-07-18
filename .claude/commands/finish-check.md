@@ -2,10 +2,28 @@
 
 ---
 
-## 1. 编译检查
+## 0. 检查范围
+
+先确定本次检查的 diff 范围，后续所有"审查改动"的步骤都以此范围为准：
+
+- **工作区模式**（默认）：改动尚未提交，范围是 `git diff` + `git diff --cached`。
+- **工作分支模式**：改动已按批次提交到特性分支，以基线分支（通常 `dev` 或 `origin/dev`）为对照：
 
 ```bash
-cd /c/Users/Administrator/Desktop/code/sslctlw && go build -o /dev/null .
+git log --oneline <base>..HEAD    # 逐提交清单
+git diff <base>...HEAD            # 全量改动
+```
+
+分支模式还需逐提交检查：每个提交只含单一主题的相关文件；提交信息为 `type: 中文主题` + 2–10 条要点式 body；无任何 AI 署名。
+
+---
+
+## 1. 编译检查
+
+在仓库根目录执行（非 Windows 机器必须带 `GOOS=windows GOARCH=amd64`，下同）：
+
+```bash
+GOOS=windows GOARCH=amd64 go build -o /dev/null .
 ```
 
 确认主程序编译无错误。若编译失败，列出所有错误并修复。
@@ -15,20 +33,27 @@ cd /c/Users/Administrator/Desktop/code/sslctlw && go build -o /dev/null .
 ## 2. go vet 静态分析
 
 ```bash
-cd /c/Users/Administrator/Desktop/code/sslctlw && go vet ./...
+GOOS=windows GOARCH=amd64 go vet ./...
 ```
 
-修复所有 vet 报告的问题。
+注意必须固定 `GOARCH=amd64`（发布目标）：Apple Silicon 等 arm64 主机上缺省 GOARCH 会取 arm64，而 windigo 无 windows/arm64 支持，导致误报失败。
+
+vet 会连同测试文件一起类型检查。修复所有 vet 报告的问题。
 
 ---
 
 ## 3. 单元测试
 
+- Windows 机器：`go test ./...`，所有测试必须通过。
+- 非 Windows 机器：无法运行 Windows 二进制，退化为全部包的测试编译（运行交由 CI windows-latest），并在结论中注明"运行期验证交 CI"：
+
 ```bash
-cd /c/Users/Administrator/Desktop/code/sslctlw && go test ./...
+for d in $(GOOS=windows GOARCH=amd64 go list ./...); do GOOS=windows GOARCH=amd64 go test -count=1 -c -o /dev/null "$d" || echo "FAIL $d"; done
 ```
 
-所有测试必须通过。若有失败，分析是代码 bug 还是测试本身的问题——**测试发现 bug 必须修复代码，绝不修改测试去迎合错误的代码**。
+若有失败，分析是代码 bug 还是测试本身的问题——**测试发现 bug 必须修复代码，绝不修改测试去迎合错误的代码**。
+
+gofmt 要求：本次改动的行必须符合项目 go.mod 对应版本的 gofmt；仓库基线存在历史格式差异（CI 不检查 gofmt），不要为此重排未触碰的既有代码。
 
 ---
 
@@ -53,8 +78,9 @@ cd /c/Users/Administrator/Desktop/code/sslctlw && go test ./...
 - [ ] **命令注入**：传给 `exec.Command` 的参数是否直接传入参数列表（而非拼接到命令字符串）？特别注意站点名、域名等用户输入。
 - [ ] **PowerShell 注入**：调用 PowerShell 的地方是否对用户输入做了转义或使用参数化？证书指纹等是否校验为合法的 hex 字符串？
 - [ ] **路径遍历**：文件路径操作是否使用了 `filepath.Rel()` + 按路径段校验？防止 `../` 类攻击。
-- [ ] **DPAPI 加密**：新增或修改的配置字段中，敏感数据（Token、密码）是否通过 DPAPI 加密存储？
+- [ ] **DPAPI 加密**：新增或修改的配置字段中，敏感数据（Token、密码）是否通过 DPAPI 加密存储？是否使用机器作用域（`vm:` 前缀），保证 SYSTEM 计划任务能解密交互账户写入的密文？
 - [ ] **SSL 绑定类型**：SSL 绑定操作是否正确区分了 SNI (`hostnameport`) 和 IP (`ipport`) 两种类型？
+- [ ] **绑定变更可恢复**：删除/替换 SSL 绑定的路径是否先捕获旧绑定、失败时回绑？成败判定是否基于操作后实际绑定状态（locale 无关），而非输出关键词？
 
 若本次修改未涉及这些包，跳过此项并说明。
 
@@ -68,6 +94,9 @@ cd /c/Users/Administrator/Desktop/code/sslctlw && go test ./...
 - [ ] **HTTP 错误处理**：API 调用是否检查了 HTTP 状态码？错误响应的 body 是否被读取并关闭？
 - [ ] **超时设置**：HTTP Client 是否设置了合理的超时？
 - [ ] **Token 安全**：Token 是否仅通过 Authorization header 传输？日志中是否避免打印 Token？
+- [ ] **回调契约**：回调请求体是否严格保持 spec §2.8 三字段（order_id/status/deployed_at）？status 是否仅用 success/failure/pending？
+- [ ] **失败回调覆盖**：新增的失败路径是否都发送 failure 回调（client 可用时）？是否存在"只记本地日志"的静默失败让服务端视图错位？
+- [ ] **假成功语义**：success 回调与成功统计是否以实际生效（绑定/部署校验通过）为前提？部分失败是否如实反映在结果与统计中？
 
 若本次修改未涉及这些包，跳过此项并说明。
 
@@ -97,16 +126,12 @@ cd /c/Users/Administrator/Desktop/code/sslctlw && go test ./...
 
 ## 9. Git Diff 审查
 
-```bash
-cd /c/Users/Administrator/Desktop/code/sslctlw && git diff
-```
+按第 0 步确定的范围审查改动：
 
 ```bash
-cd /c/Users/Administrator/Desktop/code/sslctlw && git diff --cached
-```
-
-```bash
-cd /c/Users/Administrator/Desktop/code/sslctlw && git status
+git status
+git diff && git diff --cached        # 工作区模式
+git diff <base>...HEAD               # 工作分支模式
 ```
 
 审查所有改动，确认：
@@ -130,7 +155,7 @@ cd /c/Users/Administrator/Desktop/code/sslctlw && git status
 ## 11. 版本与构建兼容性
 
 ```bash
-cd /c/Users/Administrator/Desktop/code/sslctlw && go build -ldflags "-X main.version=check-test" -o /dev/null .
+GOOS=windows GOARCH=amd64 go build -ldflags "-X main.version=check-test" -o /dev/null .
 ```
 
 确认 ldflags 版本注入仍然有效。
