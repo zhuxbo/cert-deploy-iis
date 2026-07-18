@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"sslctlw/api"
 	"sslctlw/cert"
@@ -157,12 +158,14 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 			matched, err := cert.VerifyKeyPair(nk.certData.Certificate, keyPEM)
 			if err != nil {
 				log.Printf("证书 %s 私钥验证失败: %v", nk.certData.Domain(), err)
+				sendSetupCallback(client, nk.certData.OrderID, nk.certData.Domain(), false)
 				result.Failed++
 				result.NeedKey--
 				continue
 			}
 			if !matched {
 				log.Printf("证书 %s 私钥与证书不匹配", nk.certData.Domain())
+				sendSetupCallback(client, nk.certData.OrderID, nk.certData.Domain(), false)
 				result.Failed++
 				result.NeedKey--
 				continue
@@ -203,12 +206,13 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 	return result, nil
 }
 
-// installCert 安装单个证书（PEM→PFX→安装→绑定→通知）
+// installCert 安装单个证书（PEM→PFX→安装→绑定→通知→回调）
 // 成功返回 true 并更新 result.Installed 和 certConfigs
 func installCert(ctx context.Context, client *api.Client, certData api.CertData, keyPEM string, serialNumber string, opts Options, certConfigs *[]config.CertConfig, result *RunResult) bool {
 	pfxPath, err := cert.PEMToPFX(certData.Certificate, keyPEM, certData.CACert, "")
 	if err != nil {
 		log.Printf("证书 %s 转换失败: %v", certData.Domain(), err)
+		sendSetupCallback(client, certData.OrderID, certData.Domain(), false)
 		return false
 	}
 
@@ -222,6 +226,7 @@ func installCert(ctx context.Context, client *api.Client, certData api.CertData,
 			errMsg = installResult.ErrorMessage
 		}
 		log.Printf("证书 %s 安装失败: %s", certData.Domain(), errMsg)
+		sendSetupCallback(client, certData.OrderID, certData.Domain(), false)
 		return false
 	}
 
@@ -238,11 +243,33 @@ func installCert(ctx context.Context, client *api.Client, certData api.CertData,
 	// IIS 绑定
 	bindCertToIIS(certData, installResult.Thumbprint)
 
-	// 通知服务端续签模式：pull 模式启用自动续签
+	// 通知服务端续签模式
 	toggleAutoReissue(ctx, client, certData.OrderID, false)
+
+	// 部署完成回调（spec 4.2 / 5.1，非关键路径）
+	sendSetupCallback(client, certData.OrderID, certData.Domain(), true)
 
 	*certConfigs = append(*certConfigs, makeCertConfig(certData, opts, serialNumber))
 	return true
+}
+
+// sendSetupCallback 发送 setup 部署回调（同步，非关键路径，失败仅记日志）
+func sendSetupCallback(client *api.Client, orderID int, domain string, success bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	status := "success"
+	if !success {
+		status = "failure"
+	}
+	req := &api.CallbackRequest{
+		OrderID:    orderID,
+		Status:     status,
+		DeployedAt: time.Now().Format(time.RFC3339),
+	}
+	if err := client.Callback(ctx, req); err != nil {
+		log.Printf("部署回调失败 (订单 %d, %s): %v", orderID, domain, err)
+	}
 }
 
 // resolvePrivateKey 按优先级尝试获取私钥（不含交互）

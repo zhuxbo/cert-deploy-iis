@@ -6,9 +6,13 @@ import (
 	"log"
 	"regexp"
 	"strings"
+	"time"
 
 	"sslctlw/util"
 )
+
+// bindVerifyRetryDelay verify 步瞬时未命中后的重查间隔（测试可置 0 加速）
+var bindVerifyRetryDelay = 200 * time.Millisecond
 
 // 默认 AppID (用于标识应用程序)
 const defaultAppID = "{00000000-0000-0000-0000-000000000000}"
@@ -198,9 +202,8 @@ func bindAndVerify(keyParam, keyValue, certHash string, unbind func() error) err
 		fmt.Sprintf("appid=%s", defaultAppID),
 		"certstorename=MY")
 
-	// 4. 操作后验证目标绑定
-	current := queryBindingByKey(keyParam, keyValue)
-	if current != nil && strings.EqualFold(current.CertHash, certHash) {
+	// 4. 操作后验证目标绑定（verify 瞬时未命中重试一次，避免 netsh show 抖动/延迟误判回绑）
+	if verifyBindingWithRetry(func() *capturedBinding { return queryBindingByKey(keyParam, keyValue) }, certHash, bindVerifyRetryDelay) {
 		return nil
 	}
 
@@ -216,6 +219,20 @@ func bindAndVerify(keyParam, keyValue, certHash string, unbind func() error) err
 	}
 	log.Printf("绑定新证书失败，已回绑旧证书 %s (%s=%s)", oldBinding.CertHash, keyParam, keyValue)
 	return fmt.Errorf("%v; 已回绑旧证书 %s", failErr, oldBinding.CertHash)
+}
+
+// verifyBindingWithRetry 校验目标绑定是否为期望证书；首次未命中后延迟重查一次再判定。
+// netsh add 成功但紧接的 show 偶发瞬时失败/延迟不应直接判失败触发回绑（回绑还会丢高级 SSL flag）。
+// query 可注入便于单测；retryDelay<=0 时不休眠（测试加速）。
+func verifyBindingWithRetry(query func() *capturedBinding, certHash string, retryDelay time.Duration) bool {
+	if current := query(); current != nil && strings.EqualFold(current.CertHash, certHash) {
+		return true
+	}
+	if retryDelay > 0 {
+		time.Sleep(retryDelay)
+	}
+	current := query()
+	return current != nil && strings.EqualFold(current.CertHash, certHash)
 }
 
 // rebindOldBinding 用捕获的旧绑定信息恢复绑定，结果同样按实际绑定验证。

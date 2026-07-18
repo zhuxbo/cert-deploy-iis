@@ -140,6 +140,7 @@ func processOneCert(cfg *config.Config, d *Deployer, i int, conflicts map[string
 	certCfg := cfg.Certificates[i]
 
 	// per-cert client
+	// 注意：client 创建失败时没有可用的 API 通道，无法发送失败回调，只能记本地日志
 	client, clientErr := NewClientForCert(&cfg.Certificates[i])
 	if clientErr != nil {
 		log.Printf("创建证书 %s 的 API 客户端失败: %v", certCfg.Domain, clientErr)
@@ -174,6 +175,7 @@ func processOneCert(cfg *config.Config, d *Deployer, i int, conflicts map[string
 				Message: fmt.Sprintf("本机提交失败: %v", err),
 				OrderID: certCfg.OrderID,
 			})
+			sendCallback(d, client, certCfg.OrderID, certCfg.Domain, false, fmt.Sprintf("本机提交失败: %v", err))
 			return results, false
 		}
 		if certData == nil {
@@ -195,6 +197,7 @@ func processOneCert(cfg *config.Config, d *Deployer, i int, conflicts map[string
 				Message: fmt.Sprintf("获取证书失败: %v", err),
 				OrderID: certCfg.OrderID,
 			})
+			sendCallback(d, client, certCfg.OrderID, certCfg.Domain, false, fmt.Sprintf("获取证书失败: %v", err))
 			return results, false
 		}
 
@@ -336,6 +339,7 @@ func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, 
 				OrderID: certData.OrderID,
 			})
 		}
+		sendCallback(d, client, certData.OrderID, certCfg.Domain, false, fmt.Sprintf("转换 PFX 失败: %v", err))
 		return results
 	}
 	defer removeTempFile(pfxPath)
@@ -358,13 +362,16 @@ func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, 
 				OrderID: certData.OrderID,
 			})
 		}
+		sendCallback(d, client, certData.OrderID, certCfg.Domain, false, "安装证书失败: "+errMsg)
 		return results
 	}
 
 	thumbprint := installResult.Thumbprint
 	log.Printf("证书安装成功: %s", thumbprint)
 
-	// 绑定到 IIS
+	// 绑定到 IIS（循环内只收集结果，回调按订单聚合到循环后单发，避免逐绑定竞态上报）
+	anySuccess := false
+	anyFailure := false
 	for _, rule := range certCfg.BindRules {
 		// 检查是否有域名冲突，如果有则检查是否应该使用此证书
 		if conflictIndexes, hasConflict := conflicts[rule.Domain]; hasConflict {
@@ -393,7 +400,7 @@ func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, 
 				Thumbprint: thumbprint,
 				OrderID:    certData.OrderID,
 			})
-			sendCallback(d, client, certData.OrderID, rule.Domain, false, "绑定失败: "+bindErr.Error())
+			anyFailure = true
 		} else {
 			log.Printf("绑定成功: %s", rule.Domain)
 			results = append(results, Result{
@@ -403,11 +410,26 @@ func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, 
 				Thumbprint: thumbprint,
 				OrderID:    certData.OrderID,
 			})
-			sendCallback(d, client, certData.OrderID, rule.Domain, true, "")
+			anySuccess = true
 		}
 	}
 
+	sendAggregatedCallback(d, client, certData.OrderID, certCfg.Domain, anySuccess, anyFailure)
 	return results
+}
+
+// sendAggregatedCallback 按订单聚合部署结果发送单条回调（spec 2.8 三字段契约）：
+// 全部绑定成功→success，任一失败→failure（失败明细已记入 results 与日志）。
+// 无绑定被处理（全部冲突跳过 / 无匹配）时不产生回调，与姊妹仓订单级单发对齐。
+func sendAggregatedCallback(d *Deployer, client APIClient, orderID int, domain string, anySuccess, anyFailure bool) {
+	if !anySuccess && !anyFailure {
+		return
+	}
+	if anyFailure {
+		sendCallback(d, client, orderID, domain, false, "订单存在绑定失败（详见各绑定日志）")
+		return
+	}
+	sendCallback(d, client, orderID, domain, true, "")
 }
 
 // validateCertConfig 校验证书配置的验证方法
@@ -761,8 +783,12 @@ func updateCertDomains(certCfg *config.CertConfig, certPEM string) {
 const CallbackTimeout = 60 * time.Second
 
 // sendCallback 发送部署回调（异步，带超时控制）
+// 回调请求仅含 order_id/status/deployed_at（spec 2.8），失败原因 message 记入本地日志；
 // 注意：Client.Callback 内部已有重试机制（doWithRetry），此处不再额外重试
 func sendCallback(d *Deployer, client APIClient, orderID int, domain string, success bool, message string) {
+	if !success && message != "" {
+		log.Printf("上报失败回调 (订单 %d, %s): %s", orderID, domain, message)
+	}
 	d.callbackWg.Add(1)
 	go func() {
 		defer d.callbackWg.Done()
@@ -841,6 +867,7 @@ func deployCertAutoMode(d *Deployer, client APIClient, certData *api.CertData, p
 	pfxPath, err := d.Converter.PEMToPFX(certData.Certificate, privateKey, certData.CACert, "")
 	if err != nil {
 		log.Printf("转换 PFX 失败: %v", err)
+		sendCallback(d, client, certData.OrderID, certCfg.Domain, false, fmt.Sprintf("转换 PFX 失败: %v", err))
 		return []Result{{Domain: certCfg.Domain, Success: false, Message: fmt.Sprintf("转换 PFX 失败: %v", err), OrderID: certData.OrderID}}
 	}
 	defer removeTempFile(pfxPath)
@@ -853,6 +880,7 @@ func deployCertAutoMode(d *Deployer, client APIClient, certData *api.CertData, p
 		} else if installResult.ErrorMessage != "" {
 			errMsg = installResult.ErrorMessage
 		}
+		sendCallback(d, client, certData.OrderID, certCfg.Domain, false, "安装证书失败: "+errMsg)
 		return []Result{{Domain: certCfg.Domain, Success: false, Message: errMsg, OrderID: certData.OrderID}}
 	}
 
@@ -868,15 +896,22 @@ func deployCertAutoMode(d *Deployer, client APIClient, certData *api.CertData, p
 	matchedBindings, err := d.Binder.FindBindingsForDomains(allDomains)
 	if err != nil {
 		log.Printf("查找 IIS 绑定失败: %v", err)
+		sendCallback(d, client, certData.OrderID, certCfg.Domain, false, fmt.Sprintf("查找 IIS 绑定失败: %v", err))
 		return []Result{{Domain: certCfg.Domain, Success: false, Message: fmt.Sprintf("查找 IIS 绑定失败: %v", err), OrderID: certData.OrderID}}
 	}
 
 	if len(matchedBindings) == 0 {
-		log.Printf("未找到 IIS 中的 SSL 绑定，跳过")
-		return results
+		// 自动模式依赖现存 SSL 绑定发现部署目标，找不到绑定说明部署无法进行
+		// （常见于绑定曾丢失），上报失败让服务端与本地统计均可见，而非静默跳过
+		msg := "自动绑定模式未找到匹配的 IIS SSL 绑定，无法部署"
+		log.Printf("%s (域名: %v)", msg, allDomains)
+		sendCallback(d, client, certData.OrderID, certCfg.Domain, false, msg)
+		return []Result{{Domain: certCfg.Domain, Success: false, Message: msg, OrderID: certData.OrderID}}
 	}
 
-	// 3. 更新匹配的绑定
+	// 3. 更新匹配的绑定（循环内只收集结果，回调按订单聚合到循环后单发）
+	anySuccess := false
+	anyFailure := false
 	for domain, binding := range matchedBindings {
 		host := iis.ParseHostFromBinding(binding.HostnamePort)
 		port := iis.ParsePortFromBinding(binding.HostnamePort)
@@ -893,14 +928,15 @@ func deployCertAutoMode(d *Deployer, client APIClient, certData *api.CertData, p
 		if bindErr != nil {
 			log.Printf("绑定失败: %v", bindErr)
 			results = append(results, Result{Domain: domain, Success: false, Message: bindErr.Error(), Thumbprint: thumbprint, OrderID: certData.OrderID})
-			sendCallback(d, client, certData.OrderID, domain, false, bindErr.Error())
+			anyFailure = true
 		} else {
 			log.Printf("绑定成功: %s", domain)
 			results = append(results, Result{Domain: domain, Success: true, Message: "部署成功", Thumbprint: thumbprint, OrderID: certData.OrderID})
-			sendCallback(d, client, certData.OrderID, domain, true, "")
+			anySuccess = true
 		}
 	}
 
+	sendAggregatedCallback(d, client, certData.OrderID, certCfg.Domain, anySuccess, anyFailure)
 	return results
 }
 
