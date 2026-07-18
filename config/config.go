@@ -55,7 +55,7 @@ func (c *CertAPIConfig) GetToken() (string, error) {
 	}
 	decrypted, err := DecryptToken(c.EncryptedToken)
 	if err != nil {
-		return "", fmt.Errorf("Token 解密失败：配置可能由其他账户加密，请重新运行 setup 重录 Token: %w", err)
+		return "", fmt.Errorf("token 解密失败：配置可能由其他账户加密，请重新运行 setup 重录 Token: %w", err)
 	}
 	return decrypted, nil
 }

@@ -135,10 +135,10 @@ func CreateTask(taskName string) error {
 		return fmt.Errorf("创建任务定义临时文件失败: %v", err)
 	}
 	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	if _, err := tmpFile.Write(encodeUTF16LEWithBOM(xmlContent)); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		return fmt.Errorf("写入任务定义失败: %v", err)
 	}
 	if err := tmpFile.Close(); err != nil {
