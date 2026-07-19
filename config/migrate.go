@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 )
 
@@ -45,6 +46,131 @@ var customMigrations = []func(map[string]interface{}) bool{
 	migrateUpgradeChannel,
 	migrateAPIToken,
 	migrateTokenScope,
+	// 生命周期状态迁移（deploy-spec §1.7）：顺序有意——先归一 pending，
+	// 再阻断非法 IP 配置（优先于计数触顶，根因是配置错误），最后处理旧计数触顶。
+	migratePendingToProcessing,
+	migratePolicyBlockedIP,
+	migrateLegacyCapped,
+}
+
+// migrateStateNormal 判断状态是否为可被生命周期迁移覆盖的常规状态。
+// 终态标记（CAPPED/EXPIRED/policy_blocked）不再被后续规则改写。
+func migrateStateNormal(state string) bool {
+	switch state {
+	case IssueStateCapped, IssueStateExpired, IssueStatePolicyBlocked:
+		return false
+	default:
+		return true
+	}
+}
+
+// certNodeIsIP 判断证书节点的主域名或任一 SAN 是否为 IP 地址
+func certNodeIsIP(node map[string]interface{}) bool {
+	if d, ok := node["domain"].(string); ok && net.ParseIP(strings.TrimSpace(d)) != nil {
+		return true
+	}
+	for _, elem := range getSlice(node, "domains") {
+		if d, ok := elem.(string); ok && net.ParseIP(strings.TrimSpace(d)) != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// certEffectiveRenewMode 计算证书生效续签模式：证书级优先，空则继承全局，全局也空按默认 pull。
+// 迁移在 applyDefaults 之前执行，故全局字段可能缺失，需自行兜底默认值。
+func certEffectiveRenewMode(root, node map[string]interface{}) string {
+	if m, ok := node["renew_mode"].(string); ok && m != "" {
+		return m
+	}
+	if sched, ok := getMap(root, "schedule"); ok {
+		if m, ok := sched["renew_mode"].(string); ok && m != "" {
+			return m
+		}
+	}
+	return "pull"
+}
+
+// metadataNode 取证书节点的 metadata 子对象（不存在则创建）
+func metadataNode(node map[string]interface{}) map[string]interface{} {
+	if meta, ok := getMap(node, "metadata"); ok {
+		return meta
+	}
+	meta := make(map[string]interface{})
+	node["metadata"] = meta
+	return meta
+}
+
+// migratePendingToProcessing 将旧 pending/approving 中间态归一为 processing（deploy-spec §2.4）
+func migratePendingToProcessing(raw map[string]interface{}) bool {
+	changed := false
+	for _, elem := range getSlice(raw, "certificates") {
+		node, ok := elem.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		meta, ok := getMap(node, "metadata")
+		if !ok {
+			continue
+		}
+		if state, _ := meta["last_issue_state"].(string); state == "pending" || state == "approving" {
+			meta["last_issue_state"] = IssueStateProcessing
+			changed = true
+		}
+	}
+	return changed
+}
+
+// migratePolicyBlockedIP 旧非法 IP 配置（IP + pull 或 IP + delegation）迁移为 policy_blocked_needs_setup。
+// 不改动 renew_mode/validation_method，只标记状态；不计数、不回调，等待重新 setup（deploy-spec §5.2）。
+func migratePolicyBlockedIP(raw map[string]interface{}) bool {
+	changed := false
+	for _, elem := range getSlice(raw, "certificates") {
+		node, ok := elem.(map[string]interface{})
+		if !ok || !certNodeIsIP(node) {
+			continue
+		}
+		validation, _ := node["validation_method"].(string)
+		mode := certEffectiveRenewMode(raw, node)
+		illegal := mode == "pull" || validation == ValidationMethodDelegation
+		if !illegal {
+			continue
+		}
+		meta := metadataNode(node)
+		if state, _ := meta["last_issue_state"].(string); !migrateStateNormal(state) {
+			continue
+		}
+		meta["last_issue_state"] = IssueStatePolicyBlocked
+		changed = true
+	}
+	return changed
+}
+
+// migrateLegacyCapped 旧计数 >= 上限的证书升级后立即进入 CAPPED(legacy) 静默，不补发历史事件。
+// 部署计数从零开始，不从旧混合计数推断（deploy-spec §3.2）。
+func migrateLegacyCapped(raw map[string]interface{}) bool {
+	changed := false
+	for _, elem := range getSlice(raw, "certificates") {
+		node, ok := elem.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		meta, ok := getMap(node, "metadata")
+		if !ok {
+			continue
+		}
+		count, _ := meta["issue_retry_count"].(float64) // JSON 数字为 float64
+		if int(count) < MaxIssueRetries {
+			continue
+		}
+		if state, _ := meta["last_issue_state"].(string); !migrateStateNormal(state) {
+			continue
+		}
+		meta["last_issue_state"] = IssueStateCapped
+		meta["cap_phase"] = CapPhaseLegacy
+		changed = true
+	}
+	return changed
 }
 
 // migrateUseLocalKey 将 use_local_key bool 转换为 renew_mode string

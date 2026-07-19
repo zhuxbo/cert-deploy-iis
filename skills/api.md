@@ -89,7 +89,8 @@ Content-Type: application/json
 
 **订单级聚合单发**：一个订单内多个绑定的成败合并为**单条**回调（spec §2.8），
 全部成功→`success`（不含 message）；任一失败→`failure`（message 取首个失败绑定原因）；
-无绑定被处理（全部冲突跳过 / 无匹配）则不产生回调。详见"自动部署运行时行为"。
+全部冲突跳过而没有处理任何绑定时不产生回调；自动绑定模式找不到目标属于明确部署失败，
+产生一条 `failure` 回调。详见“自动部署运行时行为”。
 
 ```
 POST /api/deploy/callback
@@ -246,9 +247,10 @@ Windows 平台以 DPAPI 机器作用域加密的 `encrypted_token` 替代 spec �
 
 **设计意图**：到期前 13 天发起续签，确保使用本地私钥。
 
-**CSR 重试上限**：`issue_retry_count > 10`（代码常量 `maxIssueRetries = 10`）时停止提交，
-跳过并等待人工处理（spec §3.2 前置过滤 / §3.5 Local 模式）；每次提交 CSR 递增计数，
-`active` 部署成功后清零。避免 CA 持续拒签时无限重试。`processing` 状态保持查询等待，不重复提交。
+**尝试上限**：签发尝试（CSR 提交，`issue_retry_count`）与部署尝试
+（`deploy_attempt_count`）分别计数，各自 `>= 10` 时进入 `CAPPED` 并等待人工处理；
+新逻辑意图必须先持久化再执行外部动作，崩溃恢复重放、传输层重试和 `processing`
+查询不重复计数。全部绑定成功后才清零两类计数；部分失败保留部署状态继续收敛。
 
 **重要**：重新签发（reissue）不会改变 OrderID，只有续费（renew）才会生成新 OrderID。
 
@@ -284,7 +286,7 @@ GUI 模式传 `false` 不延迟。区间由启用证书数量 N 决定（`calcSp
 
 ### 部署成功后回填配置
 
-出现成功部署结果且 API 返回证书内容非空时：
+订单内全部绑定成功且 API 返回证书内容非空时，才完成生命周期并回填配置：
 
 - `updateCertDomains`：`cert.ExtractDomainsFromPEM` 从证书 PEM 提取 CN+SAN，覆盖
   `Domain`/`Domains`；提取失败保持原值（既有值来自 API 查询写入）。
@@ -293,9 +295,10 @@ GUI 模式传 `false` 不延迟。区间由启用证书数量 N 决定（`calcSp
 
 ### 订单级聚合回调
 
-一个订单内各绑定的成败在循环内收集，循环后由 `sendAggregatedCallback` 生成**单条**订单级
-回调（spec §2.8）：全成→`success`（无 message）；任一失败→`failure`，message 为
-`"<失败数>/<总数> 绑定失败: <首因>"`；无绑定被处理则不回调。message 由 `api.Client.Callback`
+一个订单内各绑定的成败在循环内收集，由底层部署函数返回 `deployReport`，编排层在结果
+持久化后经 `emitDeployCallback` 生成**单条**订单级回调（spec §2.8）：全成→`success`
+（无 message）；任一失败→`failure`，message 为 `"<失败数>/<总数> 绑定失败: <首因>"`；
+全部冲突跳过时不回调，自动模式无匹配则明确回调失败。message 由 `api.Client.Callback`
 统一脱敏 + 按 rune 截断至 `CallbackMessageMaxRunes = 256`（服务端上限 500）。
 
 ## 证书状态
@@ -305,7 +308,11 @@ GUI 模式传 `false` 不延迟。区间由启用证书数量 N 决定（`calcSp
 | `active` | 有效，可部署 |
 | `processing` | CSR 已提交，等待 CA 签发 |
 | `pending` | 等待提交 |
+| `approving` | `processing` 与 `active` 之间的短暂中间态 |
 | `unpaid` | 未支付 |
+
+客户端将 `pending` / `processing` / `approving` 统一归一为 `processing` 继续等待
+（deploy-spec §2.4）；`active` 之后的状态均为订单终态，持久化后停止自动动作。
 
 ## 重试机制
 

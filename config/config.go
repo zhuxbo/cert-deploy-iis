@@ -29,6 +29,30 @@ const (
 
 	// DefaultUpgradeCheckInterval 默认升级检查间隔（小时）
 	DefaultUpgradeCheckInterval = 24
+
+	// MaxIssueRetries 签发尝试（CSR 提交）上限，`>= MaxIssueRetries` 触顶（deploy-spec §3.2）
+	MaxIssueRetries = 10
+	// MaxDeployAttempts 部署尝试上限，`>= MaxDeployAttempts` 触顶（deploy-spec §3.2）
+	MaxDeployAttempts = 10
+)
+
+// 签发/生命周期状态常量（metadata.last_issue_state，deploy-spec §1.5）
+const (
+	// IssueStateProcessing 等待签发（服务端 pending 统一归一为此状态）
+	IssueStateProcessing = "processing"
+	// IssueStateCapped 触顶静默：签发或部署计数达上限，等待人工处理
+	IssueStateCapped = "CAPPED"
+	// IssueStateExpired 证书已过期，静默终止
+	IssueStateExpired = "EXPIRED"
+	// IssueStatePolicyBlocked 旧非法 IP 配置被策略阻断，等待重新 setup
+	IssueStatePolicyBlocked = "policy_blocked_needs_setup"
+)
+
+// 触顶阶段常量（metadata.cap_phase）
+const (
+	CapPhaseIssue  = "issue"  // 签发计数触顶
+	CapPhaseDeploy = "deploy" // 部署计数触顶
+	CapPhaseLegacy = "legacy" // 旧版本混合计数升级即触顶
 )
 
 // BindRule 绑定规则
@@ -72,15 +96,40 @@ func (c *CertAPIConfig) SetToken(token string) error {
 
 // CertMetadata 证书元数据（spec 1.5）
 type CertMetadata struct {
-	LastDeployAt    string `json:"last_deploy_at,omitempty"`    // 最后部署时间
-	CertExpiresAt   string `json:"cert_expires_at,omitempty"`   // 证书过期时间
-	CertSerial      string `json:"cert_serial,omitempty"`       // 证书序列号
-	CSRSubmittedAt  string `json:"csr_submitted_at,omitempty"`  // CSR 提交时间（仅 local 模式）
-	LastCSRHash     string `json:"last_csr_hash,omitempty"`     // 上次 CSR 的 SHA256 哈希
-	LastIssueState  string `json:"last_issue_state,omitempty"`  // 签发状态
-	IssueRetryCount int    `json:"issue_retry_count,omitempty"` // CSR 提交重试计数
+	LastDeployAt       string `json:"last_deploy_at,omitempty"`       // 最后部署时间
+	CertExpiresAt      string `json:"cert_expires_at,omitempty"`      // 证书过期时间
+	CertSerial         string `json:"cert_serial,omitempty"`          // 证书序列号
+	CSRSubmittedAt     string `json:"csr_submitted_at,omitempty"`     // CSR 提交时间（仅 local 模式）
+	LastCSRHash        string `json:"last_csr_hash,omitempty"`        // 上次 CSR 的 SHA256 哈希
+	LastIssueState     string `json:"last_issue_state,omitempty"`     // 签发/生命周期状态（见 IssueState* 常量）
+	IssueRetryCount    int    `json:"issue_retry_count,omitempty"`    // 签发尝试计数（CSR 提交），>= MaxIssueRetries 触顶
+	DeployAttemptCount int    `json:"deploy_attempt_count,omitempty"` // 部署尝试计数，>= MaxDeployAttempts 触顶；与签发计数分离
+	// 平台内部字段（不参与跨仓协议）
+	CapPhase        string `json:"cap_phase,omitempty"`         // 触顶阶段（CapPhase* 常量），仅 last_issue_state=CAPPED 时有效
+	DeployStartedAt string `json:"deploy_started_at,omitempty"` // 部署意图落盘标记：非空表示一次部署尝试在途，用于崩溃恢复重放判定不重复计数
 	// 平台扩展（IIS）
 	Thumbprint string `json:"thumbprint,omitempty"` // 证书指纹
+}
+
+// IsCapped 是否已触顶静默
+func (m *CertMetadata) IsCapped() bool { return m.LastIssueState == IssueStateCapped }
+
+// IsExpiredState 是否已标记过期静默
+func (m *CertMetadata) IsExpiredState() bool { return m.LastIssueState == IssueStateExpired }
+
+// IsPolicyBlocked 是否被策略阻断（旧非法 IP 配置）
+func (m *CertMetadata) IsPolicyBlocked() bool { return m.LastIssueState == IssueStatePolicyBlocked }
+
+// MarkCapped 标记触顶静默并记录触顶阶段；已处于 CAPPED 时保持首个阶段不变
+func (m *CertMetadata) MarkCapped(phase string) {
+	if m.LastIssueState == IssueStateCapped {
+		if m.CapPhase == "" {
+			m.CapPhase = phase
+		}
+		return
+	}
+	m.LastIssueState = IssueStateCapped
+	m.CapPhase = phase
 }
 
 // CertConfig 证书配置（以证书为维度，spec 1.3）
@@ -116,18 +165,18 @@ type Schedule struct {
 
 // Config 应用配置
 type Config struct {
-	Certificates     []CertConfig `json:"certificates"`              // 证书配置
-	Schedule         Schedule     `json:"schedule"`                  // 续签调度配置
-	LastCheck        string       `json:"last_check"`                // 上次检查时间
-	AutoCheckEnabled bool         `json:"auto_check_enabled"`        // 是否启用自动部署（任务计划）
-	TaskName         string       `json:"task_name"`                 // 任务计划名称
+	Certificates     []CertConfig `json:"certificates"`       // 证书配置
+	Schedule         Schedule     `json:"schedule"`           // 续签调度配置
+	LastCheck        string       `json:"last_check"`         // 上次检查时间
+	AutoCheckEnabled bool         `json:"auto_check_enabled"` // 是否启用自动部署（任务计划）
+	TaskName         string       `json:"task_name"`          // 任务计划名称
 	// 升级配置
-	UpgradeEnabled   bool   `json:"upgrade_enabled"`     // 启用自动检查更新，默认 true
-	UpgradeChannel   string `json:"upgrade_channel"`     // 版本通道: main | dev，默认 main
-	UpgradeInterval  int    `json:"upgrade_interval"`    // 升级检查间隔（小时），默认 24
-	LastUpgradeCheck string `json:"last_upgrade_check"`  // 上次升级检查时间
-	SkippedVersion   string `json:"skipped_version"`     // 用户跳过的版本
-	ReleaseURL       string `json:"release_url"`         // Release API 地址
+	UpgradeEnabled   bool   `json:"upgrade_enabled"`    // 启用自动检查更新，默认 true
+	UpgradeChannel   string `json:"upgrade_channel"`    // 版本通道: main | dev，默认 main
+	UpgradeInterval  int    `json:"upgrade_interval"`   // 升级检查间隔（小时），默认 24
+	LastUpgradeCheck string `json:"last_upgrade_check"` // 上次升级检查时间
+	SkippedVersion   string `json:"skipped_version"`    // 用户跳过的版本
+	ReleaseURL       string `json:"release_url"`        // Release API 地址
 }
 
 // DefaultConfig 默认配置

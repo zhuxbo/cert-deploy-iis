@@ -100,7 +100,7 @@ func TestVerifyDeployKeyPair(t *testing.T) {
 	}
 }
 
-// TestDeployCertWithRules_KeyPairMismatch 规则模式：配对不匹配时不转换不安装，失败结果+失败回调
+// TestDeployCertWithRules_KeyPairMismatch 规则模式：配对不匹配时不转换不安装，返回失败报告且不自行回调
 func TestDeployCertWithRules_KeyPairMismatch(t *testing.T) {
 	certPEM, _ := genSelfSignedPair(t, "a.example.com")
 	_, wrongKey := genSelfSignedPair(t, "b.example.com")
@@ -131,7 +131,7 @@ func TestDeployCertWithRules_KeyPairMismatch(t *testing.T) {
 	}
 	certCfg := makeTestCertConfig(101, "a.example.com", true)
 
-	results := deployCertWithRules(d, client, certData, wrongKey, certCfg, nil, nil)
+	results, rep := deployCertWithRules(d, client, certData, wrongKey, certCfg, nil, nil)
 	d.WaitCallbacks()
 
 	if converterCalled {
@@ -148,16 +148,15 @@ func TestDeployCertWithRules_KeyPairMismatch(t *testing.T) {
 			t.Errorf("失败原因应包含配对信息: %q", r.Message)
 		}
 	}
-	cbs := rec.all()
-	if len(cbs) != 1 {
-		t.Fatalf("回调数量 = %d, want 1", len(cbs))
+	if !rep.report || rep.success || !strings.Contains(rep.message, "不匹配") {
+		t.Fatalf("应返回配对失败报告: %+v", rep)
 	}
-	if cbs[0].Status != "failure" || cbs[0].OrderID != 101 {
-		t.Errorf("回调 = %+v, want failure/101", cbs[0])
+	if cbs := rec.all(); len(cbs) != 0 {
+		t.Fatalf("底层部署函数不得自行发送回调: %+v", cbs)
 	}
 }
 
-// TestDeployCertAutoMode_KeyPairMismatch 自动模式：配对不匹配时不转换不查绑定，失败结果+失败回调
+// TestDeployCertAutoMode_KeyPairMismatch 自动模式：配对不匹配时不转换不查绑定，返回失败报告且不自行回调
 func TestDeployCertAutoMode_KeyPairMismatch(t *testing.T) {
 	certPEM, _ := genSelfSignedPair(t, "a.example.com")
 	_, wrongKey := genSelfSignedPair(t, "b.example.com")
@@ -198,7 +197,7 @@ func TestDeployCertAutoMode_KeyPairMismatch(t *testing.T) {
 		AutoBindMode: true,
 	}
 
-	results := deployCertAutoMode(d, client, certData, wrongKey, certCfg)
+	results, rep := deployCertAutoMode(d, client, certData, wrongKey, certCfg)
 	d.WaitCallbacks()
 
 	if converterCalled {
@@ -210,13 +209,15 @@ func TestDeployCertAutoMode_KeyPairMismatch(t *testing.T) {
 	if len(results) != 1 || results[0].Success {
 		t.Fatalf("应有一条失败结果: %+v", results)
 	}
-	cbs := rec.all()
-	if len(cbs) != 1 || cbs[0].Status != "failure" {
-		t.Fatalf("应收到一条 failure 回调: %+v", cbs)
+	if !rep.report || rep.success {
+		t.Fatalf("应返回失败报告: %+v", rep)
+	}
+	if cbs := rec.all(); len(cbs) != 0 {
+		t.Fatalf("底层部署函数不得自行发送回调: %+v", cbs)
 	}
 }
 
-// TestDeployCertWithRules_ValidPair_Proceeds 配对匹配时正常走转换安装绑定并发 success 回调
+// TestDeployCertWithRules_ValidPair_Proceeds 配对匹配时正常走转换安装绑定并返回成功报告（不自行回调）
 func TestDeployCertWithRules_ValidPair_Proceeds(t *testing.T) {
 	certPEM, keyPEM := genSelfSignedPair(t, "ok.example.com")
 
@@ -246,7 +247,7 @@ func TestDeployCertWithRules_ValidPair_Proceeds(t *testing.T) {
 	}
 	certCfg := makeTestCertConfig(103, "ok.example.com", true)
 
-	results := deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
+	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
 	d.WaitCallbacks()
 
 	if !converterCalled {
@@ -255,8 +256,10 @@ func TestDeployCertWithRules_ValidPair_Proceeds(t *testing.T) {
 	if len(results) != 1 || !results[0].Success {
 		t.Fatalf("应有一条成功结果: %+v", results)
 	}
-	cbs := rec.all()
-	if len(cbs) != 1 || cbs[0].Status != "success" {
-		t.Fatalf("应收到一条 success 回调: %+v", cbs)
+	if !rep.report || !rep.success {
+		t.Fatalf("应返回成功报告: %+v", rep)
+	}
+	if cbs := rec.all(); len(cbs) != 0 {
+		t.Fatalf("底层部署函数不得自行发送回调: %+v", cbs)
 	}
 }

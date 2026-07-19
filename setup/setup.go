@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -140,7 +141,7 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 				result.Skipped++
 				// 补通知服务端续签模式：installCert 是新装唯一通知点，首跑绑定失败不通知，
 				// 重跑走本路径绑定生效后补通知，否则 pull 订单服务端 auto_reissue 永不开启（spec 5.2），到期续签停摆
-				if notify, useLocal := decideReissueNotify(existingCfg, cfgLoadOK, certData.OrderID); notify {
+				if notify, useLocal := deriveSetupPolicy(certData, existingCfg, cfgLoadOK); notify {
 					toggleAutoReissue(client, certData.OrderID, useLocal)
 				}
 				certConfigs = append(certConfigs, makeCertConfig(certData, opts, serialNumber))
@@ -158,7 +159,7 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 		}
 
 		log.Printf("证书 %s 使用 %s 私钥", certData.Domain(), source)
-		notify, useLocal := decideReissueNotify(existingCfg, cfgLoadOK, certData.OrderID)
+		notify, useLocal := deriveSetupPolicy(certData, existingCfg, cfgLoadOK)
 		if ok := installCert(client, certData, keyPEM, serialNumber, opts, &certConfigs, result, notify, useLocal); !ok {
 			result.Failed++
 		}
@@ -202,7 +203,7 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 				continue
 			}
 
-			notify, useLocal := decideReissueNotify(existingCfg, cfgLoadOK, nk.certData.OrderID)
+			notify, useLocal := deriveSetupPolicy(nk.certData, existingCfg, cfgLoadOK)
 			if ok := installCert(client, nk.certData, keyPEM, nk.serialNumber, opts, &certConfigs, result, notify, useLocal); !ok {
 				result.Failed++
 			}
@@ -391,7 +392,31 @@ func bindCertToIIS(certData api.CertData, thumbprint string) (bindResult, error)
 		allDomains = []string{certData.Domain()}
 	}
 
-	httpsMatches, httpMatches, err := iis.FindMatchingBindings(allDomains)
+	ips, dnsNames := splitBindingNames(allDomains)
+	var bindErrs []error
+	if len(dnsNames) > 0 {
+		dnsResult, err := bindDNSCertToIIS(dnsNames, thumbprint)
+		br.Succeeded += dnsResult.Succeeded
+		br.Failed += dnsResult.Failed
+		if err != nil {
+			bindErrs = append(bindErrs, err)
+		}
+	}
+	if len(ips) > 0 {
+		ipResult, err := bindIPCertToIIS(ips, thumbprint)
+		br.Succeeded += ipResult.Succeeded
+		br.Failed += ipResult.Failed
+		if err != nil {
+			bindErrs = append(bindErrs, err)
+		}
+	}
+	return br, errors.Join(bindErrs...)
+}
+
+// bindDNSCertToIIS 为 DNS SAN 查找并更新 SNI 绑定。
+func bindDNSCertToIIS(domains []string, thumbprint string) (bindResult, error) {
+	var br bindResult
+	httpsMatches, httpMatches, err := iis.FindMatchingBindings(domains)
 	if err != nil {
 		log.Printf("查找 IIS 绑定失败: %v", err)
 		return br, fmt.Errorf("查找 IIS 绑定失败: %w", err)
@@ -422,6 +447,44 @@ func bindCertToIIS(certData api.CertData, thumbprint string) (bindResult, error)
 			log.Printf("添加绑定: %s:%d (站点: %s)", match.Host, match.Port, match.SiteName)
 			br.Succeeded++
 		}
+	}
+
+	return br, nil
+}
+
+// bindIPCertToIIS 为 IP 证书执行 IP 绑定（ipport）。
+// 先定位承载该 IP 的空 Host 站点并 best-effort 补齐 https 绑定，再经 netsh 绑定证书到具体 IP:端口；
+// 绑定到具体 IP 而非通配 0.0.0.0，避免隐式覆盖同端口其他证书；netsh 层的复验/回滚在替换失败时
+// 恢复旧绑定，状态未知时不做破坏性回滚（deploy-spec §5.2）。
+func bindIPCertToIIS(ips []string, thumbprint string) (bindResult, error) {
+	var br bindResult
+
+	sites, scanErr := iis.ScanSites()
+	if scanErr != nil {
+		log.Printf("扫描 IIS 站点失败（仅执行 netsh 证书绑定）: %v", scanErr)
+	}
+
+	for _, ip := range ips {
+		port := 443
+		if scanErr == nil {
+			if siteName, found := iis.FindEmptyHostSiteForIP(sites, ip, port); found {
+				if err := iis.AddIPHttpsBindingIfNotExists(siteName, ip, port); err != nil {
+					log.Printf("为站点 %s 补齐 IP HTTPS 绑定 %s:%d 失败: %v", siteName, ip, port, err)
+				} else {
+					log.Printf("IP 证书站点定位: %s -> %s:%d", siteName, ip, port)
+				}
+			} else {
+				log.Printf("警告: 未定位到 IP %s:%d 的空 Host 站点，请确认已配置 IP 绑定站点", ip, port)
+			}
+		}
+
+		if err := iis.BindCertificateByIP(ip, port, thumbprint); err != nil {
+			log.Printf("IP 绑定 %s:%d 失败: %v", ip, port, err)
+			br.Failed++
+			continue
+		}
+		log.Printf("IP 绑定成功: %s:%d", ip, port)
+		br.Succeeded++
 	}
 
 	return br, nil
@@ -461,7 +524,9 @@ func decideExistingCert(br bindResult, bindErr error) existingBindDecision {
 	return existingBindDecision{Deployed: ok, Reason: reason}
 }
 
-// makeCertConfig 创建证书配置
+// makeCertConfig 创建证书配置。
+// SAN 含 IP 的证书自动派生为 local + file，并为全部 DNS/IP SAN 生成显式绑定规则，
+// 续签时分别走 SNI 与 ipport；不自动开启付费 auto_renew（deploy-spec §1.4 / §5.2）。
 func makeCertConfig(certData api.CertData, opts Options, serialNumber string) config.CertConfig {
 	certAPI := config.CertAPIConfig{URL: opts.URL}
 	certAPI.SetToken(opts.Token)
@@ -469,7 +534,7 @@ func makeCertConfig(certData api.CertData, opts Options, serialNumber string) co
 	// 优先从证书 PEM 提取域名（包含完整 SAN），API 数据作为回退
 	domains := extractDomainsWithFallback(certData)
 
-	return config.CertConfig{
+	cfg := config.CertConfig{
 		CertName:     fmt.Sprintf("%s-%d", certData.Domain(), certData.OrderID),
 		OrderID:      certData.OrderID,
 		Domain:       certData.Domain(),
@@ -483,6 +548,20 @@ func makeCertConfig(certData api.CertData, opts Options, serialNumber string) co
 			CertSerial:    serialNumber,
 		},
 	}
+
+	// 含 IP SAN 的证书派生：强制 local/file，并为全部 DNS/IP SAN 生成显式规则。
+	if ips := ipSANs(domains); len(ips) > 0 {
+		cfg.RenewMode = "local"
+		cfg.ValidationMethod = config.ValidationMethodFile
+		cfg.AutoBindMode = false
+		rules := make([]config.BindRule, 0, len(domains))
+		for _, domain := range domains {
+			rules = append(rules, config.BindRule{Domain: domain, Port: 443})
+		}
+		cfg.BindRules = rules
+	}
+
+	return cfg
 }
 
 // extractDomainsWithFallback 优先从证书 PEM 提取域名，失败则回退到 API 数据
@@ -494,6 +573,40 @@ func extractDomainsWithFallback(certData api.CertData) []string {
 		}
 	}
 	return certData.GetDomainList()
+}
+
+// ipSANs 返回域名列表中所有 IP 地址形式的 SAN（IPv4/IPv6）
+func ipSANs(domains []string) []string {
+	ips := make([]string, 0)
+	for _, d := range domains {
+		if net.ParseIP(strings.TrimSpace(d)) != nil {
+			ips = append(ips, strings.TrimSpace(d))
+		}
+	}
+	return ips
+}
+
+// splitBindingNames 将 SAN 分为 IP 与 DNS 两组，混合证书两类绑定都必须部署。
+func splitBindingNames(domains []string) (ips, dnsNames []string) {
+	for _, domain := range domains {
+		name := strings.TrimSpace(domain)
+		if net.ParseIP(name) != nil {
+			ips = append(ips, name)
+		} else if name != "" {
+			dnsNames = append(dnsNames, name)
+		}
+	}
+	return ips, dnsNames
+}
+
+// deriveSetupPolicy 决定 setup 的续签模式通知策略：
+// SAN 含 IP 的证书强制 local（auto_reissue=false，通知安全无副作用，不受 cfgLoadOK 限制）；
+// 其余证书沿用现有配置判定（decideReissueNotify）。
+func deriveSetupPolicy(certData api.CertData, existingCfg *config.Config, cfgLoadOK bool) (notify, useLocalKey bool) {
+	if len(ipSANs(extractDomainsWithFallback(certData))) > 0 {
+		return true, true
+	}
+	return decideReissueNotify(existingCfg, cfgLoadOK, certData.OrderID)
 }
 
 // saveSetupConfig 保存 setup 生成的证书配置

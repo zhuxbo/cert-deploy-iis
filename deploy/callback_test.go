@@ -41,7 +41,10 @@ func autoModeCertData(t *testing.T, orderID int, domain string) (*api.CertData, 
 	return certData, keyPEM, certCfg
 }
 
-// TestDeployCertAutoMode_NoBindings_ReportsFailure 自动模式未找到绑定应上报失败而非静默跳过
+// deployCertWithRules / deployCertAutoMode 只返回结构化报告，绝不自行发送回调（deploy-spec §2.8）。
+// 以下用例断言：底层函数返回正确的 deployReport，且回调记录器为空（未产生任何回调）。
+
+// TestDeployCertAutoMode_NoBindings_ReportsFailure 自动模式未找到绑定：报告失败，但不自行回调
 func TestDeployCertAutoMode_NoBindings_ReportsFailure(t *testing.T) {
 	certData, keyPEM, certCfg := autoModeCertData(t, 201, "nobind.example.com")
 	rec := &callbackRecorder{}
@@ -56,26 +59,25 @@ func TestDeployCertAutoMode_NoBindings_ReportsFailure(t *testing.T) {
 	}
 	client := newRecordingClient(rec)
 
-	results := deployCertAutoMode(d, client, certData, keyPEM, certCfg)
+	results, rep := deployCertAutoMode(d, client, certData, keyPEM, certCfg)
 	d.WaitCallbacks()
 
-	if len(results) != 1 {
-		t.Fatalf("results 数量 = %d, want 1", len(results))
-	}
-	if results[0].Success {
-		t.Errorf("未找到绑定应为失败结果: %+v", results[0])
+	if len(results) != 1 || results[0].Success {
+		t.Fatalf("未找到绑定应为失败结果: %+v", results)
 	}
 	if !strings.Contains(results[0].Message, "未找到匹配") {
 		t.Errorf("失败原因应说明未找到绑定: %q", results[0].Message)
 	}
-	cbs := rec.all()
-	if len(cbs) != 1 || cbs[0].Status != "failure" || cbs[0].OrderID != 201 {
-		t.Fatalf("应收到一条 failure 回调: %+v", cbs)
+	if !rep.report || rep.success || !strings.Contains(rep.message, "未找到匹配") {
+		t.Fatalf("应返回可回调的失败报告: %+v", rep)
+	}
+	if cbs := rec.all(); len(cbs) != 0 {
+		t.Fatalf("底层部署函数不得自行发送回调: %+v", cbs)
 	}
 }
 
-// TestDeployCertAutoMode_FindBindingsError_SendsCallback 查绑定出错应发失败回调
-func TestDeployCertAutoMode_FindBindingsError_SendsCallback(t *testing.T) {
+// TestDeployCertAutoMode_FindBindingsError_ReportsFailure 查绑定出错：报告失败，不自行回调
+func TestDeployCertAutoMode_FindBindingsError_ReportsFailure(t *testing.T) {
 	certData, keyPEM, certCfg := autoModeCertData(t, 202, "finderr.example.com")
 	rec := &callbackRecorder{}
 
@@ -89,20 +91,22 @@ func TestDeployCertAutoMode_FindBindingsError_SendsCallback(t *testing.T) {
 	}
 	client := newRecordingClient(rec)
 
-	results := deployCertAutoMode(d, client, certData, keyPEM, certCfg)
+	results, rep := deployCertAutoMode(d, client, certData, keyPEM, certCfg)
 	d.WaitCallbacks()
 
 	if len(results) != 1 || results[0].Success {
 		t.Fatalf("应有一条失败结果: %+v", results)
 	}
-	cbs := rec.all()
-	if len(cbs) != 1 || cbs[0].Status != "failure" {
-		t.Fatalf("应收到一条 failure 回调: %+v", cbs)
+	if !rep.report || rep.success {
+		t.Fatalf("应返回失败报告: %+v", rep)
+	}
+	if cbs := rec.all(); len(cbs) != 0 {
+		t.Fatalf("底层部署函数不得自行发送回调: %+v", cbs)
 	}
 }
 
-// TestDeployCertAutoMode_ConvertFail_SendsCallback 转换失败应发失败回调
-func TestDeployCertAutoMode_ConvertFail_SendsCallback(t *testing.T) {
+// TestDeployCertAutoMode_ConvertFail_ReportsFailure 转换失败：报告失败，不自行回调
+func TestDeployCertAutoMode_ConvertFail_ReportsFailure(t *testing.T) {
 	certData, keyPEM, certCfg := autoModeCertData(t, 203, "convfail.example.com")
 	rec := &callbackRecorder{}
 
@@ -116,20 +120,22 @@ func TestDeployCertAutoMode_ConvertFail_SendsCallback(t *testing.T) {
 	}
 	client := newRecordingClient(rec)
 
-	results := deployCertAutoMode(d, client, certData, keyPEM, certCfg)
+	results, rep := deployCertAutoMode(d, client, certData, keyPEM, certCfg)
 	d.WaitCallbacks()
 
 	if len(results) != 1 || results[0].Success {
 		t.Fatalf("应有一条失败结果: %+v", results)
 	}
-	cbs := rec.all()
-	if len(cbs) != 1 || cbs[0].Status != "failure" || cbs[0].OrderID != 203 {
-		t.Fatalf("应收到一条 failure 回调: %+v", cbs)
+	if !rep.report || rep.success || !strings.Contains(rep.message, "转换 PFX 失败") {
+		t.Fatalf("应返回转换失败报告: %+v", rep)
+	}
+	if cbs := rec.all(); len(cbs) != 0 {
+		t.Fatalf("底层部署函数不得自行发送回调: %+v", cbs)
 	}
 }
 
-// TestDeployCertAutoMode_InstallFail_SendsCallback 安装失败应发失败回调
-func TestDeployCertAutoMode_InstallFail_SendsCallback(t *testing.T) {
+// TestDeployCertAutoMode_InstallFail_ReportsFailure 安装失败：报告失败，不自行回调
+func TestDeployCertAutoMode_InstallFail_ReportsFailure(t *testing.T) {
 	certData, keyPEM, certCfg := autoModeCertData(t, 204, "instfail.example.com")
 	rec := &callbackRecorder{}
 
@@ -143,20 +149,22 @@ func TestDeployCertAutoMode_InstallFail_SendsCallback(t *testing.T) {
 	}
 	client := newRecordingClient(rec)
 
-	results := deployCertAutoMode(d, client, certData, keyPEM, certCfg)
+	results, rep := deployCertAutoMode(d, client, certData, keyPEM, certCfg)
 	d.WaitCallbacks()
 
 	if len(results) != 1 || results[0].Success {
 		t.Fatalf("应有一条失败结果: %+v", results)
 	}
-	cbs := rec.all()
-	if len(cbs) != 1 || cbs[0].Status != "failure" {
-		t.Fatalf("应收到一条 failure 回调: %+v", cbs)
+	if !rep.report || rep.success || !strings.Contains(rep.message, "安装证书失败") {
+		t.Fatalf("应返回安装失败报告: %+v", rep)
+	}
+	if cbs := rec.all(); len(cbs) != 0 {
+		t.Fatalf("底层部署函数不得自行发送回调: %+v", cbs)
 	}
 }
 
-// TestDeployCertWithRules_ConvertFail_SendsCallback 规则模式转换失败发一条失败回调
-func TestDeployCertWithRules_ConvertFail_SendsCallback(t *testing.T) {
+// TestDeployCertWithRules_ConvertFail_ReportsFailure 规则模式转换失败：报告失败，不自行回调
+func TestDeployCertWithRules_ConvertFail_ReportsFailure(t *testing.T) {
 	certPEM, keyPEM := genSelfSignedPair(t, "rulesconv.example.com")
 	rec := &callbackRecorder{}
 
@@ -179,15 +187,17 @@ func TestDeployCertWithRules_ConvertFail_SendsCallback(t *testing.T) {
 	}
 	certCfg := makeTestCertConfig(205, "rulesconv.example.com", true)
 
-	results := deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
+	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
 	d.WaitCallbacks()
 
 	if len(results) != 1 || results[0].Success {
 		t.Fatalf("应有一条失败结果: %+v", results)
 	}
-	cbs := rec.all()
-	if len(cbs) != 1 || cbs[0].Status != "failure" || cbs[0].OrderID != 205 {
-		t.Fatalf("应收到一条 failure 回调: %+v", cbs)
+	if !rep.report || rep.success {
+		t.Fatalf("应返回失败报告: %+v", rep)
+	}
+	if cbs := rec.all(); len(cbs) != 0 {
+		t.Fatalf("底层部署函数不得自行发送回调: %+v", cbs)
 	}
 }
 
@@ -216,8 +226,8 @@ func rulesCertData(t *testing.T, orderID int, domain string, ruleDomains ...stri
 	return certData, keyPEM, certCfg
 }
 
-// TestDeployCertWithRules_MixedBindings_SingleFailureCallback 多绑定一成一败：按订单聚合仅一条 failure 回调
-func TestDeployCertWithRules_MixedBindings_SingleFailureCallback(t *testing.T) {
+// TestDeployCertWithRules_MixedBindings_ReportsAggregatedFailure 多绑定一成一败：聚合为单条失败报告
+func TestDeployCertWithRules_MixedBindings_ReportsAggregatedFailure(t *testing.T) {
 	certData, keyPEM, certCfg := rulesCertData(t, 210, "multi.example.com", "ok.example.com", "fail.example.com")
 	rec := &callbackRecorder{}
 
@@ -234,20 +244,22 @@ func TestDeployCertWithRules_MixedBindings_SingleFailureCallback(t *testing.T) {
 	}
 	client := newRecordingClient(rec)
 
-	results := deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
+	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
 	d.WaitCallbacks()
 
 	if len(results) != 2 {
 		t.Fatalf("应有两条绑定结果: %+v", results)
 	}
-	cbs := rec.all()
-	if len(cbs) != 1 || cbs[0].Status != "failure" || cbs[0].OrderID != 210 {
-		t.Fatalf("多绑定混合成败应仅一条 failure 回调: %+v", cbs)
+	if !rep.report || rep.success {
+		t.Fatalf("多绑定混合成败应聚合为失败报告: %+v", rep)
+	}
+	if cbs := rec.all(); len(cbs) != 0 {
+		t.Fatalf("底层部署函数不得自行发送回调: %+v", cbs)
 	}
 }
 
-// TestDeployCertWithRules_AllSuccess_SingleSuccessCallback 多绑定全成功：按订单聚合仅一条 success 回调
-func TestDeployCertWithRules_AllSuccess_SingleSuccessCallback(t *testing.T) {
+// TestDeployCertWithRules_AllSuccess_ReportsSuccess 多绑定全成功：聚合为单条成功报告
+func TestDeployCertWithRules_AllSuccess_ReportsSuccess(t *testing.T) {
 	certData, keyPEM, certCfg := rulesCertData(t, 211, "allok.example.com", "a.example.com", "b.example.com")
 	rec := &callbackRecorder{}
 
@@ -259,15 +271,74 @@ func TestDeployCertWithRules_AllSuccess_SingleSuccessCallback(t *testing.T) {
 	}
 	client := newRecordingClient(rec)
 
-	results := deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
+	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
 	d.WaitCallbacks()
 
 	if len(results) != 2 {
 		t.Fatalf("应有两条绑定结果: %+v", results)
 	}
-	cbs := rec.all()
-	if len(cbs) != 1 || cbs[0].Status != "success" || cbs[0].OrderID != 211 {
-		t.Fatalf("多绑定全成功应仅一条 success 回调: %+v", cbs)
+	if !rep.report || !rep.success || rep.message != "" {
+		t.Fatalf("多绑定全成功应聚合为无 message 的成功报告: %+v", rep)
+	}
+	if cbs := rec.all(); len(cbs) != 0 {
+		t.Fatalf("底层部署函数不得自行发送回调: %+v", cbs)
+	}
+}
+
+// TestDeployCertWithRules_AllConflictsSkipped_NoReport 全部冲突跳过：无绑定被处理，不产生回调
+func TestDeployCertWithRules_AllConflictsSkipped_NoReport(t *testing.T) {
+	certData, keyPEM, certCfg := rulesCertData(t, 213, "conflict.example.com", "shared.example.com")
+	// shared.example.com 冲突且最佳证书是另一个订单（索引 1）
+	other := config.CertConfig{OrderID: 999, Metadata: config.CertMetadata{CertExpiresAt: "2099-12-31"},
+		BindRules: []config.BindRule{{Domain: "shared.example.com", Port: 443}}}
+	allCerts := []config.CertConfig{certCfg, other}
+	conflicts := map[string][]int{"shared.example.com": {0, 1}}
+	rec := &callbackRecorder{}
+
+	d := &Deployer{
+		Converter: &MockCertConverter{},
+		Installer: &MockCertInstaller{},
+		Binder:    &MockIISBinder{},
+		Store:     &MockOrderStore{},
+	}
+	client := newRecordingClient(rec)
+
+	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, conflicts, allCerts)
+	d.WaitCallbacks()
+
+	if len(results) != 0 {
+		t.Fatalf("全部冲突跳过应无绑定结果: %+v", results)
+	}
+	if rep.report {
+		t.Fatalf("无绑定被处理时不应产生回调报告: %+v", rep)
+	}
+	if cbs := rec.all(); len(cbs) != 0 {
+		t.Fatalf("不应发送任何回调: %+v", cbs)
+	}
+}
+
+// TestReportFromOutcome 由聚合绑定结果生成部署报告（纯函数）
+func TestReportFromOutcome(t *testing.T) {
+	tests := []struct {
+		name        string
+		outcome     bindOutcome
+		wantReport  bool
+		wantSuccess bool
+		wantMsg     string
+	}{
+		{"零处理不回调", bindOutcome{}, false, false, ""},
+		{"全成功", bindOutcome{success: 2}, true, true, ""},
+		{"全失败带首因", bindOutcome{failed: 2, firstFail: "a: x"}, true, false, "2/2 绑定失败: a: x"},
+		{"部分失败带首因", bindOutcome{success: 1, failed: 1, firstFail: "b: y"}, true, false, "1/2 绑定失败: b: y"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := reportFromOutcome(tt.outcome)
+			if got.report != tt.wantReport || got.success != tt.wantSuccess || got.message != tt.wantMsg {
+				t.Errorf("reportFromOutcome(%+v) = %+v, want report=%v success=%v msg=%q",
+					tt.outcome, got, tt.wantReport, tt.wantSuccess, tt.wantMsg)
+			}
+		})
 	}
 }
 
@@ -293,11 +364,10 @@ func TestAggregatedFailureMessage(t *testing.T) {
 	}
 }
 
-// TestDeployCertWithRules_AggregatedFailureMessage 规则模式聚合 failure 回调携带 "N/M 绑定失败: 首因"
+// TestDeployCertWithRules_AggregatedFailureMessage 规则模式聚合失败报告携带 "N/M 绑定失败: 首因"
 func TestDeployCertWithRules_AggregatedFailureMessage(t *testing.T) {
 	// 规则顺序确定（slice）：ok 先成功，fail 后失败 → 1/2 绑定失败，首因取 fail
 	certData, keyPEM, certCfg := rulesCertData(t, 220, "multi.example.com", "ok.example.com", "fail.example.com")
-	rec := &callbackRecorder{}
 
 	d := &Deployer{
 		Converter: &MockCertConverter{},
@@ -310,51 +380,19 @@ func TestDeployCertWithRules_AggregatedFailureMessage(t *testing.T) {
 		}},
 		Store: &MockOrderStore{},
 	}
-	client := newRecordingClient(rec)
 
-	deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
-	d.WaitCallbacks()
+	_, rep := deployCertWithRules(d, NewMockClient(), certData, keyPEM, certCfg, nil, nil)
 
-	cbs := rec.all()
-	if len(cbs) != 1 || cbs[0].Status != "failure" {
-		t.Fatalf("应仅一条 failure 回调: %+v", cbs)
-	}
 	wantMsg := "1/2 绑定失败: fail.example.com: netsh 绑定失败"
-	if cbs[0].Message != wantMsg {
-		t.Errorf("聚合 failure message = %q, want %q", cbs[0].Message, wantMsg)
+	if rep.success || rep.message != wantMsg {
+		t.Errorf("聚合失败报告 message = %q, want %q", rep.message, wantMsg)
 	}
 }
 
-// TestDeployCertWithRules_SuccessCallbackNoMessage 全成功聚合 success 回调不携带 message
-func TestDeployCertWithRules_SuccessCallbackNoMessage(t *testing.T) {
-	certData, keyPEM, certCfg := rulesCertData(t, 221, "allok.example.com", "a.example.com", "b.example.com")
-	rec := &callbackRecorder{}
-
-	d := &Deployer{
-		Converter: &MockCertConverter{},
-		Installer: &MockCertInstaller{},
-		Binder:    &MockIISBinder{}, // 默认全部绑定成功
-		Store:     &MockOrderStore{},
-	}
-	client := newRecordingClient(rec)
-
-	deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
-	d.WaitCallbacks()
-
-	cbs := rec.all()
-	if len(cbs) != 1 || cbs[0].Status != "success" {
-		t.Fatalf("应仅一条 success 回调: %+v", cbs)
-	}
-	if cbs[0].Message != "" {
-		t.Errorf("success 回调不应携带 message，实际 = %q", cbs[0].Message)
-	}
-}
-
-// TestDeployCertAutoMode_MixedBindings_SingleFailureCallback 自动模式多绑定一成一败：仅一条 failure 回调
-func TestDeployCertAutoMode_MixedBindings_SingleFailureCallback(t *testing.T) {
+// TestDeployCertAutoMode_MixedBindings_ReportsAggregatedFailure 自动模式多绑定一成一败：聚合失败报告
+func TestDeployCertAutoMode_MixedBindings_ReportsAggregatedFailure(t *testing.T) {
 	certData, keyPEM, certCfg := autoModeCertData(t, 212, "auto.example.com")
 	certCfg.Domains = []string{"ok.example.com", "fail.example.com"}
-	rec := &callbackRecorder{}
 
 	d := &Deployer{
 		Converter: &MockCertConverter{},
@@ -375,16 +413,73 @@ func TestDeployCertAutoMode_MixedBindings_SingleFailureCallback(t *testing.T) {
 		},
 		Store: &MockOrderStore{},
 	}
-	client := newRecordingClient(rec)
 
-	results := deployCertAutoMode(d, client, certData, keyPEM, certCfg)
-	d.WaitCallbacks()
+	results, rep := deployCertAutoMode(d, NewMockClient(), certData, keyPEM, certCfg)
 
 	if len(results) != 2 {
 		t.Fatalf("应有两条绑定结果: %+v", results)
 	}
-	cbs := rec.all()
-	if len(cbs) != 1 || cbs[0].Status != "failure" || cbs[0].OrderID != 212 {
-		t.Fatalf("自动模式多绑定混合成败应仅一条 failure 回调: %+v", cbs)
+	if !rep.report || rep.success {
+		t.Fatalf("自动模式多绑定混合成败应聚合为失败报告: %+v", rep)
+	}
+}
+
+// TestEmitDeployCallback 编排层按部署报告发送回调：无处理不发、成功发一条、失败发一条、触顶标注上限
+func TestEmitDeployCallback(t *testing.T) {
+	tests := []struct {
+		name       string
+		rep        deployReport
+		atRetryCap bool
+		wantCount  int
+		wantStatus string
+		wantMsgHas string
+		wantNoMsg  bool
+	}{
+		{"无处理不回调", deployReport{report: false}, false, 0, "", "", false},
+		{"成功回调无 message", deployReport{report: true, success: true}, false, 1, "success", "", true},
+		{"失败回调带原因", deployReport{report: true, success: false, message: "绑定失败: x"}, false, 1, "failure", "绑定失败: x", false},
+		{"第10次失败标注上限", deployReport{report: true, success: false, message: "绑定失败: x"}, true, 1, "failure", retryCapNotice, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &callbackRecorder{}
+			d := NewMockDeployer()
+			client := newRecordingClient(rec)
+
+			emitDeployCallback(d, client, 300, "example.com", tt.rep, tt.atRetryCap)
+			d.WaitCallbacks()
+
+			cbs := rec.all()
+			if len(cbs) != tt.wantCount {
+				t.Fatalf("回调数量 = %d, want %d (%+v)", len(cbs), tt.wantCount, cbs)
+			}
+			if tt.wantCount == 0 {
+				return
+			}
+			if cbs[0].Status != tt.wantStatus {
+				t.Errorf("回调状态 = %q, want %q", cbs[0].Status, tt.wantStatus)
+			}
+			if tt.wantNoMsg && cbs[0].Message != "" {
+				t.Errorf("成功回调不应携带 message, got %q", cbs[0].Message)
+			}
+			if tt.wantMsgHas != "" && !strings.Contains(cbs[0].Message, tt.wantMsgHas) {
+				t.Errorf("回调 message = %q, want contains %q", cbs[0].Message, tt.wantMsgHas)
+			}
+		})
+	}
+}
+
+// TestAppendRetryCapNotice 触顶标注纯函数：空串直接返回标注，非空追加且幂等
+func TestAppendRetryCapNotice(t *testing.T) {
+	if got := appendRetryCapNotice(""); got != retryCapNotice {
+		t.Errorf("空串应返回标注本身: %q", got)
+	}
+	base := "绑定失败: x"
+	once := appendRetryCapNotice(base)
+	if !strings.Contains(once, retryCapNotice) || !strings.Contains(once, base) {
+		t.Errorf("非空应追加标注: %q", once)
+	}
+	if twice := appendRetryCapNotice(once); twice != once {
+		t.Errorf("重复追加应幂等: %q -> %q", once, twice)
 	}
 }

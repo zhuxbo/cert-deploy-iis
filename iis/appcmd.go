@@ -236,6 +236,87 @@ func AddHttpsBindingIfNotExists(siteName, host string, port int) error {
 	return nil
 }
 
+// ipBindingInformation 构造 IIS IP 绑定的 bindingInformation（IP:Port: 空主机名）。
+// IPv6 地址加方括号（[::1]:443:），IPv4/通配符直接拼接（0.0.0.0:443:）。
+func ipBindingInformation(ip string, port int) string {
+	if strings.Contains(ip, ":") && !strings.HasPrefix(ip, "[") {
+		return fmt.Sprintf("[%s]:%d:", ip, port)
+	}
+	return fmt.Sprintf("%s:%d:", ip, port)
+}
+
+// AddIPHttpsBindingIfNotExists 为站点添加空主机名的 IP HTTPS 绑定（sslFlags=0，非 SNI），已存在则忽略。
+// 用于 IP 证书：IIS 需在该 IP:端口 有空 Host 的 https 绑定才能提供 TLS；证书绑定另由 netsh 完成。
+func AddIPHttpsBindingIfNotExists(siteName, ip string, port int) error {
+	if port == 0 {
+		port = 443
+	}
+	if err := util.ValidateSiteName(siteName); err != nil {
+		return fmt.Errorf("无效的站点名称: %w", err)
+	}
+	if err := util.ValidateIP(ip); err != nil {
+		return fmt.Errorf("无效的 IP 地址: %w", err)
+	}
+	if err := util.ValidatePort(port); err != nil {
+		return fmt.Errorf("无效的端口: %w", err)
+	}
+
+	// IP 绑定不启用 SNI（sslFlags 省略即 0）
+	bindingInfo := ipBindingInformation(ip, port)
+	output, err := util.RunCmdCombined(getAppcmdPath(), "set", "site",
+		fmt.Sprintf("/site.name:%s", siteName),
+		fmt.Sprintf("/+bindings.[protocol='https',bindingInformation='%s']", bindingInfo))
+
+	if err != nil {
+		if !strings.Contains(output, "already exists") && !strings.Contains(output, "已存在") {
+			return fmt.Errorf("添加 IP HTTPS 绑定失败: %v, 输出: %s", err, output)
+		}
+	}
+
+	return nil
+}
+
+// ipMatchesBinding 判断 IIS 绑定的 IP 字段是否承载目标 IP（通配 0.0.0.0/* 承载任意 IP）
+func ipMatchesBinding(bindingIP, targetIP string) bool {
+	if bindingIP == "" || bindingIP == "*" || bindingIP == "0.0.0.0" {
+		return true
+	}
+	return strings.EqualFold(strings.Trim(bindingIP, "[]"), strings.Trim(targetIP, "[]"))
+}
+
+// FindEmptyHostSiteForIP 定位可承载 IP 证书（空主机名 ipport 绑定）的 IIS 站点（纯函数）。
+// 优先匹配已有空 Host 且 IP/端口匹配（或通配 IP）的绑定；否则回退到唯一的空 Host http:80 站点。
+func FindEmptyHostSiteForIP(sites []SiteInfo, ip string, port int) (string, bool) {
+	for _, site := range sites {
+		for _, b := range site.Bindings {
+			if b.Host != "" || b.Port != port {
+				continue
+			}
+			if ipMatchesBinding(b.IP, ip) {
+				return site.Name, true
+			}
+		}
+	}
+
+	candidates := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, site := range sites {
+		for _, b := range site.Bindings {
+			if b.Host != "" || !strings.EqualFold(b.Protocol, "http") || b.Port != 80 {
+				continue
+			}
+			if !seen[site.Name] {
+				seen[site.Name] = true
+				candidates = append(candidates, site.Name)
+			}
+		}
+	}
+	if len(candidates) == 1 {
+		return candidates[0], true
+	}
+	return "", false
+}
+
 // RemoveHttpsBinding 移除 HTTPS 绑定
 func RemoveHttpsBinding(siteName, host string, port int) error {
 	if port == 0 {
@@ -527,4 +608,3 @@ func GetSitePhysicalPathByDomain(domain string) (string, string, error) {
 
 	return "", "", fmt.Errorf("未找到域名 %s 对应的站点", domain)
 }
-

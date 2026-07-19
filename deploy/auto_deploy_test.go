@@ -577,7 +577,7 @@ func TestDeployCertWithRules(t *testing.T) {
 		conflicts := map[string][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
+		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -616,7 +616,7 @@ func TestDeployCertWithRules(t *testing.T) {
 		conflicts := map[string][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
+		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
 
 		if len(results) != 2 {
 			t.Fatalf("期望 2 个结果（每个 BindRule 域名一个），得到 %d 个", len(results))
@@ -645,7 +645,7 @@ func TestDeployCertWithRules(t *testing.T) {
 		conflicts := map[string][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
+		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -684,7 +684,7 @@ func TestDeployCertWithRules(t *testing.T) {
 		conflicts := map[string][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
+		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
 
 		if len(results) != 2 {
 			t.Fatalf("期望 2 个结果，得到 %d 个", len(results))
@@ -734,7 +734,7 @@ func TestDeployCertWithRules(t *testing.T) {
 			"shared.com": {0, 1},
 		}
 
-		results := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
+		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
 
 		// shared.com 应该被跳过（certCfg2 的 ExpiresAt 更晚，OrderID=200 优先）
 		// 只有 unique.com 会被处理
@@ -772,7 +772,7 @@ func TestDeployCertAutoMode(t *testing.T) {
 			AutoBindMode: true,
 		}
 
-		results := deployCertAutoMode(d, NewMockClient(), certData, certData.PrivateKey, certCfg)
+		results, _ := deployCertAutoMode(d, NewMockClient(), certData, certData.PrivateKey, certCfg)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -800,7 +800,7 @@ func TestDeployCertAutoMode(t *testing.T) {
 			AutoBindMode: true,
 		}
 
-		results := deployCertAutoMode(d, NewMockClient(), certData, certData.PrivateKey, certCfg)
+		results, _ := deployCertAutoMode(d, NewMockClient(), certData, certData.PrivateKey, certCfg)
 
 		if len(results) != 1 {
 			t.Fatalf("无匹配绑定时期望 1 个失败结果，得到 %d 个", len(results))
@@ -833,7 +833,7 @@ func TestDeployCertAutoMode(t *testing.T) {
 			AutoBindMode: true,
 		}
 
-		results := deployCertAutoMode(d, NewMockClient(), certData, certData.PrivateKey, certCfg)
+		results, _ := deployCertAutoMode(d, NewMockClient(), certData, certData.PrivateKey, certCfg)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -1187,8 +1187,8 @@ func TestSubmitNewCSR(t *testing.T) {
 		if !strings.Contains(err.Error(), "提交 CSR 失败") {
 			t.Errorf("期望错误包含 '提交 CSR 失败'，得到 %s", err.Error())
 		}
-		if certCfg.Metadata.LastIssueState != "pending" {
-			t.Fatalf("请求结果不确定时应保留 pending 状态，got %q", certCfg.Metadata.LastIssueState)
+		if certCfg.Metadata.LastIssueState != config.IssueStateProcessing {
+			t.Fatalf("请求结果不确定时应保留在途 processing 状态，got %q", certCfg.Metadata.LastIssueState)
 		}
 	})
 

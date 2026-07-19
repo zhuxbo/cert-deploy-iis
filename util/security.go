@@ -268,6 +268,21 @@ func ValidateIPv4(ip string) error {
 	return nil
 }
 
+// ValidateIP 验证 IPv4 或 IPv6 地址（含 0.0.0.0 / :: 通配地址）
+// 用于 IIS IP 绑定（ipport）：IP 证书既可能是 IPv4 也可能是 IPv6
+func ValidateIP(ip string) error {
+	if ip == "" {
+		return fmt.Errorf("IP 地址不能为空")
+	}
+	if ip == "0.0.0.0" || ip == "::" {
+		return nil // 允许通配地址
+	}
+	if net.ParseIP(ip) == nil {
+		return fmt.Errorf("无效的 IP 地址格式")
+	}
+	return nil
+}
+
 // ===== 路径安全 =====
 
 // ValidateRelativePath 验证相对路径是否安全（防止路径遍历和符号链接攻击）

@@ -297,17 +297,19 @@ func BindCertificate(hostname string, port int, certHash string) error {
 	})
 }
 
-// BindCertificateByIP 绑定证书到指定的 IP 和端口 (非 SNI 模式)
+// BindCertificateByIP 绑定证书到指定的 IP 和端口 (非 SNI 模式)。
+// 支持 IPv4/IPv6 与通配地址；IP 绑定每端口唯一，替换失败由 bindAndVerify 复验并回绑旧证书兜底，
+// 状态未知时不执行破坏性回滚，避免误删同端口上可能已生效的其他证书绑定。
 func BindCertificateByIP(ip string, port int, certHash string) error {
 	if port == 0 {
 		port = 443
 	}
-	if ip == "" || ip == "0.0.0.0" {
+	if ip == "" {
 		ip = "0.0.0.0"
 	}
 
-	// 参数验证
-	if err := util.ValidateIPv4(ip); err != nil {
+	// 参数验证（IPv4/IPv6 通用）
+	if err := util.ValidateIP(ip); err != nil {
 		return fmt.Errorf("无效的 IP 地址: %w", err)
 	}
 	if err := util.ValidatePort(port); err != nil {
@@ -318,7 +320,7 @@ func BindCertificateByIP(ip string, port int, certHash string) error {
 	}
 
 	certHash = normalizeCertHash(certHash)
-	ipPort := fmt.Sprintf("%s:%d", ip, port)
+	ipPort := formatIPPortKey(ip, port)
 
 	return bindAndVerify("ipport", ipPort, certHash, func() error {
 		return UnbindCertificateByIP(ip, port)
@@ -353,7 +355,7 @@ func UnbindCertificate(hostname string, port int) error {
 	return nil
 }
 
-// UnbindCertificateByIP 解除 IP 端口的证书绑定
+// UnbindCertificateByIP 解除 IP 端口的证书绑定（支持 IPv4/IPv6）
 func UnbindCertificateByIP(ip string, port int) error {
 	if port == 0 {
 		port = 443
@@ -362,15 +364,15 @@ func UnbindCertificateByIP(ip string, port int) error {
 		ip = "0.0.0.0"
 	}
 
-	// 参数验证
-	if err := util.ValidateIPv4(ip); err != nil {
+	// 参数验证（IPv4/IPv6 通用）
+	if err := util.ValidateIP(ip); err != nil {
 		return fmt.Errorf("无效的 IP 地址: %w", err)
 	}
 	if err := util.ValidatePort(port); err != nil {
 		return fmt.Errorf("无效的端口: %w", err)
 	}
 
-	ipPort := fmt.Sprintf("%s:%d", ip, port)
+	ipPort := formatIPPortKey(ip, port)
 	output, err := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), "http", "delete", "sslcert",
 		fmt.Sprintf("ipport=%s", ipPort))
 
@@ -481,7 +483,7 @@ func GetBindingForHost(hostname string, port int) (*SSLBinding, error) {
 	return nil, nil // 未找到
 }
 
-// GetBindingForIP 获取指定 IP 的 SSL 绑定
+// GetBindingForIP 获取指定 IP 的 SSL 绑定（支持 IPv4/IPv6）
 func GetBindingForIP(ip string, port int) (*SSLBinding, error) {
 	if port == 0 {
 		port = 443
@@ -495,10 +497,10 @@ func GetBindingForIP(ip string, port int) (*SSLBinding, error) {
 		return nil, err
 	}
 
-	target := fmt.Sprintf("%s:%d", ip, port)
-	for _, b := range bindings {
-		if strings.EqualFold(b.HostnamePort, target) {
-			return &b, nil
+	target := formatIPPortKey(ip, port)
+	for i := range bindings {
+		if strings.EqualFold(bindings[i].HostnamePort, target) {
+			return &bindings[i], nil
 		}
 	}
 
@@ -539,8 +541,15 @@ func FindBindingsForDomains(domains []string) (map[string]*SSLBinding, error) {
 	return findBindingsFromList(bindings, domains), nil
 }
 
-// ParseHostFromBinding 从 "hostname:port" 提取主机名
+// ParseHostFromBinding 从 "host:port" 提取主机名。
+// 兼容 IPv6 方括号形态：`[::1]:443` → `::1`（去括号返回裸 IP，便于 net.ParseIP 判定）；
+// SNI 主机名与 IPv4 保持原样。
 func ParseHostFromBinding(hostnamePort string) string {
+	if strings.HasPrefix(hostnamePort, "[") {
+		if end := strings.Index(hostnamePort, "]"); end > 1 {
+			return hostnamePort[1:end]
+		}
+	}
 	idx := strings.LastIndex(hostnamePort, ":")
 	if idx > 0 {
 		return hostnamePort[:idx]
@@ -548,11 +557,17 @@ func ParseHostFromBinding(hostnamePort string) string {
 	return hostnamePort
 }
 
-// ParsePortFromBinding 从 "hostname:port" 提取端口
+// ParsePortFromBinding 从 "host:port" 提取端口。兼容 IPv6 方括号形态 `[::1]:443`。
 func ParsePortFromBinding(hostnamePort string) int {
-	idx := strings.LastIndex(hostnamePort, ":")
-	if idx > 0 && idx < len(hostnamePort)-1 {
-		portStr := hostnamePort[idx+1:]
+	rest := hostnamePort
+	if strings.HasPrefix(hostnamePort, "[") {
+		if end := strings.Index(hostnamePort, "]"); end > 0 {
+			rest = hostnamePort[end+1:] // "]:443" 之后的 ":443"
+		}
+	}
+	idx := strings.LastIndex(rest, ":")
+	if idx >= 0 && idx < len(rest)-1 {
+		portStr := rest[idx+1:]
 		var port int
 		fmt.Sscanf(portStr, "%d", &port)
 		if port > 0 {
@@ -560,4 +575,13 @@ func ParsePortFromBinding(hostnamePort string) int {
 		}
 	}
 	return 443
+}
+
+// formatIPPortKey 构造 netsh ipport 键：IPv6 地址加方括号（[::1]:443），
+// IPv4 与通配地址直接拼接（0.0.0.0:443）。已带方括号的输入原样使用。
+func formatIPPortKey(ip string, port int) string {
+	if strings.Contains(ip, ":") && !strings.HasPrefix(ip, "[") {
+		return fmt.Sprintf("[%s]:%d", ip, port)
+	}
+	return fmt.Sprintf("%s:%d", ip, port)
 }
