@@ -23,7 +23,7 @@ bash build/release.sh --dry-run 1.2.3-rc.1
 bash build/release.sh --dry-run 1.2.3
 ```
 
-治理检查必须确认固定 `CLAUDE.md`、扁平 skill、路由叶子、旧路径清理和薄工具入口完全一致。dry-run 不得构建、签名、连接 SSH、修改 Git 或创建 bundle。
+治理检查必须确认固定 `CLAUDE.md`、扁平领域 skill、路由叶子、旧路径清理，以及 Claude/Codex 的 `remote-release`、`finish-check` 薄入口完全一致。dry-run 不得构建、签名、连接 SSH、修改 Git 或创建 bundle。
 
 若修改发布脚本，再使用临时目录或 mock 验证以下语义：
 
