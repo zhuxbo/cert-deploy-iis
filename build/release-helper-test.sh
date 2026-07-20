@@ -4,6 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HELPER="$SCRIPT_DIR/release-helper.py"
+BASH_BIN="${BASH:?缺少当前 Bash 解释器路径}"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
@@ -287,7 +288,12 @@ cat >"$COORDINATOR_ROOT/mock-bin/python3" <<EOF
 #!/usr/bin/env bash
 exec "$PYTHON_BIN" "\$@"
 EOF
-chmod +x "$COORDINATOR_ROOT/build/sign.sh" "$COORDINATOR_ROOT/mock-bin/ssh" "$COORDINATOR_ROOT/mock-bin/scp" "$COORDINATOR_ROOT/mock-bin/python3"
+
+cat >"$COORDINATOR_ROOT/mock-bin/bash" <<EOF
+#!$BASH_BIN
+exec "$BASH_BIN" "\$@"
+EOF
+chmod +x "$COORDINATOR_ROOT/build/sign.sh" "$COORDINATOR_ROOT/mock-bin/ssh" "$COORDINATOR_ROOT/mock-bin/scp" "$COORDINATOR_ROOT/mock-bin/python3" "$COORDINATOR_ROOT/mock-bin/bash"
 
 cat >"$COORDINATOR_ROOT/build/release.conf" <<EOF
 SSH_USER="test"

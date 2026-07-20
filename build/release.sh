@@ -12,6 +12,7 @@ HELPER="$SCRIPT_DIR/release-helper.py"
 DIST_EXE="$PROJECT_ROOT/dist/sslctlw.exe"
 RECOVERY_DIR="$SCRIPT_DIR/recovery"
 ASSET_NAME="sslctlw-windows-amd64.exe"
+BASH_BIN="${BASH:?缺少当前 Bash 解释器路径}"
 
 SSH_TIMEOUT=10
 SSH_USER=""
@@ -137,7 +138,7 @@ clear_publish_token() {
 
 verify_bundle_signature() {
     info "核对 bundle Authenticode 与配置证书指纹"
-    bash "$SCRIPT_DIR/sign.sh" --verify "$BUNDLE/$ASSET_NAME"
+    "$BASH_BIN" "$SCRIPT_DIR/sign.sh" --verify "$BUNDLE/$ASSET_NAME"
 }
 
 windows_powershell() {
@@ -252,10 +253,10 @@ prepare_bundle() {
     fi
 
     info "构建 Windows amd64 版本 $VERSION"
-    bash "$SCRIPT_DIR/build.sh" "$VERSION"
+    "$BASH_BIN" "$SCRIPT_DIR/build.sh" "$VERSION"
     info "执行并验证 Authenticode 签名"
-    bash "$SCRIPT_DIR/sign.sh" "$DIST_EXE"
-    bash "$SCRIPT_DIR/sign.sh" --verify "$DIST_EXE"
+    "$BASH_BIN" "$SCRIPT_DIR/sign.sh" "$DIST_EXE"
+    "$BASH_BIN" "$SCRIPT_DIR/sign.sh" --verify "$DIST_EXE"
 
     mkdir -p "$BUNDLE"
     cp "$DIST_EXE" "$BUNDLE/$ASSET_NAME"
@@ -549,7 +550,7 @@ main() {
                 [[ "$lock_name" =~ ^[0-9A-Za-z._-]+$ ]] || die "bundle 目录名不安全: $lock_name"
                 exec "$PYTHON_BIN" "$HELPER" run-locked \
                     --lock-path "$RECOVERY_DIR/.locks/$lock_name.lock" \
-                    bash "$0" "$@"
+                    "$BASH_BIN" "$0" "$@"
             fi
             ;;
     esac
