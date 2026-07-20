@@ -65,11 +65,17 @@ description: 执行 sslctlw 完成检查、提交前验证或 finish-check。用
 EOF
 
 require_regular_file AGENTS.md
+require_regular_file .gitattributes
 require_regular_file CLAUDE.md
 require_regular_file .claude/commands/finish-check.md
 require_regular_file .claude/commands/remote-release.md
 require_regular_file .agents/skills/finish-check/SKILL.md
 require_regular_file .agents/skills/remote-release/SKILL.md
+
+require_literal .gitattributes '*.sh text eol=lf'
+require_literal .gitattributes 'CLAUDE.md text eol=lf'
+require_literal .gitattributes '.claude/commands/*.md text eol=lf'
+require_literal .gitattributes '.agents/skills/*/SKILL.md text eol=lf'
 
 cmp -s CLAUDE.md "$TMP_DIR/CLAUDE.md" || { echo "CLAUDE.md 不符合固定模板" >&2; exit 1; }
 cmp -s .claude/commands/finish-check.md "$TMP_DIR/finish-check.md" || { echo "finish-check 工具入口发生漂移" >&2; exit 1; }

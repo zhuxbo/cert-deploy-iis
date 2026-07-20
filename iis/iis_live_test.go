@@ -1,14 +1,26 @@
+//go:build windows
 // +build windows
 
 package iis
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
 
+const iisLiveTestsEnv = "SSLCTLW_IIS_LIVE_TESTS"
+
+func requireIISLiveTests(t *testing.T) {
+	t.Helper()
+	if os.Getenv(iisLiveTestsEnv) != "1" {
+		t.Skipf("跳过 IIS 实机测试；如需运行请设置 %s=1", iisLiveTestsEnv)
+	}
+}
+
 // TestScanSites_Live 测试扫描 IIS 站点（需要 IIS 已安装）
 func TestScanSites_Live(t *testing.T) {
+	requireIISLiveTests(t)
 	// 检查 IIS 是否已安装
 	if err := CheckIISInstalled(); err != nil {
 		t.Skipf("跳过测试: IIS 未安装 - %v", err)
@@ -33,6 +45,7 @@ func TestScanSites_Live(t *testing.T) {
 
 // TestListSSLBindings_Live 测试获取 SSL 绑定列表
 func TestListSSLBindings_Live(t *testing.T) {
+	requireIISLiveTests(t)
 	bindings, err := ListSSLBindings()
 	if err != nil {
 		// netsh 可能需要管理员权限
@@ -51,6 +64,7 @@ func TestListSSLBindings_Live(t *testing.T) {
 
 // TestGetIISMajorVersion_Live 测试获取 IIS 版本
 func TestGetIISMajorVersion_Live(t *testing.T) {
+	requireIISLiveTests(t)
 	version, err := GetIISMajorVersion()
 	if err != nil {
 		t.Skipf("跳过测试: 无法获取 IIS 版本 - %v", err)
@@ -66,6 +80,7 @@ func TestGetIISMajorVersion_Live(t *testing.T) {
 
 // TestCheckIISInstalled_Live 测试 IIS 安装检测
 func TestCheckIISInstalled_Live(t *testing.T) {
+	requireIISLiveTests(t)
 	err := CheckIISInstalled()
 	if err != nil {
 		t.Logf("IIS 未安装或不可用: %v", err)
@@ -76,6 +91,7 @@ func TestCheckIISInstalled_Live(t *testing.T) {
 
 // TestGetSiteState_Live 测试获取站点状态
 func TestGetSiteState_Live(t *testing.T) {
+	requireIISLiveTests(t)
 	if err := CheckIISInstalled(); err != nil {
 		t.Skipf("跳过测试: IIS 未安装")
 	}

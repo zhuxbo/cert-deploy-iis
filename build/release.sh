@@ -99,6 +99,7 @@ load_publish_token() {
     local token_file
     token_file="$(publish_token_path)"
     [ -f "$token_file" ] || die "bundle 缺少 publish token；首次公开请使用 publish"
+    private_file_permissions_ok "$token_file" || die "bundle publish token 权限不安全"
     PUBLISH_TOKEN="$(tr -d '\r\n' <"$token_file")"
     [[ "$PUBLISH_TOKEN" =~ ^[0-9a-f]{32}$ ]] || die "bundle publish token 损坏，需要人工核查"
 }
@@ -117,6 +118,10 @@ create_publish_token() {
     if ! (umask 077; set -o noclobber; printf '%s\n' "$token" >"$token_file") 2>/dev/null; then
         die "bundle 已存在 publish attempt；中断恢复请使用 resume-publish"
     fi
+    if ! restrict_private_file_permissions "$token_file"; then
+        rm -f "$token_file"
+        die "无法收紧 bundle publish token 权限"
+    fi
     PUBLISH_TOKEN="$token"
 }
 
@@ -132,17 +137,52 @@ verify_bundle_signature() {
     bash "$SCRIPT_DIR/sign.sh" --verify "$BUNDLE/$ASSET_NAME"
 }
 
-config_mode() {
-    local mode
-    mode="$(stat -f '%Lp' "$CONFIG_FILE" 2>/dev/null || stat -c '%a' "$CONFIG_FILE" 2>/dev/null || true)"
-    printf '%s' "$mode"
+windows_powershell() {
+    if command -v powershell.exe >/dev/null 2>&1; then
+        printf '%s' powershell.exe
+    elif command -v powershell >/dev/null 2>&1; then
+        printf '%s' powershell
+    else
+        return 1
+    fi
+}
+
+private_file_permissions_ok() {
+    local path="$1" powershell_path win_path mode
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            command -v cygpath >/dev/null 2>&1 || return 1
+            powershell_path="$(windows_powershell)" || return 1
+            win_path="$(cygpath -w "$path")"
+            SSLCTLW_PRIVATE_FILE="$win_path" MSYS_NO_PATHCONV=1 "$powershell_path" \
+                -NoProfile -NonInteractive -Command \
+                '$file = Get-Item -LiteralPath $env:SSLCTLW_PRIVATE_FILE -ErrorAction Stop; $acl = $file.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access); if (-not $acl.AreAccessRulesProtected) { exit 1 }; $current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $seen = $false; foreach ($ace in $acl.Access) { if ($ace.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }; $sid = try { $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { exit 1 }; if ($sid -ne $current) { exit 1 }; $seen = $true }; if (-not $seen) { exit 1 }'
+            ;;
+        *)
+            mode="$(stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path" 2>/dev/null || true)"
+            [ "$mode" = "600" ]
+            ;;
+    esac
+}
+
+restrict_private_file_permissions() {
+    local path="$1" powershell_path win_path
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            command -v cygpath >/dev/null 2>&1 || return 1
+            powershell_path="$(windows_powershell)" || return 1
+            win_path="$(cygpath -w "$path")"
+            SSLCTLW_PRIVATE_FILE="$win_path" MSYS_NO_PATHCONV=1 "$powershell_path" \
+                -NoProfile -NonInteractive -Command \
+                '$file = Get-Item -LiteralPath $env:SSLCTLW_PRIVATE_FILE -ErrorAction Stop; $acl = $file.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access); $acl.SetAccessRuleProtection($true, $false); foreach ($existing in @($acl.Access)) { [void]$acl.RemoveAccessRuleSpecific($existing) }; $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent(); $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($identity.User, [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow); [void]$acl.AddAccessRule($rule); $file.SetAccessControl($acl)'
+            ;;
+        *) chmod 600 "$path" ;;
+    esac
 }
 
 load_config() {
-    [ -f "$CONFIG_FILE" ] || die "缺少 $CONFIG_FILE；从 release.conf.example 创建并设为 600"
-    local mode
-    mode="$(config_mode)"
-    [ "$mode" = "600" ] || die "$CONFIG_FILE 权限必须是 600，当前为 ${mode:-未知}"
+    [ -f "$CONFIG_FILE" ] || die "缺少 $CONFIG_FILE；从 release.conf.example 创建并限制为仅当前账户可访问"
+    private_file_permissions_ok "$CONFIG_FILE" || die "$CONFIG_FILE 权限不安全；Windows 必须使用受保护且仅当前账户可访问的 DACL，其他平台必须为 600"
     # shellcheck source=/dev/null
     source "$CONFIG_FILE"
     [ "${#SERVERS[@]}" -gt 0 ] || die "SERVERS 不能为空"

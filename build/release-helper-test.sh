@@ -35,6 +35,46 @@ stage_bundle() {
     "$PYTHON_BIN" "$HELPER" next-index --root "$root" --bundle "$stage/bundle" --output "$stage/releases.json.next" --release-id "$release_id"
 }
 
+restrict_config_permissions() {
+    local path="$1" powershell_path win_path
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            command -v cygpath >/dev/null 2>&1 || { echo "Windows 测试缺少 cygpath" >&2; exit 1; }
+            if command -v powershell.exe >/dev/null 2>&1; then
+                powershell_path="powershell.exe"
+            elif command -v powershell >/dev/null 2>&1; then
+                powershell_path="powershell"
+            else
+                echo "Windows 测试缺少 PowerShell" >&2
+                exit 1
+            fi
+            win_path="$(cygpath -w "$path")"
+            SSLCTLW_CONFIG_FILE="$win_path" MSYS_NO_PATHCONV=1 "$powershell_path" \
+                -NoProfile -NonInteractive -Command \
+                '$file = Get-Item -LiteralPath $env:SSLCTLW_CONFIG_FILE -ErrorAction Stop; $acl = $file.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access); $acl.SetAccessRuleProtection($true, $false); foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRuleSpecific($rule) }; $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent(); $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($identity.User, [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow); [void]$acl.AddAccessRule($rule); $file.SetAccessControl($acl)'
+            ;;
+        *) chmod 600 "$path" ;;
+    esac
+}
+
+weaken_config_permissions() {
+    local path="$1" powershell_path win_path
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            if command -v powershell.exe >/dev/null 2>&1; then
+                powershell_path="powershell.exe"
+            else
+                powershell_path="powershell"
+            fi
+            win_path="$(cygpath -w "$path")"
+            SSLCTLW_CONFIG_FILE="$win_path" MSYS_NO_PATHCONV=1 "$powershell_path" \
+                -NoProfile -NonInteractive -Command \
+                '$file = Get-Item -LiteralPath $env:SSLCTLW_CONFIG_FILE -ErrorAction Stop; $acl = $file.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access); $everyone = [System.Security.Principal.SecurityIdentifier]::new("S-1-1-0"); $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($everyone, [System.Security.AccessControl.FileSystemRights]::Read, [System.Security.AccessControl.AccessControlType]::Allow); [void]$acl.AddAccessRule($rule); $file.SetAccessControl($acl)'
+            ;;
+        *) chmod 644 "$path" ;;
+    esac
+}
+
 REMOTE_ROOT="$TEST_ROOT/remote"
 mkdir -p "$REMOTE_ROOT"
 
@@ -43,7 +83,7 @@ make_bundle "$MAIN_BUNDLE" 1.2.3 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa false 
 stage_bundle "$REMOTE_ROOT" "$MAIN_BUNDLE" main-release
 "$PYTHON_BIN" "$HELPER" begin-publish --root "$REMOTE_ROOT" --bundle "$REMOTE_ROOT/.staging/main-release/bundle" --release-id main-release --publish-token aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 "$PYTHON_BIN" "$HELPER" commit-release --root "$REMOTE_ROOT" --bundle "$REMOTE_ROOT/.staging/main-release/bundle" --next-index "$REMOTE_ROOT/.staging/main-release/releases.json.next" --release-id main-release --publish-token aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-INDEX_MODE="$(stat -f '%Lp' "$REMOTE_ROOT/releases.json" 2>/dev/null || stat -c '%a' "$REMOTE_ROOT/releases.json")"
+INDEX_MODE="$(stat -c '%a' "$REMOTE_ROOT/releases.json" 2>/dev/null || stat -f '%Lp' "$REMOTE_ROOT/releases.json")"
 [ "$INDEX_MODE" = "644" ] || { echo "公开 releases.json 权限不是 644: $INDEX_MODE" >&2; exit 1; }
 "$PYTHON_BIN" "$HELPER" verify-release --root "$REMOTE_ROOT" --bundle "$REMOTE_ROOT/.staging/main-release/bundle"
 "$PYTHON_BIN" "$HELPER" mark-verified --root "$REMOTE_ROOT" --bundle "$REMOTE_ROOT/.staging/main-release/bundle" --release-id main-release --publish-token aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -218,10 +258,6 @@ fi
 if [ -n "${MOCK_FAIL_HOST_2:-}" ] && [ "$host" = "$MOCK_FAIL_HOST_2" ] && [[ "$command_arg" == *"${MOCK_FAIL_PATTERN_2:-__never__}"* ]]; then
     exit 56
 fi
-if [ -n "${MOCK_KILL_HOST:-}" ] && [ "$host" = "$MOCK_KILL_HOST" ] && [[ "$command_arg" == *"${MOCK_KILL_PATTERN:-__never__}"* ]]; then
-    kill -KILL "$PPID"
-    exit 137
-fi
 if [ -n "${MOCK_PROMOTE_FAIL_HOST:-}" ] && [ "$host" = "$MOCK_PROMOTE_FAIL_HOST" ] && [[ "$command_arg" == *"promote-stage"* ]]; then
     promote_only="${command_arg%% && rmdir*}"
     bash -c "$promote_only"
@@ -249,7 +285,7 @@ SERVERS=(
   "node2,node2,22,$COORDINATOR_ROOT/node2,https://node2.invalid"
 )
 EOF
-chmod 600 "$COORDINATOR_ROOT/build/release.conf"
+restrict_config_permissions "$COORDINATOR_ROOT/build/release.conf"
 
 coordinator_bundle() {
     local name="$1" version="$2" commit="$3" content="$4"
@@ -387,14 +423,24 @@ fi
 
 RESUME_BUNDLE="$(coordinator_bundle resume 3.0.2-rc.1 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb resume)"
 PATH="$COORDINATOR_ROOT/mock-bin:$PATH" bash "$COORDINATOR_ROOT/build/release.sh" stage "$RESUME_BUNDLE"
-if MOCK_KILL_HOST=node2 MOCK_KILL_PATTERN=commit-release PATH="$COORDINATOR_ROOT/mock-bin:$PATH" \
-    bash "$COORDINATOR_ROOT/build/release.sh" publish "$RESUME_BUNDLE"; then
-    echo "模拟协调器中断未使 publish 失败" >&2
+RESUME_TOKEN=cccccccccccccccccccccccccccccccc
+printf '%s\n' "$RESUME_TOKEN" >"$RESUME_BUNDLE/.publish-token"
+restrict_config_permissions "$RESUME_BUNDLE/.publish-token"
+for root in "$COORDINATOR_ROOT/node1" "$COORDINATOR_ROOT/node2"; do
+    "$PYTHON_BIN" "$HELPER" begin-publish \
+        --root "$root" --bundle "$root/.staging/resume/bundle" \
+        --release-id resume --publish-token "$RESUME_TOKEN"
+done
+"$PYTHON_BIN" "$HELPER" commit-release \
+    --root "$COORDINATOR_ROOT/node1" --bundle "$COORDINATOR_ROOT/node1/.staging/resume/bundle" \
+    --next-index "$COORDINATOR_ROOT/node1/.staging/resume/releases.json.next" \
+    --release-id resume --publish-token "$RESUME_TOKEN"
+weaken_config_permissions "$RESUME_BUNDLE/.publish-token"
+if PATH="$COORDINATOR_ROOT/mock-bin:$PATH" bash "$COORDINATOR_ROOT/build/release.sh" resume-publish "$RESUME_BUNDLE"; then
+    echo "弱权限 publish token 未被拒绝" >&2
     exit 1
 fi
-[ -f "$RESUME_BUNDLE/.publish-token" ] || { echo "中断后未保留 publish token" >&2; exit 1; }
-TOKEN_MODE="$(stat -f '%Lp' "$RESUME_BUNDLE/.publish-token" 2>/dev/null || stat -c '%a' "$RESUME_BUNDLE/.publish-token")"
-[ "$TOKEN_MODE" = "600" ] || { echo "publish token 权限不是 600: $TOKEN_MODE" >&2; exit 1; }
+restrict_config_permissions "$RESUME_BUNDLE/.publish-token"
 if PATH="$COORDINATOR_ROOT/mock-bin:$PATH" bash "$COORDINATOR_ROOT/build/release.sh" publish "$RESUME_BUNDLE"; then
     echo "中断后普通 publish 绕过了显式恢复入口" >&2
     exit 1

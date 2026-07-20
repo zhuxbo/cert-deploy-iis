@@ -289,7 +289,7 @@ func TestDeployCertWithRules_AllSuccess_ReportsSuccess(t *testing.T) {
 func TestDeployCertWithRules_AllConflictsSkipped_NoReport(t *testing.T) {
 	certData, keyPEM, certCfg := rulesCertData(t, 213, "conflict.example.com", "shared.example.com")
 	// shared.example.com 冲突且最佳证书是另一个订单（索引 1）
-	other := config.CertConfig{OrderID: 999, Metadata: config.CertMetadata{CertExpiresAt: "2099-12-31"},
+	other := config.CertConfig{Enabled: true, OrderID: 999, Metadata: config.CertMetadata{CertExpiresAt: "2099-12-31"},
 		BindRules: []config.BindRule{{Domain: "shared.example.com", Port: 443}}}
 	allCerts := []config.CertConfig{certCfg, other}
 	conflicts := map[string][]int{"shared.example.com": {0, 1}}

@@ -790,7 +790,7 @@ func submitNewCSR(d *Deployer, client APIClient, certCfg *config.CertConfig, per
 	if err := d.Store.SavePendingPrivateKey(certCfg.CertName, keyPEM); err != nil {
 		return nil, "", "", fmt.Errorf("保存 pending 私钥失败: %w", err)
 	}
-	return submitPendingCSR(d, client, certCfg, csrPEM, persistConfig...)
+	return submitPendingCSR(d, client, certCfg, csrPEM, false, persistConfig...)
 }
 
 // retryPendingCSR 重放与现存 pending 私钥严格配对的原始 CSR。
@@ -811,10 +811,10 @@ func retryPendingCSR(d *Deployer, client APIClient, certCfg *config.CertConfig, 
 	if !matched {
 		return nil, "", "", errors.New("pending CSR 与 pending 私钥不匹配，无法安全重试")
 	}
-	return submitPendingCSR(d, client, certCfg, csrPEM, persistConfig...)
+	return submitPendingCSR(d, client, certCfg, csrPEM, true, persistConfig...)
 }
 
-func submitPendingCSR(d *Deployer, client APIClient, certCfg *config.CertConfig, csrPEM string, persistConfig ...func() error) (*api.CertData, string, string, error) {
+func submitPendingCSR(d *Deployer, client APIClient, certCfg *config.CertConfig, csrPEM string, replaying bool, persistConfig ...func() error) (*api.CertData, string, string, error) {
 	csrHash := fmt.Sprintf("%x", sha256.Sum256([]byte(csrPEM)))
 	before := certCfg.Metadata
 	var persist func() error
@@ -822,8 +822,8 @@ func submitPendingCSR(d *Deployer, client APIClient, certCfg *config.CertConfig,
 		persist = persistConfig[0]
 	}
 
-	// pending 文件存在但哈希未入配置，说明上次在持久化意图前中断；本次仍是该逻辑意图的首次落盘。
-	if certCfg.Metadata.LastCSRHash != csrHash {
+	// pending 文件已存在即视为同一签发意图的崩溃恢复重放；即使哈希尚未入配置，也只补齐元数据而不重复计数。
+	if !replaying && certCfg.Metadata.LastCSRHash != csrHash {
 		if certCfg.Metadata.IssueRetryCount >= config.MaxIssueRetries {
 			certCfg.Metadata.MarkCapped(config.CapPhaseIssue)
 			if persist != nil {
@@ -1290,14 +1290,6 @@ func handleFileValidation(domain string, file *api.FileValidation) error {
 		return fmt.Errorf("验证文件信息不完整")
 	}
 
-	// 查找域名对应的站点物理路径
-	siteName, sitePath, err := iis.GetSitePhysicalPathByDomain(domain)
-	if err != nil {
-		return fmt.Errorf("查找站点失败: %w", err)
-	}
-
-	log.Printf("找到站点: %s, 路径: %s", siteName, sitePath)
-
 	// 构建验证文件的完整路径
 	// file.Path 由接口返回，必须在 /.well-known/ 目录下
 	relativePath := strings.TrimPrefix(file.Path, "/")
@@ -1311,6 +1303,14 @@ func handleFileValidation(domain string, file *api.FileValidation) error {
 			return fmt.Errorf("不允许创建 %s 扩展名的验证文件", ext)
 		}
 	}
+
+	// 输入本身通过安全校验后再访问 IIS，避免无效请求触发外部命令。
+	siteName, sitePath, err := iis.GetSitePhysicalPathByDomain(domain)
+	if err != nil {
+		return fmt.Errorf("查找站点失败: %w", err)
+	}
+
+	log.Printf("找到站点: %s, 路径: %s", siteName, sitePath)
 
 	// 安全验证：防止路径遍历攻击
 	fullPath, err := util.ValidateRelativePath(sitePath, relativePath)

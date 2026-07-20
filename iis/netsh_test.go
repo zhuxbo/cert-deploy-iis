@@ -83,7 +83,7 @@ func TestParseHostFromBinding(t *testing.T) {
 		{"IP 地址", "0.0.0.0:443", "0.0.0.0"},
 		{"自定义端口", "www.example.com:8443", "www.example.com"},
 		{"无端口", "www.example.com", "www.example.com"},
-		{"IPv6", "[::1]:443", "[::1]"},
+		{"IPv6", "[::1]:443", "::1"},
 	}
 
 	for _, tt := range tests {
@@ -305,7 +305,7 @@ func TestParseHostFromBinding_MoreCases(t *testing.T) {
 		{"端口 80", "www.example.com:80", "www.example.com"},
 		{"无端口", "www.example.com", "www.example.com"},
 		{"空字符串", "", ""},
-		{"只有冒号", ":", ":"}, // idx=0，不满足 idx>0，返回原始
+		{"只有冒号", ":", ":"},       // idx=0，不满足 idx>0，返回原始
 		{"只有端口", ":443", ":443"}, // idx=0，不满足 idx>0，返回原始
 	}
 

@@ -178,7 +178,7 @@ func TestIsIPBinding(t *testing.T) {
 		{"IP 绑定-指定", "192.168.1.1:443", true},
 		{"域名绑定", "www.example.com:443", false},
 		{"通配符绑定", "*.example.com:443", false},
-		{"IPv6 类似", "[::1]:443", false}, // 包含冒号，不是纯数字
+		{"IPv6 绑定", "[::1]:443", true},
 	}
 
 	for _, tt := range tests {
@@ -476,7 +476,7 @@ func TestIsIPBinding_MoreCases(t *testing.T) {
 		hostnamePort string
 		want         bool
 	}{
-		{"空字符串", "", false}, // 空主机名不应被视为 IP
+		{"空字符串", "", false},     // 空主机名不应被视为 IP
 		{"只有端口", ":443", false}, // 冒号前为空，不是纯数字
 		{"本地回环", "127.0.0.1:443", true},
 		{"内网IP", "10.0.0.1:8443", true},

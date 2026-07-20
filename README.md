@@ -101,6 +101,8 @@ API 配置在证书级别，每个证书可以有不同的 API 地址和 Token�
 - Go 1.24+
 - Windows 环境 (使用 windigo GUI 库)
 
+Windows 开发环境须保留仓库 `.gitattributes` 的 LF 规则；Shell 脚本及治理薄入口依赖该规则进行确定性字节比较。
+
 ### 编译
 
 ```bash

@@ -33,7 +33,23 @@ bash build/check-governance.sh
 ```bash
 cp build/build.conf.example build/build.conf
 cp build/release.conf.example build/release.conf
+# Linux/macOS
 chmod 600 build/build.conf build/release.conf
+```
+
+Windows 上的 Git Bash 无法用 `chmod 600` 表达 NTFS 权限。请在 PowerShell 中把两个配置文件的 DACL 收紧为仅当前账户可访问；`release.sh` 会拒绝仍继承权限或包含其他 Allow ACE 的 `release.conf`：
+
+```powershell
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+foreach ($path in 'build/build.conf', 'build/release.conf') {
+    $file = Get-Item -LiteralPath $path
+    $acl = $file.GetAccessControl([Security.AccessControl.AccessControlSections]::Access)
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRuleSpecific($rule) }
+    $rule = [Security.AccessControl.FileSystemAccessRule]::new($identity.User, 'FullControl', 'Allow')
+    [void]$acl.AddAccessRule($rule)
+    $file.SetAccessControl($acl)
+}
 ```
 
 两个实际配置文件均被 Git 忽略：
