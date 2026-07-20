@@ -36,13 +36,12 @@ stage_bundle() {
 }
 
 windows_powershell() {
-    if command -v pwsh.exe >/dev/null 2>&1; then
-        printf '%s' pwsh.exe
-    elif command -v powershell.exe >/dev/null 2>&1; then
-        printf '%s' powershell.exe
-    else
-        return 1
-    fi
+    local win_path native_path
+    command -v cygpath >/dev/null 2>&1 || return 1
+    win_path="${WINDIR:-C:\\Windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+    native_path="$(cygpath -u "$win_path")"
+    [ -x "$native_path" ] || return 1
+    printf '%s' "$native_path"
 }
 
 restrict_config_permissions() {
