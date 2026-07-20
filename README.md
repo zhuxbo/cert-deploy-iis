@@ -102,6 +102,7 @@ API 配置在证书级别，每个证书可以有不同的 API 地址和 Token�
 - Windows 环境 (使用 windigo GUI 库)
 
 Windows 开发环境须保留仓库 `.gitattributes` 的 LF 规则；Shell 脚本及治理薄入口依赖该规则进行确定性字节比较。
+Git Bash 中的发布脚本只调用原生 `pwsh.exe` 或 `powershell.exe`，避免无扩展名命令被 Windows 应用别名解析为 WSL。
 
 ### 编译
 

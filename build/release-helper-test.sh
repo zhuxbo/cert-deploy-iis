@@ -35,19 +35,22 @@ stage_bundle() {
     "$PYTHON_BIN" "$HELPER" next-index --root "$root" --bundle "$stage/bundle" --output "$stage/releases.json.next" --release-id "$release_id"
 }
 
+windows_powershell() {
+    if command -v pwsh.exe >/dev/null 2>&1; then
+        printf '%s' pwsh.exe
+    elif command -v powershell.exe >/dev/null 2>&1; then
+        printf '%s' powershell.exe
+    else
+        return 1
+    fi
+}
+
 restrict_config_permissions() {
     local path="$1" powershell_path win_path
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*)
             command -v cygpath >/dev/null 2>&1 || { echo "Windows 测试缺少 cygpath" >&2; exit 1; }
-            if command -v powershell.exe >/dev/null 2>&1; then
-                powershell_path="powershell.exe"
-            elif command -v powershell >/dev/null 2>&1; then
-                powershell_path="powershell"
-            else
-                echo "Windows 测试缺少 PowerShell" >&2
-                exit 1
-            fi
+            powershell_path="$(windows_powershell)" || { echo "Windows 测试缺少原生 PowerShell" >&2; exit 1; }
             win_path="$(cygpath -w "$path")"
             SSLCTLW_CONFIG_FILE="$win_path" MSYS_NO_PATHCONV=1 "$powershell_path" \
                 -NoProfile -NonInteractive -Command \
@@ -61,11 +64,7 @@ weaken_config_permissions() {
     local path="$1" powershell_path win_path
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*)
-            if command -v powershell.exe >/dev/null 2>&1; then
-                powershell_path="powershell.exe"
-            else
-                powershell_path="powershell"
-            fi
+            powershell_path="$(windows_powershell)" || { echo "Windows 测试缺少原生 PowerShell" >&2; exit 1; }
             win_path="$(cygpath -w "$path")"
             SSLCTLW_CONFIG_FILE="$win_path" MSYS_NO_PATHCONV=1 "$powershell_path" \
                 -NoProfile -NonInteractive -Command \

@@ -138,10 +138,10 @@ verify_bundle_signature() {
 }
 
 windows_powershell() {
-    if command -v powershell.exe >/dev/null 2>&1; then
+    if command -v pwsh.exe >/dev/null 2>&1; then
+        printf '%s' pwsh.exe
+    elif command -v powershell.exe >/dev/null 2>&1; then
         printf '%s' powershell.exe
-    elif command -v powershell >/dev/null 2>&1; then
-        printf '%s' powershell
     else
         return 1
     fi
