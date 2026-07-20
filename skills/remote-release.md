@@ -40,7 +40,7 @@ dev 发布只执行发布数据路径，不修改 Git 或 GitHub：
 
 ### 1. 预检与 PR
 
-1. 读取全部发布节点的 `releases.json`，确认稳定版本高于每个节点及统一公网入口的 `main.latest`。
+1. 通过全部发布节点各自的公网域名读取 `releases.json`，确认稳定版本高于每个节点的 `main.latest`。
 2. 确认工作区干净，本地 `dev == origin/dev`；确认本地、远端均不存在 `v<version>`，GitHub Release 和所有节点 `main/v<version>/` 均不存在。
 3. 通过 `dev → main` PR 发布；等待 required check `test` 和本仓 release gates 在 PR commit 上成功后合并。
 4. 同步本地 `main`，确认 `main == origin/main`、工作区干净；等待精确 main commit 的 required check `test` 和 release gates 成功。
@@ -73,11 +73,11 @@ dev 发布只执行发布数据路径，不修改 Git 或 GitHub：
 
 - PR 已合并；三个阶段的 gates 都对应各自精确 commit。
 - 本地/远端 main、dev、版本 tag、latest tag、GitHub Release target 指向同一 commit，工作区干净。
-- 所有节点及统一公网入口 `main.latest` 等于版本号。
+- 所有节点经各自公网域名读取的 `main.latest` 等于版本号。
 - 所有节点和 GitHub Release 只有且完整包含规范正式资产，字节一致，SHA256 与 manifest 和 `releases.json.checksums` 一致。
 - GitHub Release 已公开、非 draft、非 prerelease、标记 latest。
 - EXE 内版本号为本次版本，Windows `Get-AuthenticodeSignature`/`signtool verify` 有效。
-- 从统一公网入口实际下载代表 EXE 并完成 SHA256 校验。
+- 从每个发布节点的公网域名实际下载代表 EXE 并完成 SHA256 校验。
 
 全部验收完成后运行 `bash build/release.sh cleanup <bundle-dir>`；随后才可按保留策略清理本地持久化 bundle。
 
@@ -87,7 +87,7 @@ dev 发布只执行发布数据路径，不修改 Git 或 GitHub：
 - 版本 tag 创建后失败：禁止 `prepare`、`build/build.sh`、`build/sign.sh`；只读取原 bundle，先核对 manifest 的 commit 等于 tag target，再幂等执行 `stage`，从失败点继续 GitHub upload、`publish` 或 `verify`。
 - `publish` 中断并导致节点处于不同阶段时，保留 bundle 内的 `.publish-token`，先运行 `resume-publish <bundle-dir>` 幂等完成公开并重新验收；若确认不能继续，再运行 `rollback <bundle-dir>` 恢复全部节点，然后用同一 bundle 重新 `stage`/`publish`，不得重建。普通 `publish` 不得接管已有 attempt。
 - `stage` 会在每个发布根留下绑定 release ID、manifest 和 commit 的持久所有权；`publish` 再绑定唯一 attempt token。中断后只有持有原 bundle 和 token 的协调器可以继续。回滚必须先全节点预检并绑定排他的回滚阶段；部分节点完成时依靠完成标记重试。成功 `cleanup` 或完整 `rollback` 才释放 owner 和本地 token，禁止手工删除它们绕过恢复核查。
-- GitHub draft、节点暂存、索引更新、分支回同步任一步失败，都保留不可变对象和 bundle。修复失败节点后重新做全节点与公网验收。
+- GitHub draft、节点暂存、索引更新、分支回同步任一步失败，都保留不可变对象和 bundle。修复失败节点后重新做全部节点目录与各自公网域名验收。
 - 任一节点索引出现部分推进，立即停止新发布并用同一 bundle 完成其余节点或恢复到发布前索引；不得长期保留分裂的 `latest`。
 - 已完成正式版不得删除 tag、覆盖资产或重写同版本；修复和回滚均发布更高版本。
 

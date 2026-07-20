@@ -89,7 +89,7 @@ done <<<"$packages"
 ## 6. 规范与文档职责
 
 - 本任务若未修改 `deploy-spec.md`，确认 diff 中没有该文件并跳过跨仓字节比较。
-- 若明确修改了它，才由统一多仓流程检查四仓字节一致；单仓 finish-check 不拉取其他仓移动分支。
+- 若明确修改了它，才由统一多仓流程检查 `sslctl`、`sslctlw`、`sslbt` 三仓字节一致；单仓 finish-check 不拉取其他仓移动分支。
 - 检查 `AGENTS.md`、skills、工具入口、README 和构建文档没有复制冲突规则，所有命令和路径真实存在。
 - 新增过程文档只能位于被忽略的 `.superpowers/`，不得提交或被代码/入库文档引用。
 
