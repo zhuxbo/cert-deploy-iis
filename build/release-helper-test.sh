@@ -7,11 +7,20 @@ HELPER="$SCRIPT_DIR/release-helper.py"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
-if command -v python3 >/dev/null 2>&1; then
-    PYTHON_BIN=python3
-elif command -v python >/dev/null 2>&1; then
-    PYTHON_BIN=python
-else
+find_python() {
+    local candidate path
+    for candidate in python3 python; do
+        path="$(command -v "$candidate" 2>/dev/null || true)"
+        [ -n "$path" ] || continue
+        if "$path" -c 'import sys; raise SystemExit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
+            PYTHON_BIN="$path"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if ! find_python; then
     echo "缺少 Python 3" >&2
     exit 1
 fi
@@ -273,7 +282,12 @@ remote_path="${args[${#args[@]}-1]}"
 destination="${remote_path#*:}"
 cp "$source_path" "$destination"
 EOF
-chmod +x "$COORDINATOR_ROOT/build/sign.sh" "$COORDINATOR_ROOT/mock-bin/ssh" "$COORDINATOR_ROOT/mock-bin/scp"
+
+cat >"$COORDINATOR_ROOT/mock-bin/python3" <<EOF
+#!/usr/bin/env bash
+exec "$PYTHON_BIN" "\$@"
+EOF
+chmod +x "$COORDINATOR_ROOT/build/sign.sh" "$COORDINATOR_ROOT/mock-bin/ssh" "$COORDINATOR_ROOT/mock-bin/scp" "$COORDINATOR_ROOT/mock-bin/python3"
 
 cat >"$COORDINATOR_ROOT/build/release.conf" <<EOF
 SSH_USER="test"

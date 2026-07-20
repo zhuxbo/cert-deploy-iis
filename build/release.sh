@@ -61,13 +61,16 @@ require_cmd() {
 }
 
 find_python() {
-    if command -v python3 >/dev/null 2>&1; then
-        PYTHON_BIN=python3
-    elif command -v python >/dev/null 2>&1 && python -c 'import sys; raise SystemExit(sys.version_info < (3, 9))' 2>/dev/null; then
-        PYTHON_BIN=python
-    else
-        die "缺少 Python 3.9+"
-    fi
+    local candidate path
+    for candidate in python3 python; do
+        path="$(command -v "$candidate" 2>/dev/null || true)"
+        [ -n "$path" ] || continue
+        if "$path" -c 'import sys; raise SystemExit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
+            PYTHON_BIN="$path"
+            return 0
+        fi
+    done
+    die "缺少 Python 3.9+"
 }
 
 validate_version() {

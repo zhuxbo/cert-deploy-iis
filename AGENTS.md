@@ -10,6 +10,7 @@
 - Codex 原生入口只保留 `.agents/skills/remote-release/SKILL.md` 与 `.agents/skills/finish-check/SKILL.md`；Claude 对应入口位于 `.claude/commands/`。两套入口都必须是只调用权威叶子的薄层，不复制流程正文。
 - Shell 脚本及参与确定性字节比较的 Claude/Codex 薄入口必须按 `.gitattributes` 固定为 LF，避免 Windows 自动换行转换破坏治理门禁。
 - Git Bash 的发布 ACL 操作必须通过 `%WINDIR%` 定位系统 `powershell.exe`，不得依赖 PATH、应用别名或 PowerShell 7 的差异化文件 ACL API。
+- 发布脚本选择 Python 等外部解释器时必须执行版本探测并保存已验证的绝对路径，不得仅凭 `command -v` 接受 Windows 应用别名。
 
 ## 核心命令
 

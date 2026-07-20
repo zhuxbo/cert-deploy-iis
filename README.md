@@ -103,6 +103,7 @@ API 配置在证书级别，每个证书可以有不同的 API 地址和 Token�
 
 Windows 开发环境须保留仓库 `.gitattributes` 的 LF 规则；Shell 脚本及治理薄入口依赖该规则进行确定性字节比较。
 Git Bash 中的发布脚本通过 `%WINDIR%` 直接定位系统 `powershell.exe` 执行 Access DACL 校验，避免 PATH、应用别名与 PowerShell 7 文件 ACL API 差异。
+Python 解释器会在实际通过 3.9+ 版本探测后才被采用，Windows Store/WSL 等不可执行应用别名会被忽略。
 
 ### 编译
 
