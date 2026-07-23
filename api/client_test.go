@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,6 +31,15 @@ func TestNewClient(t *testing.T) {
 }
 
 func TestIsAllowedAPIURL(t *testing.T) {
+	lookupIP := func(hostname string) ([]net.IP, error) {
+		switch hostname {
+		case "private.example.test":
+			return []net.IP{net.ParseIP("10.0.0.8")}, nil
+		default:
+			return []net.IP{net.ParseIP("203.0.113.10")}, nil
+		}
+	}
+
 	tests := []struct {
 		name      string
 		baseURL   string
@@ -43,13 +53,14 @@ func TestIsAllowedAPIURL(t *testing.T) {
 		{"HTTP 子域名绕过", "http://localhost.evil.com", false},
 		{"HTTP 用户信息绕过", "http://127.0.0.1@evil.com", false},
 		{"HTTP 非本地", "http://example.com", false},
+		{"HTTPS DNS 解析到私网", "https://private.example.test", false},
 		{"非 HTTPS 协议", "ftp://example.com", false},
 		{"缺少协议", "api.example.com", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			allowed, reason := IsAllowedAPIURL(tt.baseURL)
+			allowed, reason := isAllowedAPIURL(tt.baseURL, lookupIP)
 			if allowed != tt.wantAllow {
 				t.Errorf("IsAllowedAPIURL(%q) = %v, want %v (reason: %s)", tt.baseURL, allowed, tt.wantAllow, reason)
 			}

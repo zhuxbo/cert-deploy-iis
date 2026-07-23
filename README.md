@@ -76,7 +76,7 @@ sslctlw help
 
 ### 自动部署
 
-计划任务调用 `sslctlw deploy --all` 实现自动续签。`setup` 命令会自动创建计划任务（XML 定义，启用错过补偿：关机错过计划时间后开机补跑）。`status` 命令显示任务上次运行时间与结果，停摆时告警。
+计划任务调用 `sslctlw deploy --all` 实现自动续签。`setup` 命令通过 Windows 自带的 `schtasks` 参数创建每日 SYSTEM 任务，兼容 Windows Server 2012+（包括 Server 2016）；`status` 命令显示任务上次运行时间与结果，停摆时告警。
 
 ## API 接口
 
@@ -102,6 +102,8 @@ API 配置在证书级别，每个证书可以有不同的 API 地址和 Token�
 - Windows 环境 (使用 windigo GUI 库)
 
 Windows 开发环境须保留仓库 `.gitattributes` 的 LF 规则；Shell 脚本及治理薄入口依赖该规则进行确定性字节比较。
+GUI 的动态布局尺寸统一按系统 DPI 换算，支持服务器本机及远程桌面的 100%、125%、150% 显示缩放。
+URL/SSRF 单元测试使用可控 DNS 解析结果，避免开发机、沙箱或 CI 的 DNS 策略影响测试结论。
 Git Bash 中的发布脚本通过 `%WINDIR%` 直接定位系统 `powershell.exe` 执行 Access DACL 校验，避免 PATH、应用别名与 PowerShell 7 文件 ACL API 差异。
 Python 解释器会在实际通过 3.9+ 版本探测后才被采用，Windows Store/WSL 等不可执行应用别名会被忽略。
 发布子流程复用当前 Git Bash 的绝对路径，不通过 PATH 解析 Windows 的 `bash.exe`/WSL 应用别名。

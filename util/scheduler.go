@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf16"
 )
 
 const DefaultTaskName = "SSLCtlW"
@@ -27,86 +26,22 @@ func IsTaskExists(taskName string) bool {
 	return strings.Contains(output, taskName)
 }
 
-// taskXMLParams 计划任务 XML 定义参数
-type taskXMLParams struct {
-	ExePath   string
-	Arguments string
-	StartDate string // 格式 2006-01-02
-	StartTime string // 格式 HH:MM
-}
-
-// xmlEscaper XML 文本转义
-var xmlEscaper = strings.NewReplacer(
-	"&", "&amp;",
-	"<", "&lt;",
-	">", "&gt;",
-	`"`, "&quot;",
-	"'", "&apos;",
-)
-
-func escapeXML(s string) string { return xmlEscaper.Replace(s) }
-
-// buildTaskXML 生成 schtasks /create /xml 使用的任务定义（纯函数）
-// 关键设置：
-//   - StartWhenAvailable=true：错过计划时间（如关机）后开机尽快补跑
-//   - SYSTEM 账户（S-1-5-18）最高权限运行，与原 /ru SYSTEM /rl HIGHEST 语义一致
-//   - 每天一次触发，时间由调用方随机生成
-func buildTaskXML(p taskXMLParams) string {
-	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Description>sslctlw SSL certificate auto renew</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <CalendarTrigger>
-      <StartBoundary>%sT%s:00</StartBoundary>
-      <Enabled>true</Enabled>
-      <ScheduleByDay>
-        <DaysInterval>1</DaysInterval>
-      </ScheduleByDay>
-    </CalendarTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>S-1-5-18</UserId>
-      <LogonType>ServiceAccount</LogonType>
-      <RunLevel>HighestAvailable</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
-    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>%s</Command>
-      <Arguments>%s</Arguments>
-    </Exec>
-  </Actions>
-</Task>
-`, p.StartDate, p.StartTime, escapeXML(p.ExePath), escapeXML(p.Arguments))
-}
-
-// encodeUTF16LEWithBOM 编码为带 BOM 的 UTF-16LE 字节序列（schtasks /xml 的兼容编码）
-func encodeUTF16LEWithBOM(s string) []byte {
-	codes := utf16.Encode([]rune(s))
-	buf := make([]byte, 0, 2+len(codes)*2)
-	buf = append(buf, 0xFF, 0xFE)
-	for _, c := range codes {
-		buf = append(buf, byte(c), byte(c>>8))
+func buildCreateTaskArgs(taskName, exePath, startTime string) []string {
+	taskRun := fmt.Sprintf(`"%s" deploy --all`, exePath)
+	return []string{
+		"/create",
+		"/tn", taskName,
+		"/tr", taskRun,
+		"/sc", "DAILY",
+		"/st", startTime,
+		"/ru", "SYSTEM",
+		"/rl", "HIGHEST",
+		"/f",
 	}
-	return buf
 }
 
-// CreateTask 创建计划任务（每天一次，随机时间，XML 定义）
-// 使用 /xml 而非 /sc DAILY，以启用 StartWhenAvailable 错过补偿；/f 覆盖旧任务
+// CreateTask 创建计划任务（每天一次，随机时间）
+// 使用 schtasks 参数而非手写 XML，兼容旧版 Windows Server；/f 覆盖旧任务
 func CreateTask(taskName string) error {
 	// 验证任务名称
 	if err := ValidateTaskName(taskName); err != nil {
@@ -123,30 +58,10 @@ func CreateTask(taskName string) error {
 	// 服务端 0-8 点自动签发，9 点后拉取确保证书已签发
 	startTime := fmt.Sprintf("%02d:%02d", 9+rand.IntN(15), rand.IntN(60))
 
-	xmlContent := buildTaskXML(taskXMLParams{
-		ExePath:   exePath,
-		Arguments: "deploy --all",
-		StartDate: time.Now().Format("2006-01-02"),
-		StartTime: startTime,
-	})
-
-	tmpFile, err := os.CreateTemp("", "sslctlw-task-*.xml")
-	if err != nil {
-		return fmt.Errorf("创建任务定义临时文件失败: %v", err)
-	}
-	tmpPath := tmpFile.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	if _, err := tmpFile.Write(encodeUTF16LEWithBOM(xmlContent)); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("写入任务定义失败: %v", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("关闭任务定义文件失败: %v", err)
-	}
-
-	output, err := RunCmdCombined(ResolveSystem32Exe("schtasks.exe"),
-		"/create", "/tn", taskName, "/xml", tmpPath, "/f")
+	output, err := RunCmdCombined(
+		ResolveSystem32Exe("schtasks.exe"),
+		buildCreateTaskArgs(taskName, exePath, startTime)...,
+	)
 	if err != nil {
 		return fmt.Errorf("创建任务失败: %v, 输出: %s", err, output)
 	}

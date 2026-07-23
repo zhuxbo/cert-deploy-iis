@@ -130,6 +130,10 @@ func NewClient(baseURL, token string) *Client {
 // IsAllowedAPIURL 校验 API 地址是否允许
 // 规则：HTTPS 必需（localhost 除外）+ SSRF 防护（阻止内网/元数据 IP）
 func IsAllowedAPIURL(baseURL string) (bool, string) {
+	return isAllowedAPIURL(baseURL, net.LookupIP)
+}
+
+func isAllowedAPIURL(baseURL string, lookupIP func(string) ([]net.IP, error)) (bool, string) {
 	if baseURL == "" {
 		return true, ""
 	}
@@ -146,7 +150,7 @@ func IsAllowedAPIURL(baseURL string) (bool, string) {
 	case "https":
 		// HTTPS 仍需 SSRF 检查
 		if !isLocal {
-			if reason := checkSSRF(hostname); reason != "" {
+			if reason := checkSSRF(hostname, lookupIP); reason != "" {
 				return false, reason
 			}
 		}
@@ -175,14 +179,14 @@ func isLoopback(hostname string) bool {
 
 // checkSSRF 检查目标地址是否存在 SSRF 风险
 // 阻止：私有 IP、链路本地、云元数据、未指定地址
-func checkSSRF(hostname string) string {
+func checkSSRF(hostname string, lookupIP func(string) ([]net.IP, error)) string {
 	// 先尝试直接解析为 IP
 	if ip := net.ParseIP(hostname); ip != nil {
 		return checkSSRFIP(ip)
 	}
 
 	// DNS 解析域名
-	ips, err := net.LookupIP(hostname)
+	ips, err := lookupIP(hostname)
 	if err != nil {
 		return "" // DNS 解析失败时放行，由后续 HTTP 请求报错
 	}

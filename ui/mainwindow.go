@@ -97,8 +97,8 @@ type AppWindow struct {
 	txtTaskLog      *ui.Edit
 	statusIndicator *StatusIndicator // 状态指示器
 
-	logBuffer  *LogBuffer      // 日志缓存组件
-	toolbarBtns *ButtonGroup   // 新增: 工具栏按钮组
+	logBuffer   *LogBuffer   // 日志缓存组件
+	toolbarBtns *ButtonGroup // 新增: 工具栏按钮组
 }
 
 // getCerts 安全获取证书列表副本
@@ -289,7 +289,12 @@ func RunApp() {
 		app.statusBar.Parts.AddResizable("就绪", 1)
 
 		// 创建状态指示器
-		app.statusIndicator = NewStatusIndicator(app.mainWnd.Hwnd(), 300, 465, 1001)
+		app.statusIndicator = NewStatusIndicator(
+			app.mainWnd.Hwnd(),
+			ui.DpiX(300), ui.DpiY(465),
+			ui.DpiX(indicatorWidth), ui.DpiY(indicatorHeight),
+			1001,
+		)
 
 		// 延迟初始化
 		go func() {
@@ -371,29 +376,26 @@ func RunApp() {
 			return
 		}
 		cx, cy := int(p.ClientAreaSize().Cx), int(p.ClientAreaSize().Cy)
+		layout := calculateMainLayout(cx, cy, currentMainLayoutMetrics())
 
-		// 调整站点列表大小
-		toolbarHeight := MarginMedium + ButtonHeight + MarginMedium
-		listHeight := cy - toolbarHeight - StatusBarHeight - TaskPanelHeight
-		if listHeight < ListMinHeight {
-			listHeight = ListMinHeight
-		}
-		app.siteList.Hwnd().SetWindowPos(0, MarginMedium, toolbarHeight, cx-MarginLarge, listHeight, co.SWP_NOZORDER)
-
-		// 调整后台任务面板位置
-		taskPanelY := toolbarHeight + listHeight + MarginSmall
-		app.lblTaskSection.Hwnd().SetWindowPos(0, MarginMedium, taskPanelY, 200, 20, co.SWP_NOZORDER)
-		app.btnAutoCheck.Hwnd().SetWindowPos(0, MarginMedium, taskPanelY+25, ButtonWidthLarge, ButtonHeight, co.SWP_NOZORDER)
-		app.btnCheckNow.Hwnd().SetWindowPos(0, MarginMedium+ButtonWidthLarge+MarginMedium, taskPanelY+25, ButtonWidthMedium, ButtonHeight, co.SWP_NOZORDER)
-		app.btnConfig.Hwnd().SetWindowPos(0, MarginMedium+ButtonWidthLarge+ButtonWidthMedium+MarginLarge, taskPanelY+25, ButtonWidthMedium, ButtonHeight, co.SWP_NOZORDER)
+		_ = app.siteList.Hwnd().SetWindowPos(0, layout.siteList.x, layout.siteList.y, layout.siteList.width, layout.siteList.height, co.SWP_NOZORDER)
+		_ = app.lblTaskSection.Hwnd().SetWindowPos(0, layout.taskSection.x, layout.taskSection.y, layout.taskSection.width, layout.taskSection.height, co.SWP_NOZORDER)
+		_ = app.btnAutoCheck.Hwnd().SetWindowPos(0, layout.autoButton.x, layout.autoButton.y, layout.autoButton.width, layout.autoButton.height, co.SWP_NOZORDER)
+		_ = app.btnCheckNow.Hwnd().SetWindowPos(0, layout.checkButton.x, layout.checkButton.y, layout.checkButton.width, layout.checkButton.height, co.SWP_NOZORDER)
+		_ = app.btnConfig.Hwnd().SetWindowPos(0, layout.configButton.x, layout.configButton.y, layout.configButton.width, layout.configButton.height, co.SWP_NOZORDER)
 
 		// 状态指示器位置
 		if app.statusIndicator != nil {
-			app.statusIndicator.SetPosition(300, taskPanelY+ButtonHeight)
+			app.statusIndicator.SetBounds(
+				layout.statusIndicator.x,
+				layout.statusIndicator.y,
+				layout.statusIndicator.width,
+				layout.statusIndicator.height,
+			)
 		}
 
-		app.lblTaskStatus.Hwnd().SetWindowPos(0, 330, taskPanelY+30, cx-350, 20, co.SWP_NOZORDER)
-		app.txtTaskLog.Hwnd().SetWindowPos(0, MarginMedium, taskPanelY+60, cx-MarginLarge, cy-taskPanelY-60-StatusBarHeight-MarginSmall, co.SWP_NOZORDER)
+		_ = app.lblTaskStatus.Hwnd().SetWindowPos(0, layout.statusLabel.x, layout.statusLabel.y, layout.statusLabel.width, layout.statusLabel.height, co.SWP_NOZORDER)
+		_ = app.txtTaskLog.Hwnd().SetWindowPos(0, layout.taskLog.x, layout.taskLog.y, layout.taskLog.width, layout.taskLog.height, co.SWP_NOZORDER)
 	})
 
 	// 按钮事件
