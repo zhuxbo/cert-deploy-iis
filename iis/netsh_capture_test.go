@@ -1,8 +1,10 @@
 package iis
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
 	"testing"
@@ -50,13 +52,22 @@ func (r *netshRecorder) didDelete() bool {
 	return false
 }
 
+func (r *netshRecorder) addCall() string {
+	for _, c := range r.calls {
+		if strings.Contains(c, "exec:http add sslcert") {
+			return c
+		}
+	}
+	return ""
+}
+
 // notRunErr 模拟 netsh 根本没跑起来（PATH 损坏 / 无法创建进程），
 // 与“跑起来但退出码非零”（绑定不存在）是两回事。
 var notRunErr = &exec.Error{Name: "netsh.exe", Err: errors.New("executable file not found in %PATH%")}
 
 // exitErr 模拟 netsh 跑起来并以非零退出（精确查询命中“绑定不存在”）
 func exitErr() error {
-	cmd := exec.Command("sh", "-c", "exit 1")
+	cmd := exec.Command("cmd.exe", "/c", "exit", "1")
 	err := cmd.Run()
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) {
@@ -120,6 +131,94 @@ func TestBindAndVerify_FirstBindWhenAbsent(t *testing.T) {
 
 	if err := bindAndVerify("hostnameport", "example.com:443", stubHash, func() error { return nil }); err != nil {
 		t.Fatalf("绑定不存在时首次绑定应成功, got %v", err)
+	}
+}
+
+// TestBindAndVerify_SuccessPreservesFullBinding 防止成功路径绕过完整快照，
+// 导致 AppID、客户端证书协商、CTL 与吊销检查参数被恢复为 netsh 默认值。
+func TestBindAndVerify_SuccessPreservesFullBinding(t *testing.T) {
+	added := false
+	old := &capturedBinding{
+		CertHash:                oldHash,
+		AppID:                   "{4dc3e181-e14b-4a21-b022-59fc669b0914}",
+		CertStoreName:           "MY",
+		full:                    true,
+		certCheckMode:           certCheckModeNoVerifyRevocation | certCheckModeCachedRevocationOnly | certCheckModeNoUsageCheck,
+		revocationFreshnessTime: 1234,
+		urlRetrievalTimeout:     5678,
+		sslCtlIdentifier:        "SslctlwLabCtl",
+		sslCtlStoreName:         "CA",
+		defaultFlags:            sslFlagUseDSMapper | sslFlagNegotiateClientCert,
+	}
+	r := &netshRecorder{
+		onExec: func(args []string) (string, error) {
+			if strings.Contains(strings.Join(args, " "), "add sslcert") {
+				added = true
+			}
+			return "", nil
+		},
+	}
+	installNetshStub(t, r, func(string, string) (*capturedBinding, error) {
+		if added {
+			return &capturedBinding{CertHash: stubHash, full: true}, nil
+		}
+		return old, nil
+	})
+
+	if err := bindAndVerify("hostnameport", "example.com:443", stubHash, func() error { return nil }); err != nil {
+		t.Fatalf("完整快照替换应成功, got %v", err)
+	}
+	want := "exec:http add sslcert hostnameport=example.com:443 certhash=" + stubHash +
+		" appid={4dc3e181-e14b-4a21-b022-59fc669b0914} certstorename=MY" +
+		" verifyclientcertrevocation=disable verifyrevocationwithcachedclientcertonly=enable" +
+		" usagecheck=disable revocationfreshnesstime=1234 urlretrievaltimeout=5678" +
+		" sslctlidentifier=SslctlwLabCtl sslctlstorename=CA" +
+		" dsmapperusage=enable clientcertnegotiation=enable"
+	if got := r.addCall(); got != want {
+		t.Fatalf("成功路径必须复用完整快照\n got=%s\nwant=%s", got, want)
+	}
+}
+
+// TestBindAndVerify_MinimalCapturePreservesAppIDAndWarns 防止降级捕获时
+// 把已确认的 AppID 丢掉，同时必须显式告知高级参数无法保真；
+// 新证书仍按安装器契约从 LocalMachine\My 查找。
+func TestBindAndVerify_MinimalCapturePreservesAppIDAndWarns(t *testing.T) {
+	added := false
+	old := &capturedBinding{
+		CertHash:      oldHash,
+		AppID:         "{4dc3e181-e14b-4a21-b022-59fc669b0914}",
+		CertStoreName: "WebHosting",
+	}
+	r := &netshRecorder{
+		onExec: func(args []string) (string, error) {
+			if strings.Contains(strings.Join(args, " "), "add sslcert") {
+				added = true
+			}
+			return "", nil
+		},
+	}
+	installNetshStub(t, r, func(string, string) (*capturedBinding, error) {
+		if added {
+			return &capturedBinding{CertHash: stubHash}, nil
+		}
+		return old, nil
+	})
+
+	var logs bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(oldWriter) })
+
+	if err := bindAndVerify("hostnameport", "example.com:443", stubHash, func() error { return nil }); err != nil {
+		t.Fatalf("最小快照替换应维持现有可用性策略, got %v", err)
+	}
+	want := "exec:http add sslcert hostnameport=example.com:443 certhash=" + stubHash +
+		" appid={4dc3e181-e14b-4a21-b022-59fc669b0914} certstorename=MY"
+	if got := r.addCall(); got != want {
+		t.Fatalf("降级路径应保留 AppID 且不生成高级参数\n got=%s\nwant=%s", got, want)
+	}
+	if !strings.Contains(logs.String(), "高级 SSL 参数无法保真") {
+		t.Fatalf("降级路径必须记录保真告警, logs=%q", logs.String())
 	}
 }
 

@@ -108,7 +108,7 @@ Get-ChildItem Cert:\LocalMachine\My
 
 ### netsh 绑定验证
 
-`BindCertificate` 和 `BindCertificateByIP` 在替换前捕获旧绑定完整参数，执行后通过 httpapi 结构化查询验证实际状态，结构化查询不可用时才降级 `netsh show`：
+`BindCertificate` 和 `BindCertificateByIP` 在替换前捕获旧绑定完整参数。成功替换与失败回绑复用同一参数构造逻辑，保留捕获到的 AppID，以及高置信度解码的客户端证书协商、CTL 和吊销检查参数；结构化查询不可用而降级 `netsh show` 时只保留已确认的最小字段，并记录高级 SSL 参数无法保真的警告。执行后通过 httpapi 结构化查询验证实际状态，结构化查询不可用时才降级 `netsh show`：
 
 - 目标证书已生效：成功。
 - 明确不存在：直接用旧快照恢复。

@@ -77,6 +77,7 @@ sslctlw help
 ### 自动部署
 
 计划任务调用 `sslctlw deploy --all` 实现自动续签。`setup` 命令通过 Windows 自带的 `schtasks` 参数创建每日 SYSTEM 任务，兼容 Windows Server 2012+（包括 Server 2016）；`status` 命令显示任务上次运行时间与结果，停摆时告警。
+续签替换 IIS 证书时会保留原绑定的 AppID，以及已由 Windows HTTP API 确认的客户端证书协商、CTL 和吊销检查参数；结构化查询不可用而降级捕获时会记录无法完整保真的警告。
 
 ## API 接口
 

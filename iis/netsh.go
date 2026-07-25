@@ -115,8 +115,8 @@ func sslParamNetshArgs(b *capturedBinding) []string {
 }
 
 // buildRebindArgs 构造 netsh http add sslcert 参数串（纯函数）。
-// 始终包含 keyParam=keyValue / certhash / appid / certstorename（最小三字段回绑）；
-// full=true 时附加从结构化查询解码的高级参数，最大化回绑保真度。
+// 始终包含 keyParam=keyValue / certhash / appid / certstorename（最小三字段）；
+// full=true 时附加从结构化查询解码的高级参数，供成功替换和失败回绑复用。
 func buildRebindArgs(keyParam, keyValue string, b *capturedBinding) []string {
 	args := []string{
 		fmt.Sprintf("%s=%s", keyParam, keyValue),
@@ -223,14 +223,23 @@ func bindAndVerify(keyParam, keyValue, certHash string, unbind func() error) err
 	}
 
 	// 2. 删除已有绑定（绑定可能本就不存在，错误忽略）
+	newBinding := &capturedBinding{CertHash: certHash}
+	if oldBinding != nil {
+		// 复制快照而不改写旧绑定；添加失败时仍需用旧哈希执行回绑。
+		*newBinding = *oldBinding
+		newBinding.CertHash = certHash
+		newBinding.CertStoreName = "MY" // 新证书固定安装到 LocalMachine\My
+		if !oldBinding.full {
+			log.Printf("警告: %s=%s 仅通过 netsh 捕获到最小绑定信息，本次替换的高级 SSL 参数无法保真",
+				keyParam, keyValue)
+		}
+	}
 	_ = unbind()
 
-	// 3. 添加新绑定
-	addOutput, addErr := netshExec("http", "add", "sslcert",
-		fmt.Sprintf("%s=%s", keyParam, keyValue),
-		fmt.Sprintf("certhash=%s", certHash),
-		fmt.Sprintf("appid=%s", defaultAppID),
-		"certstorename=MY")
+	// 3. 添加新绑定：完整捕获时保留 AppID 与已确认的高级 SSL 参数；
+	//    降级捕获时保留已确认的 AppID，不伪造未知高级参数。
+	addArgs := append([]string{"http", "add", "sslcert"}, buildRebindArgs(keyParam, keyValue, newBinding)...)
+	addOutput, addErr := netshExec(addArgs...)
 
 	// 4. 操作后验证目标绑定；明确区分目标已生效、不存在、异常占用与查询失败。
 	current, queryErr := queryBindingWithRetry(
