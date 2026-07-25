@@ -18,6 +18,12 @@ import (
 	"sslctlw/util"
 )
 
+// 证书安装与 IIS 绑定入口（包级变量，供测试注入；生产值为真实实现）
+var (
+	installPFXFn    = cert.InstallPFX
+	bindCertToIISFn = bindCertToIIS
+)
+
 // ProgressFunc 进度回调
 type ProgressFunc func(step, total int, message string)
 
@@ -122,13 +128,15 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 			if exists {
 				log.Printf("证书 %s 已存在，跳过导入", certData.Domain())
 				// 已存在证书仍需绑定生效才算部署成功：与新装路径共用 evalBindOutcome 判定，
-				// 查找出错/全部失败/零匹配（含无法取指纹）同样计失败、发 failure 回调、不写入完成配置
+				// 查找出错/全部失败/零匹配（含无法取指纹）同样计失败、发 failure 回调
 				var br bindResult
 				bindErr := errors.New("无法获取已存在证书的指纹")
 				if certInfo != nil && certInfo.Thumbprint != "" {
-					br, bindErr = bindCertToIIS(certData, certInfo.Thumbprint)
+					br, bindErr = bindCertToIISFn(certData, certInfo.Thumbprint)
 				}
 				dec := decideExistingCert(br, bindErr)
+				// 证书已在存储中，无论绑定成败都写入配置交给计划任务续签接管（与新装路径一致）
+				certConfigs = append(certConfigs, makeCertConfig(certData, opts, serialNumber))
 				if !dec.Deployed {
 					log.Printf("证书 %s 部署失败: %s", certData.Domain(), dec.Reason)
 					sendSetupCallback(client, certData.OrderID, certData.Domain(), false, dec.Reason)
@@ -144,7 +152,6 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 				if notify, useLocal := deriveSetupPolicy(certData, existingCfg, cfgLoadOK); notify {
 					toggleAutoReissue(client, certData.OrderID, useLocal)
 				}
-				certConfigs = append(certConfigs, makeCertConfig(certData, opts, serialNumber))
 				continue
 			}
 		}
@@ -251,7 +258,7 @@ func installCert(client *api.Client, certData api.CertData, keyPEM string, seria
 		return false
 	}
 
-	installResult, err := cert.InstallPFX(pfxPath, "")
+	installResult, err := installPFXFn(pfxPath, "")
 	os.Remove(pfxPath)
 	if err != nil || !installResult.Success {
 		errMsg := "安装失败"
@@ -275,8 +282,14 @@ func installCert(client *api.Client, certData api.CertData, keyPEM string, seria
 	}
 
 	// IIS 绑定：按逐绑定结果如实判定部署成败，不再吞掉绑定错误
-	br, bindErr := bindCertToIIS(certData, installResult.Thumbprint)
+	br, bindErr := bindCertToIISFn(certData, installResult.Thumbprint)
 	bindOK, bindReason := evalBindOutcome(br, bindErr)
+
+	// 证书已装入 Windows 证书存储，无论绑定是否全部生效都要写入配置：
+	// 部署成败（回调与 Installed/Failed 计数）和"该证书是否受管"是两件事，
+	// 一次瞬时绑定失败不应让证书完全脱管——那样计划任务永远接管不了，只能人工重跑 setup。
+	*certConfigs = append(*certConfigs, makeCertConfig(certData, opts, serialNumber))
+
 	if !bindOK {
 		log.Printf("证书 %s 部署失败: %s", certData.Domain(), bindReason)
 		sendSetupCallback(client, certData.OrderID, certData.Domain(), false, bindReason)
@@ -298,7 +311,6 @@ func installCert(client *api.Client, certData api.CertData, keyPEM string, seria
 	// 部署完成回调（spec 4.2 / 5.1，非关键路径）
 	sendSetupCallback(client, certData.OrderID, certData.Domain(), true, "")
 
-	*certConfigs = append(*certConfigs, makeCertConfig(certData, opts, serialNumber))
 	return true
 }
 
@@ -529,7 +541,12 @@ func decideExistingCert(br bindResult, bindErr error) existingBindDecision {
 // 续签时分别走 SNI 与 ipport；不自动开启付费 auto_renew（deploy-spec §1.4 / §5.2）。
 func makeCertConfig(certData api.CertData, opts Options, serialNumber string) config.CertConfig {
 	certAPI := config.CertAPIConfig{URL: opts.URL}
-	certAPI.SetToken(opts.Token)
+	// 这是 Token 唯一的落盘入口：加密失败若被忽略，配置会写入空 encrypted_token，
+	// 之后每次续签都以 401 失败，且 GetToken 因密文为空而报“未配置”，难以定位到 setup。
+	if err := certAPI.SetToken(opts.Token); err != nil {
+		log.Printf("警告: 证书 %s (订单 %d) Token 加密失败，配置将不含可用 Token，请重新运行 setup: %v",
+			certData.Domain(), certData.OrderID, err)
+	}
 
 	// 优先从证书 PEM 提取域名（包含完整 SAN），API 数据作为回退
 	domains := extractDomainsWithFallback(certData)
@@ -619,11 +636,7 @@ func saveSetupConfig(certConfigs []config.CertConfig, renewBeforeDays int) error
 	for _, newCert := range certConfigs {
 		existing := cfg.GetCertificateByOrderID(newCert.OrderID)
 		if existing != nil {
-			existing.API = newCert.API
-			existing.Domains = newCert.Domains
-			existing.Metadata.CertExpiresAt = newCert.Metadata.CertExpiresAt
-			existing.Enabled = true
-			existing.AutoBindMode = true
+			mergeSetupCert(existing, newCert)
 		} else {
 			cfg.AddCertificate(newCert)
 		}
@@ -632,6 +645,29 @@ func saveSetupConfig(certConfigs []config.CertConfig, renewBeforeDays int) error
 	cfg.AutoCheckEnabled = true
 	applySetupRenewBeforeDays(cfg, renewBeforeDays)
 	return cfg.Save()
+}
+
+// mergeSetupCert 把本次 setup 观察到的证书形态合并进已有订单配置（纯函数）。
+// AutoBindMode 随证书形态走：含 IP SAN 的证书由 makeCertConfig 派生为显式规则模式，
+// 若在此被无条件写回自动绑定模式，deployCertAutoMode 只认 SNI 绑定会把 IP 证书判成
+// “未找到匹配的 IIS SSL 绑定”，每轮部署失败直到 CAPPED。
+// RenewMode/ValidationMethod/BindRules 仅在 setup 派生出值时覆盖，
+// 避免清空用户为域名证书手工维护的配置。
+func mergeSetupCert(existing *config.CertConfig, newCert config.CertConfig) {
+	existing.API = newCert.API
+	existing.Domains = newCert.Domains
+	existing.Metadata.CertExpiresAt = newCert.Metadata.CertExpiresAt
+	existing.Enabled = true
+	existing.AutoBindMode = newCert.AutoBindMode
+	if len(newCert.BindRules) > 0 {
+		existing.BindRules = newCert.BindRules
+	}
+	if newCert.RenewMode != "" {
+		existing.RenewMode = newCert.RenewMode
+	}
+	if newCert.ValidationMethod != "" {
+		existing.ValidationMethod = newCert.ValidationMethod
+	}
 }
 
 func applySetupRenewBeforeDays(cfg *config.Config, days int) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -14,6 +15,20 @@ import (
 
 // bindVerifyRetryDelay verify 步瞬时未命中后的重查间隔（测试可置 0 加速）
 var bindVerifyRetryDelay = 200 * time.Millisecond
+
+// netsh 执行与 httpapi 查询入口（包级变量，供测试注入；生产值为真实实现）
+var (
+	// netshQuery 只读查询（stdout）
+	netshQuery = func(args ...string) (string, error) {
+		return util.RunCmd(util.ResolveSystem32Exe("netsh.exe"), args...)
+	}
+	// netshExec 变更类命令（stdout+stderr，失败信息需要回显）
+	netshExec = func(args ...string) (string, error) {
+		return util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), args...)
+	}
+	// queryFullBindingFn httpapi 结构化查询入口
+	queryFullBindingFn = queryFullBinding
+)
 
 // 默认 AppID (用于标识应用程序)
 const defaultAppID = "{00000000-0000-0000-0000-000000000000}"
@@ -147,16 +162,35 @@ func parseBindingByValue(output string) *capturedBinding {
 	return b
 }
 
-// queryBindingByNetsh 经 netsh 查询单条 SSL 绑定。
-// netsh 非零退出既可能是不存在也可能是查询故障，因此一律返回 error，不伪装成“不存在”。
+// netshCompleted 判断 netsh 是否真正执行完毕（而非根本没跑起来）。
+// 精确查询下“执行完毕 + 非零退出”意味着该键无绑定；进程无法创建（PATH 损坏、
+// ResolveSystem32Exe 未解析到绝对路径）则状态未知，不得据此执行破坏性操作。
+// 残余不确定：命令超时被强制终止在 Windows 上同样表现为已退出，会被归入“不存在”；
+// netsh show 属只读快查，超时概率远低于进程创建失败，故取此判定。
+func netshCompleted(err error) bool {
+	var exitErr *exec.ExitError
+	// ProcessState 为空说明进程从未进入退出状态，Exited() 会解引用空指针
+	if !errors.As(err, &exitErr) || exitErr.ProcessState == nil {
+		return false
+	}
+	return exitErr.Exited()
+}
+
+// queryBindingByNetsh 经 netsh 查询单条 SSL 绑定，返回三态：
+// (binding, nil) 确认存在；(nil, nil) 确认不存在（netsh 执行完毕且精确查询无结果）；
+// (nil, err) 状态未知（netsh 无法执行或输出异常），调用方不得据此做破坏性操作。
 func queryBindingByNetsh(keyParam, keyValue string) (*capturedBinding, error) {
-	output, err := util.RunCmd(util.ResolveSystem32Exe("netsh.exe"), "http", "show", "sslcert",
+	output, err := netshQuery("http", "show", "sslcert",
 		fmt.Sprintf("%s=%s", keyParam, keyValue))
 	if err != nil {
+		if netshCompleted(err) {
+			return nil, nil // netsh 已执行并以非零退出：该键无绑定
+		}
 		return nil, fmt.Errorf("netsh 查询失败: %w", err)
 	}
 	binding := parseBindingByValue(output)
 	if binding == nil {
+		// 退出码 0 却解析不出证书哈希属异常输出，宁可判未知也不误判为不存在
 		return nil, errors.New("netsh 查询成功但输出无法解析")
 	}
 	return binding, nil
@@ -165,7 +199,7 @@ func queryBindingByNetsh(keyParam, keyValue string) (*capturedBinding, error) {
 // queryBindingByKey 查询单条 SSL 绑定（keyParam: "hostnameport" 或 "ipport"）。
 // 优先使用 httpapi 精确区分“不存在”和“查询失败”；结构化查询不可用时降级 netsh。
 func queryBindingByKey(keyParam, keyValue string) (*capturedBinding, error) {
-	binding, structuredErr := queryFullBinding(keyParam, keyValue)
+	binding, structuredErr := queryFullBindingFn(keyParam, keyValue)
 	if structuredErr == nil {
 		return binding, nil
 	}
@@ -176,29 +210,23 @@ func queryBindingByKey(keyParam, keyValue string) (*capturedBinding, error) {
 	return nil, fmt.Errorf("结构化查询失败: %v; %w", structuredErr, netshErr)
 }
 
-// captureBinding 捕获旧绑定完整参数供回绑：
-// 优先经 httpapi HttpQueryServiceConfiguration 结构化查询（locale 无关，含 flags/吊销/SSL CTL 等高级参数），
-// 结构化查询失败（API 不可用/结构解析异常）降级为 netsh show 最小三字段捕获；明确不存在则返回 nil。
-func captureBinding(keyParam, keyValue string) *capturedBinding {
-	if full, err := queryFullBinding(keyParam, keyValue); err == nil {
-		return full
-	}
-	binding, _ := queryBindingByNetsh(keyParam, keyValue)
-	return binding
-}
-
 // bindAndVerify 通用绑定流程：捕获旧绑定 → 删除 → 添加 → 验证 → 失败回绑
 // 成败判定以操作后 show sslcert 查到的 certhash 为准（locale 无关，不依赖输出关键词）；
 // 新绑定未生效时用捕获的旧绑定回绑恢复，避免绑定丢失导致站点下线且自动模式永不自愈
 func bindAndVerify(keyParam, keyValue, certHash string, unbind func() error) error {
-	// 1. 删除前捕获旧绑定完整参数（供添加失败时回绑），优先结构化查询含高级 SSL 参数
-	oldBinding := captureBinding(keyParam, keyValue)
+	// 1. 删除前捕获旧绑定完整参数（供添加失败时回绑），优先结构化查询含高级 SSL 参数。
+	//    状态无法确认时必须在删除前中止：先删再发现没有快照可回绑，会让站点 HTTPS 下线且无法恢复。
+	oldBinding, captureErr := queryBindingByKey(keyParam, keyValue)
+	if captureErr != nil {
+		return fmt.Errorf("无法确认 %s=%s 的现有绑定状态，已中止绑定以避免删除后无法恢复: %w",
+			keyParam, keyValue, captureErr)
+	}
 
 	// 2. 删除已有绑定（绑定可能本就不存在，错误忽略）
 	_ = unbind()
 
 	// 3. 添加新绑定
-	addOutput, addErr := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), "http", "add", "sslcert",
+	addOutput, addErr := netshExec("http", "add", "sslcert",
 		fmt.Sprintf("%s=%s", keyParam, keyValue),
 		fmt.Sprintf("certhash=%s", certHash),
 		fmt.Sprintf("appid=%s", defaultAppID),
@@ -238,7 +266,7 @@ func bindAndVerify(keyParam, keyValue, certHash string, unbind func() error) err
 // 参数串由 buildRebindArgs 生成：完整捕获时还原全部高级 SSL 参数，最小捕获时保持三字段回绑。
 func rebindOldBinding(keyParam, keyValue string, current, old *capturedBinding) error {
 	deleteCurrent := func() error {
-		output, err := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), "http", "delete", "sslcert",
+		output, err := netshExec("http", "delete", "sslcert",
 			fmt.Sprintf("%s=%s", keyParam, keyValue))
 		if err != nil {
 			return fmt.Errorf("命令错误=%v, 输出: %s", err, strings.TrimSpace(output))
@@ -247,7 +275,7 @@ func rebindOldBinding(keyParam, keyValue string, current, old *capturedBinding) 
 	}
 	addOld := func() error {
 		args := append([]string{"http", "add", "sslcert"}, buildRebindArgs(keyParam, keyValue, old)...)
-		output, err := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), args...)
+		output, err := netshExec(args...)
 		if err != nil {
 			return fmt.Errorf("命令错误=%v, 输出: %s", err, strings.TrimSpace(output))
 		}
@@ -345,7 +373,7 @@ func UnbindCertificate(hostname string, port int) error {
 	}
 
 	hostnamePort := fmt.Sprintf("%s:%d", hostname, port)
-	output, err := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), "http", "delete", "sslcert",
+	output, err := netshExec("http", "delete", "sslcert",
 		fmt.Sprintf("hostnameport=%s", hostnamePort))
 
 	if err != nil {
@@ -373,7 +401,7 @@ func UnbindCertificateByIP(ip string, port int) error {
 	}
 
 	ipPort := formatIPPortKey(ip, port)
-	output, err := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), "http", "delete", "sslcert",
+	output, err := netshExec("http", "delete", "sslcert",
 		fmt.Sprintf("ipport=%s", ipPort))
 
 	if err != nil {
@@ -385,7 +413,7 @@ func UnbindCertificateByIP(ip string, port int) error {
 
 // ListSSLBindings 列出所有 SSL 证书绑定
 func ListSSLBindings() ([]SSLBinding, error) {
-	output, err := util.RunCmd(util.ResolveSystem32Exe("netsh.exe"), "http", "show", "sslcert")
+	output, err := netshQuery("http", "show", "sslcert")
 	if err != nil {
 		return nil, fmt.Errorf("获取 SSL 绑定列表失败: %v", err)
 	}

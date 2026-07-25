@@ -62,7 +62,10 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 	// 并发保护：获取文件锁，防止多进程同时续签
 	lockPath := filepath.Join(config.GetDataDir(), "deploy.lock")
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
-	if err == nil {
+	if err != nil {
+		// 无锁运行时多进程可能并发续签（重复提交 CSR、重复计数、争抢配置写入），必须留痕
+		log.Printf("警告: 无法打开部署锁 %s，本次将在无并发保护下运行: %v", lockPath, err)
+	} else {
 		locked, lockErr := tryLockFile(lockFile)
 		if lockErr != nil {
 			log.Printf("警告: 获取部署锁失败: %v", lockErr)
@@ -316,15 +319,24 @@ func processOneCert(cfg *config.Config, d *Deployer, i int, conflicts map[string
 	}
 
 	// 部署结果原子落盘 + 部署计数收敛
-	if shouldFinalizeDeployment(rep, certData.Certificate != "") {
+	finalized := shouldFinalizeDeployment(rep, certData.Certificate != "")
+	if finalized {
 		// 全部绑定成功：落盘证书、转正 pending 私钥、清零签发与部署状态
 		if err := d.Store.SaveCertificate(certData.OrderID, certData.Certificate, certData.CACert); err != nil {
 			log.Printf("警告: 保存已部署证书失败: %v", err)
 		}
-		finalizeSuccessfulDeployment(d, deployCertCfg, certData, privateKey, isLocal)
-		updateCertDomains(deployCertCfg, certData.Certificate)
-		updateCertSerial(deployCertCfg, certData.Certificate)
-	} else {
+		// 转正失败说明生命周期未收敛（本地正式私钥仍是旧的），本轮按失败处理：
+		// 必须清掉在途标记让部署计数继续推进，否则 DeployStartedAt 永久残留会使后续每轮
+		// 都被判为崩溃恢复重放而不计数，绕过 CAPPED 兜底并每轮重复上报一次 success 回调。
+		if finalizeSuccessfulDeployment(d, deployCertCfg, certData, privateKey, isLocal) {
+			updateCertDomains(deployCertCfg, certData.Certificate)
+			updateCertSerial(deployCertCfg, certData.Certificate)
+		} else {
+			finalized = false
+			rep = deployReport{report: true, success: false, message: "pending 私钥转正失败，部署生命周期未收敛"}
+		}
+	}
+	if !finalized {
 		reconcileFailedDeploy(&deployCertCfg.Metadata, rep.report, replaying)
 	}
 	if err := cfg.Save(); err != nil {
@@ -899,7 +911,11 @@ func handleLocalKeyMode(d *Deployer, client APIClient, certCfg *config.CertConfi
 			return nil, "", "", fmt.Errorf("获取订单 %d 证书失败: %w", certCfg.OrderID, err)
 		}
 
-		waitingForIssue := certCfg.Metadata.LastIssueState != "" || d.Store.HasPendingPrivateKey(certCfg.CertName)
+		// 只有真正在途的签发（processing 或残留 pending 私钥）才跳过续签窗口直接部署。
+		// 不能用 LastIssueState != ""：default 分支会把 unpaid/cancelled 等非预期状态写进来，
+		// 那样订单一旦转 active 就会绕过续签窗口，把远未到期的证书重新部署一遍。
+		waitingForIssue := certCfg.Metadata.LastIssueState == config.IssueStateProcessing ||
+			d.Store.HasPendingPrivateKey(certCfg.CertName)
 		switch certData.Status {
 		case "processing", "pending", "approving":
 			// 服务端 pending/approving 归一为 processing：只等待/查询，不重复提交、不增计数（deploy-spec §2.4）
