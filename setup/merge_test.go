@@ -15,10 +15,10 @@ func TestMergeSetupCert_IPDerivationSurvivesRerun(t *testing.T) {
 	opts := Options{URL: "https://example.com/api/deploy", Token: "tok"}
 
 	t.Run("已配置的 IP 证书重跑保持显式规则", func(t *testing.T) {
-		derived := makeCertConfig(api.CertData{OrderID: 100, Domains: "1.2.3.4"}, opts, "S1")
+		derived := mustMakeCertConfig(t, api.CertData{OrderID: 100, Domains: "1.2.3.4"}, opts, "S1")
 		existing := derived // 首次 setup 已按派生结果落盘
 
-		mergeSetupCert(&existing, makeCertConfig(api.CertData{OrderID: 100, Domains: "1.2.3.4"}, opts, "S2"))
+		mergeSetupCert(&existing, mustMakeCertConfig(t, api.CertData{OrderID: 100, Domains: "1.2.3.4"}, opts, "S2"))
 
 		if existing.AutoBindMode {
 			t.Error("IP 证书重跑后不得回到自动绑定模式")
@@ -32,12 +32,12 @@ func TestMergeSetupCert_IPDerivationSurvivesRerun(t *testing.T) {
 	})
 
 	t.Run("域名证书续期新增 IP SAN 后转为显式规则", func(t *testing.T) {
-		existing := makeCertConfig(api.CertData{OrderID: 200, Domains: "example.com"}, opts, "S1")
+		existing := mustMakeCertConfig(t, api.CertData{OrderID: 200, Domains: "example.com"}, opts, "S1")
 		if !existing.AutoBindMode {
 			t.Fatal("前置条件：域名证书应为自动绑定模式")
 		}
 
-		mergeSetupCert(&existing, makeCertConfig(api.CertData{OrderID: 200, Domains: "example.com,1.2.3.4"}, opts, "S2"))
+		mergeSetupCert(&existing, mustMakeCertConfig(t, api.CertData{OrderID: 200, Domains: "example.com,1.2.3.4"}, opts, "S2"))
 
 		if existing.AutoBindMode {
 			t.Error("证书新增 IP SAN 后必须转为显式绑定规则模式")
@@ -51,11 +51,11 @@ func TestMergeSetupCert_IPDerivationSurvivesRerun(t *testing.T) {
 	})
 
 	t.Run("域名证书不清空用户手工维护的绑定规则", func(t *testing.T) {
-		existing := makeCertConfig(api.CertData{OrderID: 300, Domains: "example.com"}, opts, "S1")
+		existing := mustMakeCertConfig(t, api.CertData{OrderID: 300, Domains: "example.com"}, opts, "S1")
 		existing.BindRules = []config.BindRule{{Domain: "example.com", Port: 8443}}
 		existing.ValidationMethod = config.ValidationMethodFile
 
-		mergeSetupCert(&existing, makeCertConfig(api.CertData{OrderID: 300, Domains: "example.com"}, opts, "S2"))
+		mergeSetupCert(&existing, mustMakeCertConfig(t, api.CertData{OrderID: 300, Domains: "example.com"}, opts, "S2"))
 
 		if len(existing.BindRules) != 1 || existing.BindRules[0].Port != 8443 {
 			t.Errorf("setup 未派生规则时不得清空用户配置, got %+v", existing.BindRules)
@@ -67,7 +67,7 @@ func TestMergeSetupCert_IPDerivationSurvivesRerun(t *testing.T) {
 
 	t.Run("始终同步 API 与到期时间并启用", func(t *testing.T) {
 		existing := config.CertConfig{OrderID: 400, Enabled: false}
-		newCert := makeCertConfig(api.CertData{OrderID: 400, Domains: "example.com", ExpiresAt: "2026-12-31"}, opts, "S")
+		newCert := mustMakeCertConfig(t, api.CertData{OrderID: 400, Domains: "example.com", ExpiresAt: "2026-12-31"}, opts, "S")
 
 		mergeSetupCert(&existing, newCert)
 

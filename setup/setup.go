@@ -20,8 +20,10 @@ import (
 
 // 证书安装与 IIS 绑定入口（包级变量，供测试注入；生产值为真实实现）
 var (
-	installPFXFn    = cert.InstallPFX
-	bindCertToIISFn = bindCertToIIS
+	installPFXFn      = cert.InstallPFX
+	bindCertToIISFn   = bindCertToIIS
+	saveSetupConfigFn = saveSetupConfig
+	createTaskFn      = util.CreateTask
 )
 
 // ProgressFunc 进度回调
@@ -68,6 +70,11 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 		return nil, fmt.Errorf("API 地址不合法: %s", reason)
 	}
 
+	existingCfg, cfgErr := config.Load()
+	if cfgErr != nil {
+		return nil, fmt.Errorf("加载现有配置失败，已停止 setup 以避免覆盖: %w", cfgErr)
+	}
+
 	client := api.NewClient(opts.URL, opts.Token)
 
 	// 2. 查询证书（独立超时：交互可能长时间阻塞，各 API 调用各自新建 context，
@@ -109,17 +116,10 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 	result := &RunResult{}
 	var certConfigs []config.CertConfig
 	var needKeys []needKeyCert
+	var setupErrs []error
 
 	// 现有配置：setup 重跑时按订单已配置的续签模式通知服务端（spec 5.2），
 	// 避免把 local 模式订单的服务端自动重签误开为 pull 语义。
-	// 配置存在但加载失败时无法确认既有模式，本次跳过续签模式通知（不通知优于错误通知）
-	existingCfg, cfgErr := config.Load()
-	cfgLoadOK := cfgErr == nil
-	if cfgErr != nil {
-		existingCfg = nil
-		log.Printf("警告: 加载现有配置失败 (%v)，本次 setup 跳过服务端续签模式通知", cfgErr)
-	}
-
 	for _, certData := range activeCerts {
 		// 优先级 3：检查是否已在 Windows 证书存储中
 		serialNumber, _ := cert.GetCertSerialNumber(certData.Certificate)
@@ -136,20 +136,29 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 				}
 				dec := decideExistingCert(br, bindErr)
 				// 证书已在存储中，无论绑定成败都写入配置交给计划任务续签接管（与新装路径一致）
-				certConfigs = append(certConfigs, makeCertConfig(certData, opts, serialNumber))
 				if !dec.Deployed {
 					log.Printf("证书 %s 部署失败: %s", certData.Domain(), dec.Reason)
 					sendSetupCallback(client, certData.OrderID, certData.Domain(), false, dec.Reason)
 					result.Failed++
+				} else {
+					if dec.Reason != "" {
+						log.Printf("证书 %s %s", certData.Domain(), dec.Reason)
+					}
+					result.Skipped++
+				}
+				certConfig, configErr := makeCertConfig(certData, opts, serialNumber)
+				if configErr != nil {
+					setupErrs = append(setupErrs, configErr)
+					log.Printf("证书 %s 配置构造失败: %v", certData.Domain(), configErr)
 					continue
 				}
-				if dec.Reason != "" {
-					log.Printf("证书 %s %s", certData.Domain(), dec.Reason)
+				certConfigs = append(certConfigs, certConfig)
+				if !dec.Deployed {
+					continue
 				}
-				result.Skipped++
 				// 补通知服务端续签模式：installCert 是新装唯一通知点，首跑绑定失败不通知，
 				// 重跑走本路径绑定生效后补通知，否则 pull 订单服务端 auto_reissue 永不开启（spec 5.2），到期续签停摆
-				if notify, useLocal := deriveSetupPolicy(certData, existingCfg, cfgLoadOK); notify {
+				if notify, useLocal := deriveSetupPolicy(certData, existingCfg, true); notify {
 					toggleAutoReissue(client, certData.OrderID, useLocal)
 				}
 				continue
@@ -166,8 +175,12 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 		}
 
 		log.Printf("证书 %s 使用 %s 私钥", certData.Domain(), source)
-		notify, useLocal := deriveSetupPolicy(certData, existingCfg, cfgLoadOK)
-		if ok := installCert(client, certData, keyPEM, serialNumber, opts, &certConfigs, result, notify, useLocal); !ok {
+		notify, useLocal := deriveSetupPolicy(certData, existingCfg, true)
+		deployed, installErr := installCert(client, certData, keyPEM, serialNumber, opts, &certConfigs, result, notify, useLocal)
+		if installErr != nil {
+			setupErrs = append(setupErrs, installErr)
+		}
+		if !deployed {
 			result.Failed++
 		}
 	}
@@ -210,8 +223,12 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 				continue
 			}
 
-			notify, useLocal := deriveSetupPolicy(nk.certData, existingCfg, cfgLoadOK)
-			if ok := installCert(client, nk.certData, keyPEM, nk.serialNumber, opts, &certConfigs, result, notify, useLocal); !ok {
+			notify, useLocal := deriveSetupPolicy(nk.certData, existingCfg, true)
+			deployed, installErr := installCert(client, nk.certData, keyPEM, nk.serialNumber, opts, &certConfigs, result, notify, useLocal)
+			if installErr != nil {
+				setupErrs = append(setupErrs, installErr)
+			}
+			if !deployed {
 				result.Failed++
 			}
 			result.NeedKey--
@@ -221,27 +238,37 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 	// 6. 保存配置
 	report(fmt.Sprintf("保存配置（安装 %d, 已存在 %d, 失败 %d, 需要私钥 %d）...",
 		result.Installed, result.Skipped, result.Failed, result.NeedKey))
-	if err := saveSetupConfig(certConfigs, client.LastRenewBeforeDays); err != nil {
-		log.Printf("警告: 保存配置失败: %v", err)
+	mergeSetupConfigs(existingCfg, certConfigs, client.LastRenewBeforeDays)
+	partialErr := errors.Join(setupErrs...)
+	if result.Failed > 0 || result.NeedKey > 0 {
+		partialErr = errors.Join(partialErr, fmt.Errorf("部分证书部署未完成: 安装 %d, 已存在 %d, 失败 %d, 需要私钥 %d",
+			result.Installed, result.Skipped, result.Failed, result.NeedKey))
+	}
+	if err := saveSetupConfigFn(existingCfg); err != nil {
+		return result, errors.Join(partialErr, fmt.Errorf("保存配置失败: %w", err))
 	}
 
 	// 7. 创建计划任务
 	report("创建计划任务...")
 	taskName := config.DefaultTaskName
-	if err := util.CreateTask(taskName); err != nil {
-		log.Printf("创建计划任务失败: %v", err)
+	taskErr := createTaskFn(taskName)
+	if taskErr != nil {
+		log.Printf("创建计划任务失败: %v", taskErr)
 	} else {
 		log.Printf("计划任务已创建: %s", taskName)
+	}
+
+	finalErr := partialErr
+	if taskErr != nil {
+		finalErr = errors.Join(finalErr, fmt.Errorf("创建计划任务失败: %w", taskErr))
+	}
+	if finalErr != nil {
+		return result, finalErr
 	}
 
 	// 完成
 	report(fmt.Sprintf("完成: 安装 %d, 已存在 %d, 失败 %d, 需要私钥 %d",
 		result.Installed, result.Skipped, result.Failed, result.NeedKey))
-
-	if result.Failed > 0 || result.NeedKey > 0 {
-		return result, fmt.Errorf("部分证书部署未完成: 安装 %d, 已存在 %d, 失败 %d, 需要私钥 %d",
-			result.Installed, result.Skipped, result.Failed, result.NeedKey)
-	}
 
 	return result, nil
 }
@@ -250,12 +277,22 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 // notifyReissue：是否通知服务端续签模式（现有配置不可读时跳过）；
 // useLocalKey：订单在现有配置中的生效续签模式（true=local）
 // 成功返回 true 并更新 result.Installed 和 certConfigs
-func installCert(client *api.Client, certData api.CertData, keyPEM string, serialNumber string, opts Options, certConfigs *[]config.CertConfig, result *RunResult, notifyReissue, useLocalKey bool) bool {
+func installCert(
+	client *api.Client,
+	certData api.CertData,
+	keyPEM string,
+	serialNumber string,
+	opts Options,
+	certConfigs *[]config.CertConfig,
+	result *RunResult,
+	notifyReissue, useLocalKey bool,
+	configMakers ...func(api.CertData, Options, string) (config.CertConfig, error),
+) (bool, error) {
 	pfxPath, err := cert.PEMToPFX(certData.Certificate, keyPEM, certData.CACert, "")
 	if err != nil {
 		log.Printf("证书 %s 转换失败: %v", certData.Domain(), err)
 		sendSetupCallback(client, certData.OrderID, certData.Domain(), false, fmt.Sprintf("转换 PFX 失败: %v", err))
-		return false
+		return false, nil
 	}
 
 	installResult, err := installPFXFn(pfxPath, "")
@@ -269,7 +306,7 @@ func installCert(client *api.Client, certData api.CertData, keyPEM string, seria
 		}
 		log.Printf("证书 %s 安装失败: %s", certData.Domain(), errMsg)
 		sendSetupCallback(client, certData.OrderID, certData.Domain(), false, "安装证书失败: "+errMsg)
-		return false
+		return false, nil
 	}
 
 	log.Printf("证书 %s 安装成功: %s", certData.Domain(), installResult.Thumbprint)
@@ -284,22 +321,37 @@ func installCert(client *api.Client, certData api.CertData, keyPEM string, seria
 	// IIS 绑定：按逐绑定结果如实判定部署成败，不再吞掉绑定错误
 	br, bindErr := bindCertToIISFn(certData, installResult.Thumbprint)
 	bindOK, bindReason := evalBindOutcome(br, bindErr)
+	if bindOK {
+		result.Installed++
+	}
 
 	// 证书已装入 Windows 证书存储，无论绑定是否全部生效都要写入配置：
 	// 部署成败（回调与 Installed/Failed 计数）和"该证书是否受管"是两件事，
 	// 一次瞬时绑定失败不应让证书完全脱管——那样计划任务永远接管不了，只能人工重跑 setup。
-	*certConfigs = append(*certConfigs, makeCertConfig(certData, opts, serialNumber))
+	configMaker := makeCertConfig
+	if len(configMakers) > 0 && configMakers[0] != nil {
+		configMaker = configMakers[0]
+	}
+	certConfig, configErr := configMaker(certData, opts, serialNumber)
+	if configErr != nil {
+		if bindOK {
+			sendSetupCallback(client, certData.OrderID, certData.Domain(), true, "")
+		} else {
+			sendSetupCallback(client, certData.OrderID, certData.Domain(), false, bindReason)
+			return false, errors.Join(configErr, fmt.Errorf("部署失败: %s", bindReason))
+		}
+		return bindOK, configErr
+	}
+	*certConfigs = append(*certConfigs, certConfig)
 
 	if !bindOK {
 		log.Printf("证书 %s 部署失败: %s", certData.Domain(), bindReason)
 		sendSetupCallback(client, certData.OrderID, certData.Domain(), false, bindReason)
-		return false
+		return false, nil
 	}
 	if bindReason != "" {
 		log.Printf("证书 %s %s", certData.Domain(), bindReason)
 	}
-
-	result.Installed++
 
 	// 通知服务端续签模式：按订单现有配置的生效模式（未配置的新订单默认 pull）
 	if notifyReissue {
@@ -311,7 +363,7 @@ func installCert(client *api.Client, certData api.CertData, keyPEM string, seria
 	// 部署完成回调（spec 4.2 / 5.1，非关键路径）
 	sendSetupCallback(client, certData.OrderID, certData.Domain(), true, "")
 
-	return true
+	return true, nil
 }
 
 // sendSetupCallback 发送 setup 部署回调（同步，非关键路径，失败仅记日志）
@@ -539,12 +591,22 @@ func decideExistingCert(br bindResult, bindErr error) existingBindDecision {
 // makeCertConfig 创建证书配置。
 // SAN 含 IP 的证书自动派生为 local + file，并为全部 DNS/IP SAN 生成显式绑定规则，
 // 续签时分别走 SNI 与 ipport；不自动开启付费 auto_renew（deploy-spec §1.4 / §5.2）。
-func makeCertConfig(certData api.CertData, opts Options, serialNumber string) config.CertConfig {
+func makeCertConfig(certData api.CertData, opts Options, serialNumber string) (config.CertConfig, error) {
+	return makeCertConfigWithTokenSetter(certData, opts, serialNumber,
+		func(certAPI *config.CertAPIConfig, token string) error {
+			return certAPI.SetToken(token)
+		})
+}
+
+func makeCertConfigWithTokenSetter(
+	certData api.CertData,
+	opts Options,
+	serialNumber string,
+	setToken func(*config.CertAPIConfig, string) error,
+) (config.CertConfig, error) {
 	certAPI := config.CertAPIConfig{URL: opts.URL}
-	// 这是 Token 唯一的落盘入口：加密失败若被忽略，配置会写入空 encrypted_token，
-	// 之后每次续签都以 401 失败，且 GetToken 因密文为空而报“未配置”，难以定位到 setup。
-	if err := certAPI.SetToken(opts.Token); err != nil {
-		log.Printf("警告: 证书 %s (订单 %d) Token 加密失败，配置将不含可用 Token，请重新运行 setup: %v",
+	if err := setToken(&certAPI, opts.Token); err != nil {
+		return config.CertConfig{}, fmt.Errorf("证书 %s (订单 %d) Token 加密失败: %w",
 			certData.Domain(), certData.OrderID, err)
 	}
 
@@ -578,7 +640,7 @@ func makeCertConfig(certData api.CertData, opts Options, serialNumber string) co
 		cfg.BindRules = rules
 	}
 
-	return cfg
+	return cfg, nil
 }
 
 // extractDomainsWithFallback 优先从证书 PEM 提取域名，失败则回退到 API 数据
@@ -627,12 +689,7 @@ func deriveSetupPolicy(certData api.CertData, existingCfg *config.Config, cfgLoa
 }
 
 // saveSetupConfig 保存 setup 生成的证书配置
-func saveSetupConfig(certConfigs []config.CertConfig, renewBeforeDays int) error {
-	cfg, err := config.Load()
-	if err != nil {
-		cfg = config.DefaultConfig()
-	}
-
+func mergeSetupConfigs(cfg *config.Config, certConfigs []config.CertConfig, renewBeforeDays int) {
 	for _, newCert := range certConfigs {
 		existing := cfg.GetCertificateByOrderID(newCert.OrderID)
 		if existing != nil {
@@ -644,6 +701,9 @@ func saveSetupConfig(certConfigs []config.CertConfig, renewBeforeDays int) error
 
 	cfg.AutoCheckEnabled = true
 	applySetupRenewBeforeDays(cfg, renewBeforeDays)
+}
+
+func saveSetupConfig(cfg *config.Config) error {
 	return cfg.Save()
 }
 

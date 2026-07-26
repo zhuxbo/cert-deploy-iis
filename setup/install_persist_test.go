@@ -27,7 +27,7 @@ func setupTestPair(t *testing.T, cn string) (certPEM, keyPEM string) {
 		t.Fatalf("生成测试密钥失败: %v", err)
 	}
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
 		Subject:      pkix.Name{CommonName: cn},
 		DNSNames:     []string{cn},
 		NotBefore:    time.Now().Add(-time.Hour),
@@ -90,9 +90,11 @@ func TestInstallCert_BindFailureStillPersistsConfig(t *testing.T) {
 			var certConfigs []config.CertConfig
 			result := &RunResult{}
 
-			ok := installCert(client, certData, keyPEM, "S", Options{URL: "https://x.example.com", Token: "t"},
+			ok, err := installCert(client, certData, keyPEM, "S", Options{URL: "https://x.example.com", Token: "t"},
 				&certConfigs, result, false, false)
-
+			if err != nil {
+				t.Fatalf("installCert() error = %v", err)
+			}
 			if ok {
 				t.Error("绑定未全部生效应判为部署失败")
 			}
@@ -121,8 +123,12 @@ func TestInstallCert_SuccessPersistsOnce(t *testing.T) {
 	var certConfigs []config.CertConfig
 	result := &RunResult{}
 
-	if ok := installCert(client, certData, keyPEM, "S", Options{URL: "https://x.example.com", Token: "t"},
-		&certConfigs, result, false, false); !ok {
+	ok, err := installCert(client, certData, keyPEM, "S", Options{URL: "https://x.example.com", Token: "t"},
+		&certConfigs, result, false, false)
+	if err != nil {
+		t.Fatalf("installCert() error = %v", err)
+	}
+	if !ok {
 		t.Fatal("全部绑定成功应判为部署成功")
 	}
 	if result.Installed != 1 {
