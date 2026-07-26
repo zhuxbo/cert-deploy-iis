@@ -131,7 +131,7 @@ func runAutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions, deps autoDe
 	if opts.ScatterDelay {
 		enabledCount := 0
 		for _, c := range cfg.Certificates {
-			if c.Enabled {
+			if c.Enabled && (opts.OnlyOrderID == 0 || c.OrderID == opts.OnlyOrderID) {
 				enabledCount++
 			}
 		}
@@ -142,6 +142,9 @@ func runAutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions, deps autoDe
 	// 遍历证书配置
 	processed := 0
 	for i := range cfg.Certificates {
+		if opts.OnlyOrderID != 0 && cfg.Certificates[i].OrderID != opts.OnlyOrderID {
+			continue
+		}
 		if !cfg.Certificates[i].Enabled {
 			continue
 		}

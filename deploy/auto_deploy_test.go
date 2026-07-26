@@ -135,6 +135,100 @@ func TestAutoDeploy_DisabledCertificate(t *testing.T) {
 	}
 }
 
+func TestRunAutoDeploy_OnlyOrderIDProcessesOnlyMatchingConfig(t *testing.T) {
+	cfg := &config.Config{
+		Certificates: []config.CertConfig{
+			{OrderID: 101, Domain: "a.example.com", Enabled: true},
+			{OrderID: 202, Domain: "b.example.com", Enabled: true},
+		},
+	}
+
+	report := runAutoDeploy(
+		cfg,
+		NewMockDeployer(),
+		RunOptions{OnlyOrderID: 202},
+		successfulAutoDeployDependencies(nil),
+	)
+
+	if len(report.Results) != 1 {
+		t.Fatalf("仅应处理目标配置, got %+v", report.Results)
+	}
+	if got := report.Results[0].OrderID; got != 202 {
+		t.Fatalf("处理了错误订单 %d, want 202", got)
+	}
+}
+
+func TestRunAutoDeploy_CallbackUsesAPIOrderIDAfterRenewal(t *testing.T) {
+	const configuredOrderID = 101
+	const actualOrderID = 202
+
+	certPEM, keyPEM := genSelfSignedPair(t, "a.example.com")
+	callbackOrderID := 0
+	callbackCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/callback") {
+			var req api.CallbackRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("解析 callback 请求失败: %v", err)
+			}
+			callbackOrderID = req.OrderID
+			callbackCount++
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 1, "msg": "ok"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 1,
+			"msg":  "ok",
+			"data": map[string]any{
+				"data": []api.CertData{{
+					OrderID:     actualOrderID,
+					Domains:     "a.example.com",
+					Status:      "active",
+					ExpiresAt:   time.Now().AddDate(0, 0, 5).Format("2006-01-02"),
+					Certificate: certPEM,
+					PrivateKey:  keyPEM,
+					CACert:      testCACertPEM,
+				}},
+				"currentPage": 1,
+				"pageSize":    20,
+				"total":       1,
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	certAPI := config.CertAPIConfig{URL: server.URL}
+	if err := certAPI.SetToken("test-token"); err != nil {
+		t.Fatalf("SetToken() error = %v", err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Certificates = []config.CertConfig{{
+		OrderID:   configuredOrderID,
+		Domain:    "a.example.com",
+		Domains:   []string{"a.example.com"},
+		Enabled:   true,
+		BindRules: []config.BindRule{{Domain: "a.example.com", Port: 443}},
+		API:       certAPI,
+	}}
+
+	report := runAutoDeploy(
+		cfg,
+		NewMockDeployer(),
+		RunOptions{OnlyOrderID: configuredOrderID},
+		successfulAutoDeployDependencies(nil),
+	)
+	if err := report.Err(); err != nil {
+		t.Fatalf("runAutoDeploy() error = %v", err)
+	}
+	if callbackOrderID != actualOrderID {
+		t.Fatalf("callback order_id = %d, want API 实际订单 %d", callbackOrderID, actualOrderID)
+	}
+	if callbackCount != 1 {
+		t.Fatalf("callback 次数 = %d, want 1", callbackCount)
+	}
+}
+
 // TestCheckRenewalNeeded 测试续签检查逻辑
 func TestCheckRenewalNeeded(t *testing.T) {
 	now := time.Now()

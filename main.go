@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -21,9 +23,7 @@ import (
 	"sslctlw/util"
 )
 
-var (
-	version = "dev"
-)
+var version = "dev"
 
 func main() {
 	// 无参数 → GUI 模式
@@ -161,36 +161,63 @@ func deploySingleCert(orderID int) error {
 		return fmt.Errorf("加载配置失败: %v", err)
 	}
 
-	certCfg := cfg.GetCertificateByOrderID(orderID)
-	if certCfg == nil {
-		return fmt.Errorf("未找到订单 %d 的配置", orderID)
-	}
-
-	client, err := deploy.NewClientForCert(certCfg)
-	if err != nil {
-		return err
-	}
-
 	store := cert.NewOrderStore()
 	deployer := deploy.DefaultDeployer(cfg, store)
+	return deploySingleCertWith(cfg, deployer, orderID)
+}
 
-	// 创建单证书配置进行部署
-	singleCfg := &config.Config{
-		Certificates: []config.CertConfig{*certCfg},
-		Schedule:     cfg.Schedule,
-	}
-	_ = client // client 由 AutoDeploy 内部通过 NewClientForCert 创建
-	report := deploy.AutoDeploy(singleCfg, deployer, deploy.RunOptions{})
-	results := report.Results
+func deploySingleCertWith(cfg *config.Config, deployer *deploy.Deployer, orderID int) error {
+	return deploySingleCertWithRunner(cfg, deployer, orderID, deploy.AutoDeploy, os.Stdout)
+}
 
-	for _, r := range results {
-		if r.Success {
-			fmt.Printf("[成功] %s: %s\n", r.Domain, r.Message)
-		} else {
-			fmt.Printf("[失败] %s: %s\n", r.Domain, r.Message)
+type singleCertRunner func(*config.Config, *deploy.Deployer, deploy.RunOptions) deploy.RunReport
+
+func deploySingleCertWithRunner(cfg *config.Config, deployer *deploy.Deployer, orderID int, run singleCertRunner, out io.Writer) error {
+	matchCount := 0
+	var target *config.CertConfig
+	for i := range cfg.Certificates {
+		if cfg.Certificates[i].OrderID == orderID {
+			matchCount++
+			target = &cfg.Certificates[i]
 		}
 	}
+	if matchCount == 0 {
+		return fmt.Errorf("未找到订单 %d 的配置", orderID)
+	}
+	if matchCount > 1 {
+		return fmt.Errorf("订单 %d 存在 %d 条配置，无法确定单证书部署目标", orderID, matchCount)
+	}
+	if !target.Enabled {
+		return fmt.Errorf("订单 %d 已禁用，无法执行部署", orderID)
+	}
 
+	report := run(cfg, deployer, deploy.RunOptions{OnlyOrderID: orderID})
+	for _, r := range report.Results {
+		if r.Success {
+			fmt.Fprintf(out, "[成功] %s: %s\n", r.Domain, r.Message)
+		} else {
+			fmt.Fprintf(out, "[失败] %s: %s\n", r.Domain, r.Message)
+		}
+	}
+	for _, warning := range report.Warnings {
+		fmt.Fprintf(out, "[警告] %s\n", warning)
+	}
+
+	var attentionErrors []error
+	for _, attention := range report.Attention {
+		attentionErrors = append(attentionErrors,
+			fmt.Errorf("订单 %d 需要人工处理: %s", attention.OrderID, attention.Reason))
+	}
+	if err := errors.Join(report.Err(), errors.Join(attentionErrors...)); err != nil {
+		return err
+	}
+	if report.AlreadyRunning {
+		fmt.Fprintln(out, "已有部署正在运行，本次跳过")
+		return nil
+	}
+	if len(report.Results) == 0 {
+		fmt.Fprintln(out, "本次无需部署")
+	}
 	return nil
 }
 
