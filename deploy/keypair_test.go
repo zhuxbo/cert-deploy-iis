@@ -131,7 +131,7 @@ func TestDeployCertWithRules_KeyPairMismatch(t *testing.T) {
 	}
 	certCfg := makeTestCertConfig(101, "a.example.com", true)
 
-	results, rep := deployCertWithRules(d, client, certData, wrongKey, certCfg, nil, nil)
+	results, rep := deployCertWithRules(d, client, certData, wrongKey, certCfg, 0, nil, nil)
 	d.WaitCallbacks()
 
 	if converterCalled {
@@ -171,7 +171,7 @@ func TestDeployCertAutoMode_KeyPairMismatch(t *testing.T) {
 			return "/tmp/test.pfx", nil
 		}},
 		Installer: &MockCertInstaller{},
-		Binder: &MockIISBinder{FindBindingsForDomainsFunc: func(domains []string) (map[string]*iis.SSLBinding, error) {
+		Binder: &MockIISBinder{FindBindingsForDomainsFunc: func(domains []string) ([]iis.SSLBinding, error) {
 			findCalled = true
 			return nil, nil
 		}},
@@ -247,7 +247,7 @@ func TestDeployCertWithRules_ValidPair_Proceeds(t *testing.T) {
 	}
 	certCfg := makeTestCertConfig(103, "ok.example.com", true)
 
-	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
+	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, 0, nil, nil)
 	d.WaitCallbacks()
 
 	if !converterCalled {

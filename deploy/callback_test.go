@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -52,8 +53,8 @@ func TestDeployCertAutoMode_NoBindings_ReportsFailure(t *testing.T) {
 	d := &Deployer{
 		Converter: &MockCertConverter{},
 		Installer: &MockCertInstaller{},
-		Binder: &MockIISBinder{FindBindingsForDomainsFunc: func(domains []string) (map[string]*iis.SSLBinding, error) {
-			return map[string]*iis.SSLBinding{}, nil
+		Binder: &MockIISBinder{FindBindingsForDomainsFunc: func(domains []string) ([]iis.SSLBinding, error) {
+			return nil, nil
 		}},
 		Store: &MockOrderStore{},
 	}
@@ -84,7 +85,7 @@ func TestDeployCertAutoMode_FindBindingsError_ReportsFailure(t *testing.T) {
 	d := &Deployer{
 		Converter: &MockCertConverter{},
 		Installer: &MockCertInstaller{},
-		Binder: &MockIISBinder{FindBindingsForDomainsFunc: func(domains []string) (map[string]*iis.SSLBinding, error) {
+		Binder: &MockIISBinder{FindBindingsForDomainsFunc: func(domains []string) ([]iis.SSLBinding, error) {
 			return nil, fmt.Errorf("netsh 执行失败")
 		}},
 		Store: &MockOrderStore{},
@@ -115,8 +116,10 @@ func TestDeployCertAutoMode_ConvertFail_ReportsFailure(t *testing.T) {
 			return "", fmt.Errorf("openssl 转换错误")
 		}},
 		Installer: &MockCertInstaller{},
-		Binder:    &MockIISBinder{},
-		Store:     &MockOrderStore{},
+		Binder: &MockIISBinder{FindBindingsForDomainsFunc: func(domains []string) ([]iis.SSLBinding, error) {
+			return []iis.SSLBinding{{HostnamePort: "convfail.example.com:443"}}, nil
+		}},
+		Store: &MockOrderStore{},
 	}
 	client := newRecordingClient(rec)
 
@@ -144,8 +147,10 @@ func TestDeployCertAutoMode_InstallFail_ReportsFailure(t *testing.T) {
 		Installer: &MockCertInstaller{InstallPFXFunc: func(pfxPath, password string) (*cert.InstallResult, error) {
 			return &cert.InstallResult{Success: false, ErrorMessage: "证书导入失败"}, nil
 		}},
-		Binder: &MockIISBinder{},
-		Store:  &MockOrderStore{},
+		Binder: &MockIISBinder{FindBindingsForDomainsFunc: func(domains []string) ([]iis.SSLBinding, error) {
+			return []iis.SSLBinding{{HostnamePort: "instfail.example.com:443"}}, nil
+		}},
+		Store: &MockOrderStore{},
 	}
 	client := newRecordingClient(rec)
 
@@ -187,7 +192,7 @@ func TestDeployCertWithRules_ConvertFail_ReportsFailure(t *testing.T) {
 	}
 	certCfg := makeTestCertConfig(205, "rulesconv.example.com", true)
 
-	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
+	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, 0, nil, nil)
 	d.WaitCallbacks()
 
 	if len(results) != 1 || results[0].Success {
@@ -244,7 +249,7 @@ func TestDeployCertWithRules_MixedBindings_ReportsAggregatedFailure(t *testing.T
 	}
 	client := newRecordingClient(rec)
 
-	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
+	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, 0, nil, nil)
 	d.WaitCallbacks()
 
 	if len(results) != 2 {
@@ -271,7 +276,7 @@ func TestDeployCertWithRules_AllSuccess_ReportsSuccess(t *testing.T) {
 	}
 	client := newRecordingClient(rec)
 
-	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
+	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, 0, nil, nil)
 	d.WaitCallbacks()
 
 	if len(results) != 2 {
@@ -292,7 +297,7 @@ func TestDeployCertWithRules_AllConflictsSkipped_NoReport(t *testing.T) {
 	other := config.CertConfig{Enabled: true, OrderID: 999, Metadata: config.CertMetadata{CertExpiresAt: "2099-12-31"},
 		BindRules: []config.BindRule{{Domain: "shared.example.com", Port: 443}}}
 	allCerts := []config.CertConfig{certCfg, other}
-	conflicts := map[string][]int{"shared.example.com": {0, 1}}
+	conflicts := map[iis.EndpointKey][]int{{Host: "shared.example.com", Port: 443}: {0, 1}}
 	rec := &callbackRecorder{}
 
 	d := &Deployer{
@@ -303,7 +308,7 @@ func TestDeployCertWithRules_AllConflictsSkipped_NoReport(t *testing.T) {
 	}
 	client := newRecordingClient(rec)
 
-	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, conflicts, allCerts)
+	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, 0, conflicts, allCerts)
 	d.WaitCallbacks()
 
 	if len(results) != 0 {
@@ -381,7 +386,7 @@ func TestDeployCertWithRules_AggregatedFailureMessage(t *testing.T) {
 		Store: &MockOrderStore{},
 	}
 
-	_, rep := deployCertWithRules(d, NewMockClient(), certData, keyPEM, certCfg, nil, nil)
+	_, rep := deployCertWithRules(d, NewMockClient(), certData, keyPEM, certCfg, 0, nil, nil)
 
 	wantMsg := "1/2 绑定失败: fail.example.com: netsh 绑定失败"
 	if rep.success || rep.message != wantMsg {
@@ -398,10 +403,10 @@ func TestDeployCertAutoMode_MixedBindings_ReportsAggregatedFailure(t *testing.T)
 		Converter: &MockCertConverter{},
 		Installer: &MockCertInstaller{},
 		Binder: &MockIISBinder{
-			FindBindingsForDomainsFunc: func(domains []string) (map[string]*iis.SSLBinding, error) {
-				return map[string]*iis.SSLBinding{
-					"ok.example.com":   {HostnamePort: "ok.example.com:443"},
-					"fail.example.com": {HostnamePort: "fail.example.com:443"},
+			FindBindingsForDomainsFunc: func(domains []string) ([]iis.SSLBinding, error) {
+				return []iis.SSLBinding{
+					{HostnamePort: "ok.example.com:443"},
+					{HostnamePort: "fail.example.com:443"},
 				}, nil
 			},
 			BindCertificateFunc: func(hostname string, port int, certHash string) error {
@@ -421,6 +426,45 @@ func TestDeployCertAutoMode_MixedBindings_ReportsAggregatedFailure(t *testing.T)
 	}
 	if !rep.report || rep.success {
 		t.Fatalf("自动模式多绑定混合成败应聚合为失败报告: %+v", rep)
+	}
+}
+
+func TestDeployCertAutoMode_TwoPortsBindAllAndCallbackOnce(t *testing.T) {
+	certData, keyPEM, certCfg := autoModeCertData(t, 214, "multiport.example.com")
+	rec := &callbackRecorder{}
+	var boundPorts []int
+
+	d := &Deployer{
+		Converter: &MockCertConverter{},
+		Installer: &MockCertInstaller{},
+		Binder: &MockIISBinder{
+			FindBindingsForDomainsFunc: func(domains []string) ([]iis.SSLBinding, error) {
+				return []iis.SSLBinding{
+					{HostnamePort: "multiport.example.com:443"},
+					{HostnamePort: "multiport.example.com:8443"},
+				}, nil
+			},
+			BindCertificateFunc: func(hostname string, port int, certHash string) error {
+				boundPorts = append(boundPorts, port)
+				return nil
+			},
+		},
+		Store: &MockOrderStore{},
+	}
+	client := newRecordingClient(rec)
+
+	results, rep := deployCertAutoMode(d, client, certData, keyPEM, certCfg)
+	emitDeployCallback(d, client, certData.OrderID, certCfg.Domain, rep, false)
+	if warnings := d.WaitCallbacks(); len(warnings) != 0 {
+		t.Fatalf("callback warnings = %v", warnings)
+	}
+
+	if len(results) != 2 || !reflect.DeepEqual(boundPorts, []int{443, 8443}) {
+		t.Fatalf("多端口绑定不完整: results=%+v ports=%v", results, boundPorts)
+	}
+	callbacks := rec.all()
+	if len(callbacks) != 1 || callbacks[0].OrderID != certData.OrderID || callbacks[0].Status != "success" {
+		t.Fatalf("订单应只 callback 一次成功: %+v", callbacks)
 	}
 }
 

@@ -1,11 +1,46 @@
 package deploy
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
 	"sslctlw/config"
+	"sslctlw/iis"
 )
+
+func TestCheckDomainConflicts_NormalizesEndpoint(t *testing.T) {
+	certs := []config.CertConfig{
+		{OrderID: 1, Enabled: true, BindRules: []config.BindRule{{Domain: "www.example.com", Port: 443}}},
+		{OrderID: 2, Enabled: true, BindRules: []config.BindRule{{Domain: "WWW.EXAMPLE.COM", Port: 0}}},
+		{OrderID: 3, Enabled: true, BindRules: []config.BindRule{{Domain: "www.example.com", Port: 8443}}},
+	}
+
+	got := checkDomainConflicts(certs)
+	if len(got) != 1 {
+		t.Fatalf("冲突端点数 = %d, want 1: %+v", len(got), got)
+	}
+	for _, indexes := range got {
+		if !reflect.DeepEqual(indexes, []int{0, 1}) {
+			t.Fatalf("冲突证书索引 = %v, want [0 1]", indexes)
+		}
+	}
+}
+
+func TestCheckDomainConflicts_DuplicateRulesInSameCertificateDoNotConflict(t *testing.T) {
+	certs := []config.CertConfig{{
+		OrderID: 1,
+		Enabled: true,
+		BindRules: []config.BindRule{
+			{Domain: "www.example.com", Port: 443},
+			{Domain: "www.example.com", Port: 443},
+		},
+	}}
+
+	if got := checkDomainConflicts(certs); len(got) != 0 {
+		t.Fatalf("同证书重复规则不应制造冲突: %+v", got)
+	}
+}
 
 func TestCheckDomainConflicts(t *testing.T) {
 	tests := []struct {
@@ -69,7 +104,7 @@ func TestCheckDomainConflicts(t *testing.T) {
 			}
 
 			if tt.wantDomain != "" {
-				if _, ok := got[tt.wantDomain]; !ok {
+				if _, ok := got[iis.EndpointKey{Host: tt.wantDomain, Port: 443}]; !ok {
 					t.Errorf("期望域名 %q 存在冲突，但未找到", tt.wantDomain)
 				}
 			}
@@ -416,7 +451,7 @@ func TestCheckDomainConflicts_MultipleRulesPerCert(t *testing.T) {
 	if len(conflicts) != 1 {
 		t.Errorf("期望 1 个冲突，得到 %d 个", len(conflicts))
 	}
-	if _, ok := conflicts["b.com"]; !ok {
+	if _, ok := conflicts[iis.EndpointKey{Host: "b.com", Port: 443}]; !ok {
 		t.Error("期望 b.com 存在冲突")
 	}
 }
@@ -433,7 +468,7 @@ func TestCheckDomainConflicts_ThreeWayConflict(t *testing.T) {
 	if len(conflicts) != 1 {
 		t.Errorf("期望 1 个冲突，得到 %d 个", len(conflicts))
 	}
-	if indexes, ok := conflicts["shared.com"]; ok {
+	if indexes, ok := conflicts[iis.EndpointKey{Host: "shared.com", Port: 443}]; ok {
 		if len(indexes) != 3 {
 			t.Errorf("期望 shared.com 有 3 个冲突索引，得到 %d 个", len(indexes))
 		}

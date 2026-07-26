@@ -555,9 +555,9 @@ func TestMockIISBinder(t *testing.T) {
 
 	t.Run("查找绑定", func(t *testing.T) {
 		binder := &MockIISBinder{
-			FindBindingsForDomainsFunc: func(domains []string) (map[string]*iis.SSLBinding, error) {
-				return map[string]*iis.SSLBinding{
-					"www.example.com": {HostnamePort: "www.example.com:443", CertHash: "OLD123"},
+			FindBindingsForDomainsFunc: func(domains []string) ([]iis.SSLBinding, error) {
+				return []iis.SSLBinding{
+					{HostnamePort: "www.example.com:443", CertHash: "OLD123"},
 				}, nil
 			},
 		}
@@ -730,10 +730,10 @@ func TestDeployCertWithRules(t *testing.T) {
 
 		certData := makeTestCertData(t, 100, "example.com", "active", "2025-12-31")
 		certCfg := makeTestCertConfig(100, "example.com", true)
-		conflicts := map[string][]int{}
+		conflicts := map[iis.EndpointKey][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
+		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, 0, conflicts, allCerts)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -769,10 +769,10 @@ func TestDeployCertWithRules(t *testing.T) {
 				{Domain: "www.example.com", Port: 443},
 			},
 		}
-		conflicts := map[string][]int{}
+		conflicts := map[iis.EndpointKey][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
+		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, 0, conflicts, allCerts)
 
 		if len(results) != 2 {
 			t.Fatalf("期望 2 个结果（每个 BindRule 域名一个），得到 %d 个", len(results))
@@ -798,10 +798,10 @@ func TestDeployCertWithRules(t *testing.T) {
 
 		certData := makeTestCertData(t, 100, "example.com", "active", "2025-12-31")
 		certCfg := makeTestCertConfig(100, "example.com", true)
-		conflicts := map[string][]int{}
+		conflicts := map[iis.EndpointKey][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
+		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, 0, conflicts, allCerts)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -837,10 +837,10 @@ func TestDeployCertWithRules(t *testing.T) {
 				{Domain: "ok.example.com", Port: 443},
 			},
 		}
-		conflicts := map[string][]int{}
+		conflicts := map[iis.EndpointKey][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
+		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, 0, conflicts, allCerts)
 
 		if len(results) != 2 {
 			t.Fatalf("期望 2 个结果，得到 %d 个", len(results))
@@ -886,11 +886,11 @@ func TestDeployCertWithRules(t *testing.T) {
 		}
 		allCerts := []config.CertConfig{certCfg, certCfg2}
 		// shared.com 冲突：索引 0 和 1
-		conflicts := map[string][]int{
-			"shared.com": {0, 1},
+		conflicts := map[iis.EndpointKey][]int{
+			{Host: "shared.com", Port: 443}: {0, 1},
 		}
 
-		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
+		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, 0, conflicts, allCerts)
 
 		// shared.com 应该被跳过（certCfg2 的 ExpiresAt 更晚，OrderID=200 优先）
 		// 只有 unique.com 会被处理
@@ -913,9 +913,9 @@ func TestDeployCertWithRules(t *testing.T) {
 func TestDeployCertAutoMode(t *testing.T) {
 	t.Run("成功路径", func(t *testing.T) {
 		d := NewMockDeployer()
-		d.Binder.(*MockIISBinder).FindBindingsForDomainsFunc = func(domains []string) (map[string]*iis.SSLBinding, error) {
-			return map[string]*iis.SSLBinding{
-				"example.com": {HostnamePort: "example.com:443", CertHash: "OLD_HASH"},
+		d.Binder.(*MockIISBinder).FindBindingsForDomainsFunc = func(domains []string) ([]iis.SSLBinding, error) {
+			return []iis.SSLBinding{
+				{HostnamePort: "example.com:443", CertHash: "OLD_HASH"},
 			}, nil
 		}
 
@@ -943,8 +943,8 @@ func TestDeployCertAutoMode(t *testing.T) {
 
 	t.Run("无匹配绑定", func(t *testing.T) {
 		d := NewMockDeployer()
-		d.Binder.(*MockIISBinder).FindBindingsForDomainsFunc = func(domains []string) (map[string]*iis.SSLBinding, error) {
-			return map[string]*iis.SSLBinding{}, nil
+		d.Binder.(*MockIISBinder).FindBindingsForDomainsFunc = func(domains []string) ([]iis.SSLBinding, error) {
+			return nil, nil
 		}
 
 		certData := makeTestCertData(t, 100, "example.com", "active", "2025-12-31")
@@ -971,9 +971,9 @@ func TestDeployCertAutoMode(t *testing.T) {
 
 	t.Run("安装成功绑定失败", func(t *testing.T) {
 		d := NewMockDeployer()
-		d.Binder.(*MockIISBinder).FindBindingsForDomainsFunc = func(domains []string) (map[string]*iis.SSLBinding, error) {
-			return map[string]*iis.SSLBinding{
-				"example.com": {HostnamePort: "example.com:443", CertHash: "OLD_HASH"},
+		d.Binder.(*MockIISBinder).FindBindingsForDomainsFunc = func(domains []string) ([]iis.SSLBinding, error) {
+			return []iis.SSLBinding{
+				{HostnamePort: "example.com:443", CertHash: "OLD_HASH"},
 			}, nil
 		}
 		d.Binder.(*MockIISBinder).BindCertificateFunc = func(hostname string, port int, certHash string) error {
@@ -1005,6 +1005,151 @@ func TestDeployCertAutoMode(t *testing.T) {
 			t.Error("安装成功后指纹不应为空")
 		}
 	})
+}
+
+func TestDeployCertWithRules_PreflightBeforeCertificateInstallation(t *testing.T) {
+	certData := makeTestCertData(t, 701, "www.example.com", "active", "2099-12-31")
+
+	tests := []struct {
+		name      string
+		certCfg   config.CertConfig
+		allCerts  []config.CertConfig
+		conflicts map[iis.EndpointKey][]int
+	}{
+		{
+			name:     "空规则",
+			certCfg:  config.CertConfig{OrderID: 701, Domain: "www.example.com", Enabled: true},
+			allCerts: nil,
+		},
+		{
+			name: "全部冲突",
+			certCfg: config.CertConfig{
+				OrderID: 701,
+				Domain:  "www.example.com",
+				Enabled: true,
+				BindRules: []config.BindRule{
+					{Domain: "www.example.com", Port: 443},
+				},
+			},
+			allCerts: []config.CertConfig{
+				{
+					OrderID: 701, Enabled: true, Metadata: config.CertMetadata{CertExpiresAt: "2025-01-01"},
+					BindRules: []config.BindRule{{Domain: "www.example.com", Port: 443}},
+				},
+				{
+					OrderID: 702, Enabled: true, Metadata: config.CertMetadata{CertExpiresAt: "2099-01-01"},
+					BindRules: []config.BindRule{{Domain: "WWW.EXAMPLE.COM", Port: 0}},
+				},
+			},
+			conflicts: map[iis.EndpointKey][]int{{Host: "www.example.com", Port: 443}: {0, 1}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			converted := false
+			installed := false
+			d := NewMockDeployer()
+			d.Converter = &MockCertConverter{PEMToPFXFunc: func(certPEM, keyPEM, intermediatePEM, password string) (string, error) {
+				converted = true
+				return "unused.pfx", nil
+			}}
+			d.Installer = &MockCertInstaller{InstallPFXFunc: func(pfxPath, password string) (*cert.InstallResult, error) {
+				installed = true
+				return &cert.InstallResult{Success: true, Thumbprint: "ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234"}, nil
+			}}
+
+			_, rep := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, tt.certCfg, 0, tt.conflicts, tt.allCerts)
+			if converted || installed {
+				t.Fatalf("目标预检失败仍转换/安装: converted=%v installed=%v", converted, installed)
+			}
+			if tt.name == "全部冲突" && rep.report {
+				t.Fatalf("全部冲突不得产生 callback 报告: %+v", rep)
+			}
+		})
+	}
+}
+
+func TestDeployCertWithRules_DuplicateOrderIDUsesWinningIndex(t *testing.T) {
+	certData := makeTestCertData(t, 801, "shared.example.com", "active", "2099-12-31")
+	loser := config.CertConfig{
+		OrderID: 801,
+		Domain:  "loser.example.com",
+		Enabled: true,
+		Metadata: config.CertMetadata{
+			CertExpiresAt: "2025-01-01",
+		},
+		BindRules: []config.BindRule{{Domain: "shared.example.com", Port: 443}},
+	}
+	winner := config.CertConfig{
+		OrderID: 801,
+		Domain:  "winner.example.com",
+		Enabled: true,
+		Metadata: config.CertMetadata{
+			CertExpiresAt: "2099-01-01",
+		},
+		BindRules: []config.BindRule{{Domain: "SHARED.EXAMPLE.COM", Port: 0}},
+	}
+	allCerts := []config.CertConfig{loser, winner}
+	conflicts := checkDomainConflicts(allCerts)
+
+	converted := false
+	d := NewMockDeployer()
+	d.Converter = &MockCertConverter{PEMToPFXFunc: func(certPEM, keyPEM, intermediatePEM, password string) (string, error) {
+		converted = true
+		return "unused.pfx", nil
+	}}
+
+	results, rep := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, loser, 0, conflicts, allCerts)
+	if converted || len(results) != 0 || rep.report {
+		t.Fatalf("重复 OrderID 的非选优索引不应执行: converted=%v results=%+v report=%+v", converted, results, rep)
+	}
+
+	results, rep = deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, winner, 1, conflicts, allCerts)
+	if !converted || len(results) != 1 || !results[0].Success || !rep.report || !rep.success {
+		t.Fatalf("重复 OrderID 只能由选优索引执行: converted=%v results=%+v report=%+v", converted, results, rep)
+	}
+}
+
+func TestDeployCertAutoMode_DiscoversTargetsBeforeCertificateInstallation(t *testing.T) {
+	certData, keyPEM, certCfg := autoModeCertData(t, 703, "www.example.com")
+
+	tests := []struct {
+		name string
+		find func([]string) ([]iis.SSLBinding, error)
+	}{
+		{name: "发现失败", find: func([]string) ([]iis.SSLBinding, error) {
+			return nil, errors.New("netsh 查询失败")
+		}},
+		{name: "零目标", find: func([]string) ([]iis.SSLBinding, error) {
+			return nil, nil
+		}},
+		{name: "坏端口", find: func([]string) ([]iis.SSLBinding, error) {
+			return []iis.SSLBinding{{HostnamePort: "www.example.com:not-a-port"}}, nil
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			converted := false
+			installed := false
+			d := NewMockDeployer()
+			d.Binder.(*MockIISBinder).FindBindingsForDomainsFunc = tt.find
+			d.Converter = &MockCertConverter{PEMToPFXFunc: func(certPEM, keyPEM, intermediatePEM, password string) (string, error) {
+				converted = true
+				return "unused.pfx", nil
+			}}
+			d.Installer = &MockCertInstaller{InstallPFXFunc: func(pfxPath, password string) (*cert.InstallResult, error) {
+				installed = true
+				return &cert.InstallResult{Success: true, Thumbprint: "ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234"}, nil
+			}}
+
+			_, _ = deployCertAutoMode(d, NewMockClient(), certData, keyPEM, certCfg)
+			if converted || installed {
+				t.Fatalf("发现阶段无可执行目标仍转换/安装: converted=%v installed=%v", converted, installed)
+			}
+		})
+	}
 }
 
 // =============================================================================

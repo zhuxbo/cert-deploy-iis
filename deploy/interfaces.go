@@ -83,7 +83,7 @@ type IISBinder interface {
 	// BindCertificateByIP 使用 IP 模式绑定证书
 	BindCertificateByIP(ip string, port int, certHash string) error
 	// FindBindingsForDomains 查找域名匹配的绑定
-	FindBindingsForDomains(domains []string) (map[string]*iis.SSLBinding, error)
+	FindBindingsForDomains(domains []string) ([]iis.SSLBinding, error)
 }
 
 // APIClient API 客户端接口

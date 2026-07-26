@@ -121,8 +121,8 @@ func runAutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions, deps autoDe
 	// 检查域名冲突
 	conflicts := checkDomainConflicts(cfg.Certificates)
 	if len(conflicts) > 0 {
-		for domain, indexes := range conflicts {
-			log.Printf("警告: 域名 %s 配置在多个证书中 (索引: %v)，将使用到期最晚的", domain, indexes)
+		for endpoint, indexes := range conflicts {
+			log.Printf("警告: 端点 %s:%d 配置在多个证书中 (索引: %v)，将使用到期最晚的", endpoint.Host, endpoint.Port, indexes)
 		}
 	}
 
@@ -219,11 +219,11 @@ func certAttention(certCfg *config.CertConfig) (CertAttention, bool) {
 	return CertAttention{OrderID: certCfg.OrderID, Domain: certCfg.Domain, Reason: reason}, true
 }
 
-func processOneCert(cfg *config.Config, d *Deployer, i int, conflicts map[string][]int) (certResults []Result, attempted bool) {
+func processOneCert(cfg *config.Config, d *Deployer, i int, conflicts map[iis.EndpointKey][]int) (certResults []Result, attempted bool) {
 	return processOneCertWithSave(cfg, d, i, conflicts, cfg.Save)
 }
 
-func processOneCertWithSave(cfg *config.Config, d *Deployer, i int, conflicts map[string][]int, save func() error) (certResults []Result, attempted bool) {
+func processOneCertWithSave(cfg *config.Config, d *Deployer, i int, conflicts map[iis.EndpointKey][]int, save func() error) (certResults []Result, attempted bool) {
 	results := make([]Result, 0)
 	certCfg := cfg.Certificates[i]
 
@@ -403,7 +403,7 @@ func processOneCertWithSave(cfg *config.Config, d *Deployer, i int, conflicts ma
 	if certCfg.AutoBindMode {
 		deployResults, rep = deployCertAutoMode(d, client, certData, privateKey, certCfg)
 	} else {
-		deployResults, rep = deployCertWithRules(d, client, certData, privateKey, certCfg, conflicts, cfg.Certificates)
+		deployResults, rep = deployCertWithRules(d, client, certData, privateKey, certCfg, i, conflicts, cfg.Certificates)
 	}
 	results = append(results, deployResults...)
 
@@ -617,8 +617,23 @@ func verifyDeployKeyPair(certPEM, keyPEM string) (bool, string) {
 
 // deployCertWithRules 使用绑定规则部署证书。
 // 只返回结构化结果与部署报告，不自行发送回调（回调由编排层统一发送，deploy-spec §2.8）。
-func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, privateKey string, certCfg config.CertConfig, conflicts map[string][]int, allCerts []config.CertConfig) ([]Result, deployReport) {
+func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, privateKey string, certCfg config.CertConfig, currentCertIndex int, conflicts map[iis.EndpointKey][]int, allCerts []config.CertConfig) ([]Result, deployReport) {
 	results := make([]Result, 0)
+
+	targets, err := executableRuleTargets(certCfg, currentCertIndex, conflicts, allCerts)
+	if err != nil {
+		msg := fmt.Sprintf("绑定目标无效: %v", err)
+		return []Result{{Domain: certCfg.Domain, Success: false, Message: msg, OrderID: certData.OrderID}},
+			deployReport{report: true, success: false, message: msg}
+	}
+	if len(targets) == 0 {
+		if len(certCfg.BindRules) == 0 {
+			msg := "未配置 IIS 绑定规则，无法部署"
+			return []Result{{Domain: certCfg.Domain, Success: false, Message: msg, OrderID: certData.OrderID}},
+				deployReport{report: true, success: false, message: msg}
+		}
+		return nil, deployReport{}
+	}
 
 	// 配对校验：转换/安装前确认证书与私钥匹配
 	if ok, reason := verifyDeployKeyPair(certData.Certificate, privateKey); !ok {
@@ -683,29 +698,18 @@ func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, 
 
 	// 绑定到 IIS（循环内只收集结果，报告按订单聚合到循环后返回，回调由编排层单发）
 	var outcome bindOutcome
-	for _, rule := range certCfg.BindRules {
-		// 检查是否有域名冲突，如果有则检查是否应该使用此证书
-		if conflictIndexes, hasConflict := conflicts[rule.Domain]; hasConflict {
-			bestCert := selectBestCertForDomainByIndexes(conflictIndexes, allCerts)
-			if bestCert == nil || bestCert.OrderID != certCfg.OrderID {
-				log.Printf("域名 %s 存在冲突，跳过（将由其他证书处理）", rule.Domain)
-				continue
-			}
-		}
-
-		port := rule.Port
-		if port == 0 {
-			port = 443
-		}
+	for _, target := range targets {
+		rule := target.rule
+		port := target.key.Port
 
 		log.Printf("绑定证书到 %s:%d", rule.Domain, port)
 
 		// IP 证书走 IP 绑定（ipport），域名走 SNI 绑定；netsh 层的复验/回滚防止误覆盖同端口其他证书
 		var bindErr error
-		if net.ParseIP(rule.Domain) != nil {
-			bindErr = d.Binder.BindCertificateByIP(rule.Domain, port, thumbprint)
+		if target.key.IPBinding {
+			bindErr = d.Binder.BindCertificateByIP(target.key.Host, port, thumbprint)
 		} else {
-			bindErr = d.Binder.BindCertificate(rule.Domain, port, thumbprint)
+			bindErr = d.Binder.BindCertificate(target.key.Host, port, thumbprint)
 		}
 
 		if bindErr != nil {
@@ -732,6 +736,41 @@ func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, 
 	}
 
 	return results, reportFromOutcome(outcome)
+}
+
+type executableRuleTarget struct {
+	rule config.BindRule
+	key  iis.EndpointKey
+}
+
+func endpointKeyForRule(rule config.BindRule) (iis.EndpointKey, error) {
+	host := strings.TrimSpace(rule.Domain)
+	return iis.NormalizeEndpoint(net.ParseIP(strings.Trim(host, "[]")) != nil, host, rule.Port)
+}
+
+func executableRuleTargets(certCfg config.CertConfig, currentCertIndex int, conflicts map[iis.EndpointKey][]int, allCerts []config.CertConfig) ([]executableRuleTarget, error) {
+	targets := make([]executableRuleTarget, 0, len(certCfg.BindRules))
+	seen := make(map[iis.EndpointKey]struct{}, len(certCfg.BindRules))
+	for _, rule := range certCfg.BindRules {
+		key, err := endpointKeyForRule(rule)
+		if err != nil {
+			return nil, err
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		if conflictIndexes, hasConflict := conflicts[key]; hasConflict {
+			bestIndex := selectBestCertIndexForDomainByIndexes(conflictIndexes, allCerts)
+			if bestIndex != currentCertIndex {
+				log.Printf("端点 %s:%d 存在冲突，跳过（将由其他证书处理）", key.Host, key.Port)
+				continue
+			}
+		}
+		targets = append(targets, executableRuleTarget{rule: rule, key: key})
+	}
+	return targets, nil
 }
 
 // bindOutcome 聚合一个订单内各绑定的成败，用于生成订单级单条回调
@@ -1092,23 +1131,32 @@ func finalizeSuccessfulDeployment(d *Deployer, certCfg *config.CertConfig, certD
 	return true
 }
 
-// checkDomainConflicts 检查域名冲突（同一域名配置在多个证书中）
-func checkDomainConflicts(certs []config.CertConfig) map[string][]int {
-	conflicts := make(map[string][]int) // domain -> []certIndex
+// checkDomainConflicts 检查端点冲突（同一绑定类型、规范主机和端口配置在多个证书中）。
+func checkDomainConflicts(certs []config.CertConfig) map[iis.EndpointKey][]int {
+	conflicts := make(map[iis.EndpointKey][]int)
 
 	for i, cert := range certs {
 		if !cert.Enabled {
 			continue
 		}
+		seen := make(map[iis.EndpointKey]struct{}, len(cert.BindRules))
 		for _, rule := range cert.BindRules {
-			conflicts[rule.Domain] = append(conflicts[rule.Domain], i)
+			key, err := endpointKeyForRule(rule)
+			if err != nil {
+				continue
+			}
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			conflicts[key] = append(conflicts[key], i)
 		}
 	}
 
 	// 过滤只有一个证书的域名
-	for domain, indexes := range conflicts {
+	for endpoint, indexes := range conflicts {
 		if len(indexes) <= 1 {
-			delete(conflicts, domain)
+			delete(conflicts, endpoint)
 		}
 	}
 
@@ -1117,7 +1165,15 @@ func checkDomainConflicts(certs []config.CertConfig) map[string][]int {
 
 // selectBestCertForDomainByIndexes 根据索引列表选择最佳证书（到期最晚的）
 func selectBestCertForDomainByIndexes(indexes []int, allCerts []config.CertConfig) *config.CertConfig {
-	var best *config.CertConfig
+	bestIndex := selectBestCertIndexForDomainByIndexes(indexes, allCerts)
+	if bestIndex < 0 {
+		return nil
+	}
+	return &allCerts[bestIndex]
+}
+
+func selectBestCertIndexForDomainByIndexes(indexes []int, allCerts []config.CertConfig) int {
+	bestIndex := -1
 	var bestExpiry time.Time
 	bestHasExpiry := false
 
@@ -1131,33 +1187,34 @@ func selectBestCertForDomainByIndexes(indexes []int, allCerts []config.CertConfi
 		}
 
 		candExpiry, candHasExpiry := parseCertExpiry(cand.Metadata.CertExpiresAt)
-		if best == nil {
-			best = cand
+		if bestIndex < 0 {
+			bestIndex = idx
 			bestExpiry = candExpiry
 			bestHasExpiry = candHasExpiry
 			continue
 		}
+		best := &allCerts[bestIndex]
 
 		if candHasExpiry && !bestHasExpiry {
-			best = cand
+			bestIndex = idx
 			bestExpiry = candExpiry
 			bestHasExpiry = true
 			continue
 		}
 		if candHasExpiry && bestHasExpiry {
 			if candExpiry.After(bestExpiry) || (candExpiry.Equal(bestExpiry) && cand.OrderID > best.OrderID) {
-				best = cand
+				bestIndex = idx
 				bestExpiry = candExpiry
 				bestHasExpiry = true
 			}
 			continue
 		}
 		if !candHasExpiry && !bestHasExpiry && cand.OrderID > best.OrderID {
-			best = cand
+			bestIndex = idx
 		}
 	}
 
-	return best
+	return bestIndex
 }
 
 func parseCertExpiry(value string) (time.Time, bool) {
@@ -1334,7 +1391,41 @@ func deployCertAutoMode(d *Deployer, client APIClient, certData *api.CertData, p
 			deployReport{report: true, success: false, message: reason}
 	}
 
-	// 1. 转换并安装证书
+	// 1. 安装前发现并严格校验所有可执行端点。
+	allDomains := certCfg.Domains
+	if len(allDomains) == 0 && certCfg.Domain != "" {
+		allDomains = []string{certCfg.Domain}
+	}
+
+	matchedBindings, err := d.Binder.FindBindingsForDomains(allDomains)
+	if err != nil {
+		log.Printf("查找 IIS 绑定失败: %v", err)
+		msg := fmt.Sprintf("查找 IIS 绑定失败: %v", err)
+		return []Result{{Domain: certCfg.Domain, Success: false, Message: msg, OrderID: certData.OrderID}},
+			deployReport{report: true, success: false, message: msg}
+	}
+
+	if len(matchedBindings) == 0 {
+		// 自动模式依赖现存 SSL 绑定发现部署目标，找不到绑定说明部署无法进行
+		// （常见于绑定曾丢失），上报失败让服务端与本地统计均可见，而非静默跳过
+		msg := "自动绑定模式未找到匹配的 IIS SSL 绑定，无法部署"
+		log.Printf("%s (域名: %v)", msg, allDomains)
+		return []Result{{Domain: certCfg.Domain, Success: false, Message: msg, OrderID: certData.OrderID}},
+			deployReport{report: true, success: false, message: msg}
+	}
+
+	endpoints := make([]iis.EndpointKey, 0, len(matchedBindings))
+	for _, binding := range matchedBindings {
+		endpoint, parseErr := iis.ParseBindingEndpoint(binding)
+		if parseErr != nil {
+			msg := fmt.Sprintf("IIS 绑定端点无效: %v", parseErr)
+			return []Result{{Domain: certCfg.Domain, Success: false, Message: msg, OrderID: certData.OrderID}},
+				deployReport{report: true, success: false, message: msg}
+		}
+		endpoints = append(endpoints, endpoint)
+	}
+
+	// 2. 确认存在可执行端点后才转换并安装证书。
 	pfxPath, err := d.Converter.PEMToPFX(certData.Certificate, privateKey, certData.CACert, "")
 	if err != nil {
 		log.Printf("转换 PFX 失败: %v", err)
@@ -1359,42 +1450,18 @@ func deployCertAutoMode(d *Deployer, client APIClient, certData *api.CertData, p
 	thumbprint := installResult.Thumbprint
 	log.Printf("证书安装成功: %s", thumbprint)
 
-	// 2. 查找 IIS 中匹配的绑定
-	allDomains := certCfg.Domains
-	if len(allDomains) == 0 && certCfg.Domain != "" {
-		allDomains = []string{certCfg.Domain}
-	}
-
-	matchedBindings, err := d.Binder.FindBindingsForDomains(allDomains)
-	if err != nil {
-		log.Printf("查找 IIS 绑定失败: %v", err)
-		msg := fmt.Sprintf("查找 IIS 绑定失败: %v", err)
-		return []Result{{Domain: certCfg.Domain, Success: false, Message: msg, OrderID: certData.OrderID}},
-			deployReport{report: true, success: false, message: msg}
-	}
-
-	if len(matchedBindings) == 0 {
-		// 自动模式依赖现存 SSL 绑定发现部署目标，找不到绑定说明部署无法进行
-		// （常见于绑定曾丢失），上报失败让服务端与本地统计均可见，而非静默跳过
-		msg := "自动绑定模式未找到匹配的 IIS SSL 绑定，无法部署"
-		log.Printf("%s (域名: %v)", msg, allDomains)
-		return []Result{{Domain: certCfg.Domain, Success: false, Message: msg, OrderID: certData.OrderID}},
-			deployReport{report: true, success: false, message: msg}
-	}
-
 	// 3. 更新匹配的绑定（循环内只收集结果，报告按订单聚合到循环后返回，回调由编排层单发）
 	var outcome bindOutcome
-	for domain, binding := range matchedBindings {
-		host := iis.ParseHostFromBinding(binding.HostnamePort)
-		port := iis.ParsePortFromBinding(binding.HostnamePort)
+	for _, endpoint := range endpoints {
+		domain := endpoint.Host
 
-		log.Printf("更新绑定: %s:%d", host, port)
+		log.Printf("更新绑定: %s:%d", endpoint.Host, endpoint.Port)
 
 		var bindErr error
-		if isIPBinding(binding.HostnamePort) {
-			bindErr = d.Binder.BindCertificateByIP(host, port, thumbprint)
+		if endpoint.IPBinding {
+			bindErr = d.Binder.BindCertificateByIP(endpoint.Host, endpoint.Port, thumbprint)
 		} else {
-			bindErr = d.Binder.BindCertificate(host, port, thumbprint)
+			bindErr = d.Binder.BindCertificate(endpoint.Host, endpoint.Port, thumbprint)
 		}
 
 		if bindErr != nil {

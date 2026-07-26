@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os/exec"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -544,38 +547,92 @@ func GetBindingForIP(ip string, port int) (*SSLBinding, error) {
 	return nil, nil // 未找到
 }
 
-// findBindingsFromList 从绑定列表中查找匹配指定域名的 SNI 绑定（纯函数，便于测试）
-func findBindingsFromList(bindings []SSLBinding, domains []string) map[string]*SSLBinding {
-	result := make(map[string]*SSLBinding)
-	for i, b := range bindings {
+// ParseBindingEndpoint 严格解析 netsh 返回的绑定端点；坏端口不得回退默认值。
+func ParseBindingEndpoint(binding SSLBinding) (EndpointKey, error) {
+	host, portText, err := net.SplitHostPort(strings.TrimSpace(binding.HostnamePort))
+	if err != nil {
+		return EndpointKey{}, fmt.Errorf("解析绑定端点 %q 失败: %w", binding.HostnamePort, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return EndpointKey{}, fmt.Errorf("绑定端点 %q 的端口无效", binding.HostnamePort)
+	}
+	return NormalizeEndpoint(binding.IsIPBinding, host, port)
+}
+
+func sameBindingAtEndpoint(a, b SSLBinding) bool {
+	equalField := func(left, right string) bool {
+		return strings.EqualFold(strings.TrimSpace(left), strings.TrimSpace(right))
+	}
+	return equalField(a.CertHash, b.CertHash) &&
+		equalField(a.AppID, b.AppID) &&
+		equalField(a.CertStoreName, b.CertStoreName) &&
+		equalField(a.SslCtlStoreName, b.SslCtlStoreName) &&
+		a.IsIPBinding == b.IsIPBinding
+}
+
+// findBindingsFromList 从绑定列表中查找匹配指定域名的 SNI 绑定（纯函数，便于测试）。
+func findBindingsFromList(bindings []SSLBinding, domains []string) ([]SSLBinding, error) {
+	byEndpoint := make(map[EndpointKey]SSLBinding)
+	for _, b := range bindings {
 		if b.IsIPBinding {
 			continue
 		}
-
-		host := ParseHostFromBinding(b.HostnamePort)
-		if host == "" {
+		rawEndpoint := strings.TrimSpace(b.HostnamePort)
+		rawHost, _, splitErr := net.SplitHostPort(rawEndpoint)
+		if rawEndpoint == "" || (splitErr == nil && strings.TrimSpace(rawHost) == "") {
 			continue
 		}
+
+		key, err := ParseBindingEndpoint(b)
+		if err != nil {
+			return nil, err
+		}
 		for _, certDomain := range domains {
-			if util.MatchDomain(host, certDomain) {
-				result[host] = &bindings[i]
+			if util.MatchDomain(key.Host, certDomain) {
+				if previous, exists := byEndpoint[key]; exists {
+					if !sameBindingAtEndpoint(previous, b) {
+						return nil, fmt.Errorf("IIS SSL 绑定端点 %s:%d 存在歧义", key.Host, key.Port)
+					}
+					break
+				}
+				byEndpoint[key] = b
 				break
 			}
 		}
 	}
-	return result
+
+	keys := make([]EndpointKey, 0, len(byEndpoint))
+	for key := range byEndpoint {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].IPBinding != keys[j].IPBinding {
+			return !keys[i].IPBinding
+		}
+		if keys[i].Host != keys[j].Host {
+			return keys[i].Host < keys[j].Host
+		}
+		return keys[i].Port < keys[j].Port
+	})
+
+	result := make([]SSLBinding, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, byEndpoint[key])
+	}
+	return result, nil
 }
 
 // FindBindingsForDomains 查找与指定域名匹配的 SNI 绑定
-// 返回: 绑定域名 -> SSLBinding 映射
+// 返回稳定排序的完整绑定端点切片。
 // 注意: 只匹配 SNI 绑定（Hostname:port），忽略 IP 绑定（空主机名）
 // IP 绑定用于通配符泛匹配或 IP 证书，需用户手工管理
-func FindBindingsForDomains(domains []string) (map[string]*SSLBinding, error) {
+func FindBindingsForDomains(domains []string) ([]SSLBinding, error) {
 	bindings, err := ListSSLBindings()
 	if err != nil {
 		return nil, err
 	}
-	return findBindingsFromList(bindings, domains), nil
+	return findBindingsFromList(bindings, domains)
 }
 
 // ParseHostFromBinding 从 "host:port" 提取主机名。

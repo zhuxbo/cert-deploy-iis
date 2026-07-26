@@ -38,7 +38,7 @@ func (d *defaultIISBinder) BindCertificateByIP(ip string, port int, certHash str
 	return iis.BindCertificateByIP(ip, port, certHash)
 }
 
-func (d *defaultIISBinder) FindBindingsForDomains(domains []string) (map[string]*iis.SSLBinding, error) {
+func (d *defaultIISBinder) FindBindingsForDomains(domains []string) ([]iis.SSLBinding, error) {
 	return iis.FindBindingsForDomains(domains)
 }
 

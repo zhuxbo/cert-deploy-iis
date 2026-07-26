@@ -261,7 +261,7 @@ func (m *MockCertInstaller) SetFriendlyName(thumbprint, friendlyName string) err
 type MockIISBinder struct {
 	BindCertificateFunc        func(hostname string, port int, certHash string) error
 	BindCertificateByIPFunc    func(ip string, port int, certHash string) error
-	FindBindingsForDomainsFunc func(domains []string) (map[string]*iis.SSLBinding, error)
+	FindBindingsForDomainsFunc func(domains []string) ([]iis.SSLBinding, error)
 }
 
 func (m *MockIISBinder) BindCertificate(hostname string, port int, certHash string) error {
@@ -278,11 +278,11 @@ func (m *MockIISBinder) BindCertificateByIP(ip string, port int, certHash string
 	return nil
 }
 
-func (m *MockIISBinder) FindBindingsForDomains(domains []string) (map[string]*iis.SSLBinding, error) {
+func (m *MockIISBinder) FindBindingsForDomains(domains []string) ([]iis.SSLBinding, error) {
 	if m.FindBindingsForDomainsFunc != nil {
 		return m.FindBindingsForDomainsFunc(domains)
 	}
-	return make(map[string]*iis.SSLBinding), nil
+	return nil, nil
 }
 
 // NewMockDeployer 创建用于测试的 Mock 部署器
