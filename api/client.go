@@ -550,14 +550,14 @@ func (c *Client) Callback(ctx context.Context, req *CallbackRequest) error {
 	apiURL := c.BaseURL + "/callback"
 
 	// 统一在客户端出口处理 message：仅 failure 携带，脱敏 + 按 rune 截断（防调用方遗漏）。
-	// req 为调用方一次性构造的临时对象，此处就地清洗不影响其他状态。
-	if req.Status == "failure" {
-		req.Message = SanitizeCallbackMessage(req.Message)
+	callbackReq := *req
+	if callbackReq.Status == "failure" {
+		callbackReq.Message = SanitizeCallbackMessage(callbackReq.Message)
 	} else {
-		req.Message = ""
+		callbackReq.Message = ""
 	}
 
-	data, err := json.Marshal(req)
+	data, err := json.Marshal(&callbackReq)
 	if err != nil {
 		return fmt.Errorf("序列化请求失败: %w", err)
 	}
@@ -584,18 +584,15 @@ func (c *Client) Callback(ctx context.Context, req *CallbackRequest) error {
 		return handleHTTPError(resp.StatusCode, body)
 	}
 
-	// 读取响应中的 renew_before_days（spec 2.8）
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
-	if len(body) > 0 {
-		var cbResp struct {
-			Data struct {
-				RenewBeforeDays int `json:"renew_before_days"`
-			} `json:"data"`
-		}
-		if json.Unmarshal(body, &cbResp) == nil {
-			c.recordRenewBeforeDays(cbResp.Data.RenewBeforeDays)
-		}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+	if err != nil {
+		return fmt.Errorf("读取回调响应失败: %w", err)
 	}
+	apiResp, err := parseResponse(body, resp.StatusCode)
+	if err != nil {
+		return err
+	}
+	c.recordRenewBeforeDays(apiResp.Data.RenewBeforeDays)
 
 	return nil
 }
