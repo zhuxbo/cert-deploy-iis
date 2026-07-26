@@ -264,6 +264,30 @@ type MockIISBinder struct {
 	FindBindingsForDomainsFunc func(domains []string) ([]iis.SSLBinding, error)
 }
 
+type MockValidationWebRootResolver struct {
+	ResolveFunc func(domains []string, explicitSiteName string) ([]iis.ValidationWebRoot, error)
+}
+
+func (m *MockValidationWebRootResolver) ResolveValidationWebRoots(domains []string, explicitSiteName string) ([]iis.ValidationWebRoot, error) {
+	if m.ResolveFunc != nil {
+		return m.ResolveFunc(domains, explicitSiteName)
+	}
+	return nil, nil
+}
+
+type MockValidationFileStore struct {
+	PlaceTokenFunc  func(root iis.ValidationWebRoot, relativePath, content string) (validationTokenPlacement, error)
+	RemoveTokenFunc func(root iis.ValidationWebRoot, record config.ValidationFileRecord) (validationTokenRemoveStatus, error)
+}
+
+func (m *MockValidationFileStore) PlaceToken(root iis.ValidationWebRoot, relativePath, content string) (validationTokenPlacement, error) {
+	return m.PlaceTokenFunc(root, relativePath, content)
+}
+
+func (m *MockValidationFileStore) RemoveToken(root iis.ValidationWebRoot, record config.ValidationFileRecord) (validationTokenRemoveStatus, error) {
+	return m.RemoveTokenFunc(root, record)
+}
+
 func (m *MockIISBinder) BindCertificate(hostname string, port int, certHash string) error {
 	if m.BindCertificateFunc != nil {
 		return m.BindCertificateFunc(hostname, port, certHash)
@@ -292,6 +316,19 @@ func NewMockDeployer() *Deployer {
 		Installer: &MockCertInstaller{},
 		Binder:    &MockIISBinder{},
 		Store:     &MockOrderStore{},
+		ValidationRoots: &MockValidationWebRootResolver{
+			ResolveFunc: func(domains []string, explicitSiteName string) ([]iis.ValidationWebRoot, error) {
+				return []iis.ValidationWebRoot{{SiteName: "Mock Site", PhysicalPath: `C:\mock`}}, nil
+			},
+		},
+		ValidationFiles: &MockValidationFileStore{
+			PlaceTokenFunc: func(root iis.ValidationWebRoot, relativePath, content string) (validationTokenPlacement, error) {
+				return validationTokenPlacement{}, nil
+			},
+			RemoveTokenFunc: func(root iis.ValidationWebRoot, record config.ValidationFileRecord) (validationTokenRemoveStatus, error) {
+				return validationTokenMissing, nil
+			},
+		},
 	}
 }
 

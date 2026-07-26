@@ -6,11 +6,150 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
 	"sslctlw/util"
 )
+
+// ValidationWebRoot 是文件验证专用的 IIS 站点根。
+type ValidationWebRoot struct {
+	SiteName     string
+	PhysicalPath string
+}
+
+// ResolveValidationWebRoots 解析显式站点，或所有已启动且与证书域名匹配的站点根。
+func ResolveValidationWebRoots(certDomains []string, explicitSiteName string) ([]ValidationWebRoot, error) {
+	sites, err := ScanSites()
+	if err != nil {
+		return nil, err
+	}
+	return resolveValidationWebRoots(sites, certDomains, explicitSiteName, GetSitePhysicalPath)
+}
+
+func resolveValidationWebRoots(
+	sites []SiteInfo,
+	certDomains []string,
+	explicitSiteName string,
+	getPath func(string) (string, error),
+) ([]ValidationWebRoot, error) {
+	selected := make([]SiteInfo, 0)
+	if explicitSiteName != "" {
+		for _, site := range sites {
+			if strings.EqualFold(site.Name, explicitSiteName) {
+				if !strings.EqualFold(site.State, "Started") {
+					return nil, fmt.Errorf("站点未启动: %s", site.Name)
+				}
+				if !siteMatchesValidationDomains(site, certDomains) && !siteHasValidationCatchAll(site) {
+					return nil, fmt.Errorf("站点 %s 不匹配证书域名且没有 catch-all HTTP 绑定", site.Name)
+				}
+				selected = append(selected, site)
+				break
+			}
+		}
+		if len(selected) == 0 {
+			return nil, fmt.Errorf("站点不存在: %s", explicitSiteName)
+		}
+	} else {
+		for _, site := range sites {
+			if !strings.EqualFold(site.State, "Started") {
+				continue
+			}
+			if siteMatchesValidationDomains(site, certDomains) {
+				selected = append(selected, site)
+			}
+		}
+		if len(selected) == 0 {
+			for _, site := range sites {
+				if strings.EqualFold(site.State, "Started") && siteHasValidationCatchAll(site) {
+					selected = append(selected, site)
+				}
+			}
+			if len(selected) > 1 {
+				names := make([]string, 0, len(selected))
+				for _, site := range selected {
+					names = append(names, site.Name)
+				}
+				sort.Strings(names)
+				return nil, fmt.Errorf("未找到域名匹配站点，存在多个 catch-all HTTP 站点: %s", strings.Join(names, ", "))
+			}
+		}
+	}
+
+	sort.Slice(selected, func(i, j int) bool {
+		return strings.ToLower(selected[i].Name) < strings.ToLower(selected[j].Name)
+	})
+	roots := make([]ValidationWebRoot, 0, len(selected))
+	seenPaths := make(map[string]struct{})
+	for _, site := range selected {
+		path, err := getPath(site.Name)
+		if err != nil {
+			return nil, fmt.Errorf("解析站点 %s 物理根失败: %w", site.Name, err)
+		}
+		path = filepath.Clean(path)
+		if err := validateIISPhysicalPath(path); err != nil {
+			return nil, fmt.Errorf("站点 %s 物理根不安全: %w", site.Name, err)
+		}
+		key := strings.ToLower(path)
+		if _, exists := seenPaths[key]; exists {
+			continue
+		}
+		seenPaths[key] = struct{}{}
+		roots = append(roots, ValidationWebRoot{SiteName: site.Name, PhysicalPath: path})
+	}
+	if len(roots) == 0 {
+		return nil, fmt.Errorf("未找到可用于文件验证的 IIS 站点")
+	}
+	return roots, nil
+}
+
+func siteMatchesValidationDomains(site SiteInfo, certDomains []string) bool {
+	for _, binding := range site.Bindings {
+		if !strings.EqualFold(binding.Protocol, "http") || binding.Port != 80 || binding.Host == "" {
+			continue
+		}
+		for _, certDomain := range certDomains {
+			if util.MatchDomain(binding.Host, certDomain) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func siteHasValidationCatchAll(site SiteInfo) bool {
+	for _, binding := range site.Bindings {
+		if binding.Host == "" && strings.EqualFold(binding.Protocol, "http") && binding.Port == 80 {
+			return true
+		}
+	}
+	return false
+}
+
+func validateIISPhysicalPath(path string) error {
+	if path == "" || strings.ContainsRune(path, '\x00') {
+		return fmt.Errorf("物理根为空或包含 NUL")
+	}
+	windowsPath := strings.ReplaceAll(path, "/", `\`)
+	lower := strings.ToLower(windowsPath)
+	if strings.HasPrefix(lower, `\\?\`) || strings.HasPrefix(lower, `\\.\`) || strings.HasPrefix(lower, `\??\`) {
+		return fmt.Errorf("不允许设备命名空间路径")
+	}
+	if strings.HasPrefix(windowsPath, `\\`) {
+		parts := strings.Split(strings.TrimPrefix(windowsPath, `\\`), `\`)
+		if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+			return fmt.Errorf("UNC 路径缺少服务器或共享名")
+		}
+		return nil
+	}
+	if len(windowsPath) < 3 ||
+		!((windowsPath[0] >= 'A' && windowsPath[0] <= 'Z') || (windowsPath[0] >= 'a' && windowsPath[0] <= 'z')) ||
+		windowsPath[1] != ':' || windowsPath[2] != '\\' {
+		return fmt.Errorf("物理根必须是绝对 Windows 路径")
+	}
+	return nil
+}
 
 // validateBindingParams 验证绑定参数
 func validateBindingParams(siteName, host string, port int) error {

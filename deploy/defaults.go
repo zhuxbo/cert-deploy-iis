@@ -34,6 +34,12 @@ func (d *defaultIISBinder) BindCertificate(hostname string, port int, certHash s
 	return iis.BindCertificate(hostname, port, certHash)
 }
 
+type defaultValidationWebRootResolver struct{}
+
+func (defaultValidationWebRootResolver) ResolveValidationWebRoots(domains []string, siteName string) ([]iis.ValidationWebRoot, error) {
+	return iis.ResolveValidationWebRoots(domains, siteName)
+}
+
 func (d *defaultIISBinder) BindCertificateByIP(ip string, port int, certHash string) error {
 	return iis.BindCertificateByIP(ip, port, certHash)
 }
@@ -102,10 +108,12 @@ func (d *defaultOrderStore) DeleteOrder(orderID int) error {
 // DefaultDeployer 创建默认部署器（不含 API Client）
 func DefaultDeployer(cfg *config.Config, store *cert.OrderStore) *Deployer {
 	return &Deployer{
-		Converter: &defaultCertConverter{},
-		Installer: &defaultCertInstaller{},
-		Binder:    &defaultIISBinder{},
-		Store:     &defaultOrderStore{store: store},
+		Converter:       &defaultCertConverter{},
+		Installer:       &defaultCertInstaller{},
+		Binder:          &defaultIISBinder{},
+		Store:           &defaultOrderStore{store: store},
+		ValidationRoots: defaultValidationWebRootResolver{},
+		ValidationFiles: defaultValidationFileStore{},
 	}
 }
 

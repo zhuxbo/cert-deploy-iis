@@ -9,6 +9,35 @@ import (
 	"testing"
 )
 
+func TestValidationFileRecordsJSONRoundTripAndZeroValue(t *testing.T) {
+	var zero CertMetadata
+	data, err := json.Marshal(zero)
+	if err != nil {
+		t.Fatalf("Marshal(zero) error = %v", err)
+	}
+	if strings.Contains(string(data), "validation_files") {
+		t.Fatalf("零值不应写出 validation_files: %s", data)
+	}
+
+	want := []ValidationFileRecord{{
+		SiteName:     "Default Web Site",
+		RelativePath: filepath.Join(".well-known", "acme-challenge", "token"),
+		SHA256:       "0123456789abcdef",
+	}}
+	meta := CertMetadata{ValidationFiles: want}
+	data, err = json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var got CertMetadata
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if len(got.ValidationFiles) != 1 || got.ValidationFiles[0] != want[0] {
+		t.Fatalf("round-trip = %+v, want %+v", got.ValidationFiles, want)
+	}
+}
+
 func TestValidateValidationMethod(t *testing.T) {
 	tests := []struct {
 		name     string

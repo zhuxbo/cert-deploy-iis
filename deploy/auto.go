@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -47,6 +48,12 @@ type Result struct {
 	Message    string
 	Thumbprint string
 	OrderID    int
+}
+
+// runSupplemental 承载不应改变证书部署 Result/callback 的附加清理结果。
+type runSupplemental struct {
+	Errors   []error
+	Warnings []string
 }
 
 // autoDeployLock 是自动部署锁的最小内部测试缝。
@@ -161,10 +168,13 @@ func runAutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions, deps autoDe
 		}
 		processedIndex++
 
+		supplemental := &runSupplemental{}
 		certResults, attempted := processOneCertWithSave(cfg, d, i, conflicts, func() error {
 			return deps.saveConfig(cfg)
-		})
+		}, supplemental)
 		report.Results = append(report.Results, certResults...)
+		report.Errors = append(report.Errors, supplemental.Errors...)
+		report.Warnings = append(report.Warnings, supplemental.Warnings...)
 		if attention, ok := certAttention(&cfg.Certificates[i]); ok {
 			report.Attention = append(report.Attention, attention)
 		}
@@ -223,7 +233,14 @@ func processOneCert(cfg *config.Config, d *Deployer, i int, conflicts map[iis.En
 	return processOneCertWithSave(cfg, d, i, conflicts, cfg.Save)
 }
 
-func processOneCertWithSave(cfg *config.Config, d *Deployer, i int, conflicts map[iis.EndpointKey][]int, save func() error) (certResults []Result, attempted bool) {
+func processOneCertWithSave(
+	cfg *config.Config,
+	d *Deployer,
+	i int,
+	conflicts map[iis.EndpointKey][]int,
+	save func() error,
+	supplementals ...*runSupplemental,
+) (certResults []Result, attempted bool) {
 	results := make([]Result, 0)
 	certCfg := cfg.Certificates[i]
 
@@ -451,6 +468,13 @@ func processOneCertWithSave(cfg *config.Config, d *Deployer, i int, conflicts ma
 			Message: fmt.Sprintf("保存部署结果失败: %v", err),
 		})
 		return results, true
+	}
+	if finalized && len(deployCertCfg.Metadata.ValidationFiles) > 0 {
+		var supplemental *runSupplemental
+		if len(supplementals) > 0 {
+			supplemental = supplementals[0]
+		}
+		cleanupOwnedValidationFiles(d, deployCertCfg, save, supplemental)
 	}
 
 	// 编排层在结果落盘后统一发送一次回调（deploy-spec §2.8）：
@@ -820,18 +844,151 @@ func validateCertConfig(certCfg *config.CertConfig) error {
 
 // handleProcessingOrder 处理 processing 状态的订单
 // 返回: reason, error
-func handleProcessingOrder(d *Deployer, certCfg *config.CertConfig, certData *api.CertData) (reason string, err error) {
-	if certData.File != nil && certData.File.Path != "" {
-		log.Printf("订单 %d 需要文件验证", certCfg.OrderID)
-		if err := handleFileValidation(certCfg.Domain, certData.File); err != nil {
-			log.Printf("创建验证文件失败: %v", err)
-		} else {
-			log.Printf("验证文件已创建，等待 CA 验证")
-		}
-	} else {
+func handleProcessingOrder(
+	d *Deployer,
+	certCfg *config.CertConfig,
+	certData *api.CertData,
+	persistConfig ...func() error,
+) (reason string, err error) {
+	if certData.File == nil || certData.File.Path == "" {
 		log.Printf("订单 %d 处理中，等待签发", certCfg.OrderID)
+		return "CSR 已提交，等待签发", nil
 	}
+	if certData.File.Content == "" {
+		return "", fmt.Errorf("验证文件信息不完整")
+	}
+	if d.ValidationRoots == nil || d.ValidationFiles == nil {
+		return "", fmt.Errorf("文件验证依赖未配置")
+	}
+	log.Printf("订单 %d 需要文件验证", certCfg.OrderID)
+
+	roots, err := resolveValidationRoots(d.ValidationRoots, certCfg)
+	if err != nil {
+		return "", fmt.Errorf("解析验证站点失败: %w", err)
+	}
+	relativePath, err := normalizeValidationRelativePath(certData.File.Path)
+	if err != nil {
+		return "", err
+	}
+	var persist func() error
+	if len(persistConfig) > 0 {
+		persist = persistConfig[0]
+	}
+	for _, root := range roots {
+		recordIndex := validationRecordIndex(certCfg.Metadata.ValidationFiles, root.SiteName, relativePath)
+		placed, err := d.ValidationFiles.PlaceToken(root, certData.File.Path, certData.File.Content)
+		if err != nil {
+			return "", fmt.Errorf("站点 %s 创建验证文件失败: %w", root.SiteName, err)
+		}
+		if !placed.Created {
+			continue // 同内容预存可复用，但客户端不取得所有权。
+		}
+		record := config.ValidationFileRecord{
+			SiteName:     root.SiteName,
+			RelativePath: placed.RelativePath,
+			SHA256:       placed.SHA256,
+		}
+		var previous config.ValidationFileRecord
+		if recordIndex >= 0 {
+			previous = certCfg.Metadata.ValidationFiles[recordIndex]
+			certCfg.Metadata.ValidationFiles[recordIndex] = record
+		} else {
+			certCfg.Metadata.ValidationFiles = append(certCfg.Metadata.ValidationFiles, record)
+		}
+		restoreRecord := func() {
+			if recordIndex >= 0 {
+				certCfg.Metadata.ValidationFiles[recordIndex] = previous
+			} else {
+				certCfg.Metadata.ValidationFiles = certCfg.Metadata.ValidationFiles[:len(certCfg.Metadata.ValidationFiles)-1]
+			}
+		}
+		if persist == nil {
+			restoreRecord()
+			rollbackErr := rollbackValidationToken(d.ValidationFiles, root, record)
+			return "", errors.Join(errors.New("新增验证文件后缺少完整配置持久化函数"), rollbackErr)
+		}
+		if err := persist(); err != nil {
+			restoreRecord()
+			rollbackErr := rollbackValidationToken(d.ValidationFiles, root, record)
+			return "", errors.Join(fmt.Errorf("持久化验证文件所有权失败: %w", err), rollbackErr)
+		}
+	}
+	log.Printf("验证文件已创建，等待 CA 验证")
 	return "CSR 已提交，等待签发", nil
+}
+
+func resolveValidationRoots(resolver ValidationWebRootResolver, certCfg *config.CertConfig) ([]iis.ValidationWebRoot, error) {
+	domains := append([]string(nil), certCfg.Domains...)
+	if len(domains) == 0 && certCfg.Domain != "" {
+		domains = []string{certCfg.Domain}
+	}
+	explicitSites := make([]string, 0)
+	seenSites := make(map[string]struct{})
+	autoRequested := len(certCfg.BindRules) == 0
+	for _, rule := range certCfg.BindRules {
+		if rule.SiteName == "" {
+			autoRequested = true
+			continue
+		}
+		key := strings.ToLower(rule.SiteName)
+		if _, exists := seenSites[key]; exists {
+			continue
+		}
+		seenSites[key] = struct{}{}
+		explicitSites = append(explicitSites, rule.SiteName)
+	}
+	if autoRequested {
+		explicitSites = append(explicitSites, "")
+	}
+	sort.Slice(explicitSites, func(i, j int) bool {
+		return strings.ToLower(explicitSites[i]) < strings.ToLower(explicitSites[j])
+	})
+	all := make([]iis.ValidationWebRoot, 0)
+	for _, siteName := range explicitSites {
+		roots, err := resolver.ResolveValidationWebRoots(domains, siteName)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, roots...)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		return strings.ToLower(all[i].SiteName) < strings.ToLower(all[j].SiteName)
+	})
+	deduped := make([]iis.ValidationWebRoot, 0, len(all))
+	seenPaths := make(map[string]struct{})
+	for _, root := range all {
+		key := strings.ToLower(filepath.Clean(root.PhysicalPath))
+		if _, exists := seenPaths[key]; exists {
+			continue
+		}
+		seenPaths[key] = struct{}{}
+		deduped = append(deduped, root)
+	}
+	if len(deduped) == 0 {
+		return nil, fmt.Errorf("未找到可用于文件验证的 IIS 站点")
+	}
+	return deduped, nil
+}
+
+func validationRecordIndex(records []config.ValidationFileRecord, siteName, relativePath string) int {
+	for i, record := range records {
+		if strings.EqualFold(record.SiteName, siteName) &&
+			strings.EqualFold(filepath.Clean(record.RelativePath), filepath.Clean(relativePath)) {
+			return i
+		}
+	}
+	return -1
+}
+
+func rollbackValidationToken(store validationFileStore, root iis.ValidationWebRoot, record config.ValidationFileRecord) error {
+	status, err := store.RemoveToken(root, record)
+	if err != nil {
+		return fmt.Errorf("回滚新建验证文件失败: %w", err)
+	}
+	if status != validationTokenRemoved && status != validationTokenMissing {
+		return fmt.Errorf("回滚新建验证文件失败: 文件所有权已变化")
+	}
+	return nil
 }
 
 // checkRenewalNeeded 检查证书是否需要续签
@@ -1030,7 +1187,14 @@ func submitPendingCSR(d *Deployer, client APIClient, certCfg *config.CertConfig,
 	// 归一化服务端状态：pending/approving 与 processing 统一按 processing 处理（deploy-spec §2.4/§2.6）
 	if csrResp.Data.Status == "processing" || csrResp.Data.Status == "pending" || csrResp.Data.Status == "approving" {
 		certCfg.Metadata.LastIssueState = config.IssueStateProcessing
-		reason, err := handleProcessingOrder(d, certCfg, &csrResp.Data.CertData)
+		if persist != nil {
+			if err := persist(); err != nil {
+				return nil, "", "", fmt.Errorf("持久化新订单 %d processing 状态失败: %w", newOrderID, err)
+			}
+		} else if csrResp.Data.CertData.File != nil && csrResp.Data.CertData.File.Path != "" {
+			return nil, "", "", fmt.Errorf("新订单 %d 文件验证前缺少完整配置持久化函数", newOrderID)
+		}
+		reason, err := handleProcessingOrder(d, certCfg, &csrResp.Data.CertData, persist)
 		return nil, "", reason, err
 	}
 
@@ -1076,14 +1240,12 @@ func handleLocalKeyMode(d *Deployer, client APIClient, certCfg *config.CertConfi
 					}
 				}
 			}
-			reason, handleErr := handleProcessingOrder(d, certCfg, certData)
+			reason, handleErr := handleProcessingOrder(d, certCfg, certData, persistConfig...)
 			if handleErr != nil {
 				return nil, "", "", handleErr
 			}
 			return nil, "", reason, nil
 		case "active":
-			// 证书已签发，清理之前可能残留的验证文件
-			cleanupValidationFiles(certCfg.Domain)
 			if waitingForIssue {
 				certCfg.Metadata.LastIssueState = certData.Status
 				privateKey, err := selectIssuedPrivateKey(d, certData, certCfg)
@@ -1478,103 +1640,6 @@ func deployCertAutoMode(d *Deployer, client APIClient, certData *api.CertData, p
 	return results, reportFromOutcome(outcome)
 }
 
-// handleFileValidation 处理文件验证
-// 在 IIS 站点目录下创建验证文件
-func handleFileValidation(domain string, file *api.FileValidation) error {
-	if file == nil || file.Path == "" || file.Content == "" {
-		return fmt.Errorf("验证文件信息不完整")
-	}
-
-	// 构建验证文件的完整路径
-	// file.Path 由接口返回，必须在 /.well-known/ 目录下
-	relativePath := strings.TrimPrefix(file.Path, "/")
-	relativePath = strings.ReplaceAll(relativePath, "/", string(os.PathSeparator))
-
-	// 验证文件扩展名（禁止危险扩展名）
-	ext := strings.ToLower(filepath.Ext(relativePath))
-	dangerousExts := []string{".exe", ".dll", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".asp", ".aspx", ".php"}
-	for _, dext := range dangerousExts {
-		if ext == dext {
-			return fmt.Errorf("不允许创建 %s 扩展名的验证文件", ext)
-		}
-	}
-
-	// 输入本身通过安全校验后再访问 IIS，避免无效请求触发外部命令。
-	siteName, sitePath, err := iis.GetSitePhysicalPathByDomain(domain)
-	if err != nil {
-		return fmt.Errorf("查找站点失败: %w", err)
-	}
-
-	log.Printf("找到站点: %s, 路径: %s", siteName, sitePath)
-
-	// 安全验证：防止路径遍历攻击
-	fullPath, err := util.ValidateRelativePath(sitePath, relativePath)
-	if err != nil {
-		return fmt.Errorf("验证文件路径无效: %w", err)
-	}
-
-	// 额外限制：必须在 .well-known 目录下
-	// 使用 filepath.Rel 获取相对路径，然后检查第一段是否为 .well-known
-	// Windows 大小写不敏感，统一转小写比较
-	relToSite, err := filepath.Rel(sitePath, fullPath)
-	if err != nil {
-		return fmt.Errorf("计算相对路径失败: %w", err)
-	}
-	pathParts := strings.Split(relToSite, string(os.PathSeparator))
-	if len(pathParts) == 0 || !strings.EqualFold(pathParts[0], ".well-known") {
-		return fmt.Errorf("验证文件路径必须在 .well-known 目录下")
-	}
-
-	// 创建目录（使用更严格的权限 0750）
-	dir := filepath.Dir(fullPath)
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		return fmt.Errorf("创建目录失败: %w", err)
-	}
-
-	// 写入验证文件
-	if err := os.WriteFile(fullPath, []byte(file.Content), 0600); err != nil {
-		return fmt.Errorf("写入验证文件失败: %w", err)
-	}
-
-	// 写入后验证文件位置（防止符号链接攻击）
-	realPath, err := filepath.EvalSymlinks(fullPath)
-	if err != nil {
-		// 如果解析失败，删除已写入的文件
-		if rmErr := os.Remove(fullPath); rmErr != nil && !os.IsNotExist(rmErr) {
-			log.Printf("警告: 清理验证文件失败 %s: %v", fullPath, rmErr)
-		}
-		return fmt.Errorf("验证文件路径失败: %w", err)
-	}
-	if !util.IsPathWithinBase(sitePath, realPath) {
-		if rmErr := os.Remove(fullPath); rmErr != nil && !os.IsNotExist(rmErr) {
-			log.Printf("警告: 清理验证文件失败 %s: %v", fullPath, rmErr)
-		}
-		return fmt.Errorf("文件写入位置超出站点目录范围")
-	}
-
-	log.Printf("验证文件已创建: %s", fullPath)
-
-	// 创建 web.config 允许无扩展名文件访问（如果不存在）
-	webConfigPath := filepath.Join(dir, "web.config")
-	if _, err := os.Stat(webConfigPath); os.IsNotExist(err) {
-		webConfigContent := `<?xml version="1.0" encoding="UTF-8"?>
-<configuration>
-  <system.webServer>
-    <staticContent>
-      <mimeMap fileExtension="." mimeType="text/plain" />
-    </staticContent>
-  </system.webServer>
-</configuration>`
-		if err := os.WriteFile(webConfigPath, []byte(webConfigContent), 0644); err != nil {
-			log.Printf("警告: 创建 web.config 失败: %v", err)
-		} else {
-			log.Printf("已创建 web.config 允许无扩展名文件访问")
-		}
-	}
-
-	return nil
-}
-
 // isIPBinding 判断是否是 IP 绑定（如 0.0.0.0:443，支持 IPv4 和 IPv6）
 func isIPBinding(hostnamePort string) bool {
 	host := iis.ParseHostFromBinding(hostnamePort)
@@ -1584,44 +1649,73 @@ func isIPBinding(hostnamePort string) bool {
 	return net.ParseIP(host) != nil
 }
 
-// validationDirs 可能存在验证文件的子目录
-var validationDirs = []string{
-	filepath.Join(".well-known", "acme-challenge"),
-	filepath.Join(".well-known", "pki-validation"),
-}
-
-// cleanupValidationFiles 清理验证文件
-// 在证书签发成功后调用，清理 .well-known/acme-challenge/ 和 .well-known/pki-validation/ 下的验证文件
-func cleanupValidationFiles(domain string) {
-	_, sitePath, err := iis.GetSitePhysicalPathByDomain(domain)
-	if err != nil {
+// cleanupOwnedValidationFiles 只按 metadata 中的所有权记录清理；不扫描目录。
+// 不确定的站点、路径、文件类型或哈希只告警并保留记录。
+func cleanupOwnedValidationFiles(
+	d *Deployer,
+	certCfg *config.CertConfig,
+	persist func() error,
+	supplemental *runSupplemental,
+) {
+	if len(certCfg.Metadata.ValidationFiles) == 0 {
+		return
+	}
+	if supplemental == nil {
+		supplemental = &runSupplemental{}
+	}
+	if d.ValidationRoots == nil || d.ValidationFiles == nil {
+		supplemental.Warnings = append(supplemental.Warnings, "验证文件清理依赖未配置，已保留所有权记录")
 		return
 	}
 
-	for _, subDir := range validationDirs {
-		dir := filepath.Join(sitePath, subDir)
-		if _, err := os.Stat(dir); os.IsNotExist(err) {
-			continue
-		}
-
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				os.Remove(filepath.Join(dir, entry.Name()))
-			}
-		}
-
-		// 尝试删除空目录
-		os.Remove(dir)
-		log.Printf("已清理验证文件: %s", dir)
+	before := append([]config.ValidationFileRecord(nil), certCfg.Metadata.ValidationFiles...)
+	remaining := make([]config.ValidationFileRecord, 0, len(before))
+	changed := false
+	domains := certCfg.Domains
+	if len(domains) == 0 && certCfg.Domain != "" {
+		domains = []string{certCfg.Domain}
 	}
-
-	// 尝试删除空的 .well-known 目录
-	os.Remove(filepath.Join(sitePath, ".well-known"))
+	for _, record := range before {
+		roots, err := d.ValidationRoots.ResolveValidationWebRoots(domains, record.SiteName)
+		if err != nil || len(roots) != 1 || !strings.EqualFold(roots[0].SiteName, record.SiteName) {
+			supplemental.Warnings = append(supplemental.Warnings,
+				fmt.Sprintf("验证文件站点 %s 无法安全解析，已保留记录", record.SiteName))
+			remaining = append(remaining, record)
+			continue
+		}
+		status, err := d.ValidationFiles.RemoveToken(roots[0], record)
+		if err != nil {
+			supplemental.Errors = append(supplemental.Errors,
+				fmt.Errorf("清理站点 %s 验证文件失败: %w", record.SiteName, err))
+			remaining = append(remaining, record)
+			continue
+		}
+		switch status {
+		case validationTokenRemoved, validationTokenMissing:
+			changed = true
+		case validationTokenOwnershipChanged:
+			supplemental.Warnings = append(supplemental.Warnings,
+				fmt.Sprintf("站点 %s 验证文件所有权已变化，已保留文件和记录", record.SiteName))
+			remaining = append(remaining, record)
+		default:
+			supplemental.Warnings = append(supplemental.Warnings,
+				fmt.Sprintf("站点 %s 验证文件状态未知，已保留记录", record.SiteName))
+			remaining = append(remaining, record)
+		}
+	}
+	if !changed {
+		return
+	}
+	certCfg.Metadata.ValidationFiles = remaining
+	if persist == nil {
+		certCfg.Metadata.ValidationFiles = before
+		supplemental.Errors = append(supplemental.Errors, errors.New("清理验证文件后缺少完整配置持久化函数"))
+		return
+	}
+	if err := persist(); err != nil {
+		certCfg.Metadata.ValidationFiles = before
+		supplemental.Errors = append(supplemental.Errors, fmt.Errorf("保存验证文件清理结果失败: %w", err))
+	}
 }
 
 // removeTempFile 清理临时文件（带重试）

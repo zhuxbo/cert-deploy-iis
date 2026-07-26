@@ -86,6 +86,11 @@ type IISBinder interface {
 	FindBindingsForDomains(domains []string) ([]iis.SSLBinding, error)
 }
 
+// ValidationWebRootResolver 只负责解析文件验证可写入的 IIS 站点根。
+type ValidationWebRootResolver interface {
+	ResolveValidationWebRoots(domains []string, explicitSiteName string) ([]iis.ValidationWebRoot, error)
+}
+
 // APIClient API 客户端接口
 type APIClient interface {
 	// GetCertByOrderID 按订单 ID 获取证书
@@ -138,6 +143,8 @@ type Deployer struct {
 	Installer        CertInstaller
 	Binder           IISBinder
 	Store            OrderStore
+	ValidationRoots  ValidationWebRootResolver
+	ValidationFiles  validationFileStore
 	callbackWg       sync.WaitGroup
 	callbackMu       sync.Mutex
 	callbackSeq      uint64

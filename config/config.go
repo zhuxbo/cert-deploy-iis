@@ -108,7 +108,15 @@ type CertMetadata struct {
 	CapPhase        string `json:"cap_phase,omitempty"`         // 触顶阶段（CapPhase* 常量），仅 last_issue_state=CAPPED 时有效
 	DeployStartedAt string `json:"deploy_started_at,omitempty"` // 部署意图落盘标记：非空表示一次部署尝试在途，用于崩溃恢复重放判定不重复计数
 	// 平台扩展（IIS）
-	Thumbprint string `json:"thumbprint,omitempty"` // 证书指纹
+	Thumbprint      string                 `json:"thumbprint,omitempty"`       // 证书指纹
+	ValidationFiles []ValidationFileRecord `json:"validation_files,omitempty"` // 客户端实际创建并拥有的验证文件
+}
+
+// ValidationFileRecord 记录客户端拥有的验证文件；旧配置缺少该字段时自然为空。
+type ValidationFileRecord struct {
+	SiteName     string `json:"site_name"`
+	RelativePath string `json:"relative_path"`
+	SHA256       string `json:"sha256"`
 }
 
 // IsCapped 是否已触顶静默
