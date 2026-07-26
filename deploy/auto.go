@@ -1541,7 +1541,8 @@ func clientRenewBeforeDays(client APIClient) int {
 }
 
 // CheckAndDeploy 检查并部署（命令行模式入口）
-func CheckAndDeploy() error {
+func CheckAndDeploy() RunReport {
+	report := RunReport{}
 	// 守护启动时检查数据目录 ACL：机器作用域加密的 Token 与私钥机密性依赖此 ACL，
 	// 弱 ACL 仅告警不阻断（避免存量安装无法续签）
 	for _, w := range util.EvaluateDataDirACL(config.GetDataDir()) {
@@ -1550,41 +1551,18 @@ func CheckAndDeploy() error {
 
 	cfg, err := config.Load()
 	if err != nil {
-		return fmt.Errorf("加载配置失败: %v", err)
+		report.Errors = append(report.Errors, fmt.Errorf("加载配置失败: %v", err))
+		return report
 	}
 
 	if len(cfg.Certificates) == 0 {
-		return fmt.Errorf("没有配置任何证书，请先运行 sslctlw setup 或 GUI 添加配置")
+		report.Errors = append(report.Errors, fmt.Errorf("没有配置任何证书，请先运行 sslctlw setup 或 GUI 添加配置"))
+		return report
 	}
 
 	store := cert.NewOrderStore()
 	deployer := DefaultDeployer(cfg, store)
-	report := AutoDeploy(cfg, deployer, RunOptions{ScatterDelay: true})
-	results := report.Results
-
-	// 等待所有回调 goroutine 完成
-
-	successCount := 0
-	failCount := 0
-	for _, r := range results {
-		if r.Success {
-			successCount++
-			log.Printf("[成功] %s: %s", r.Domain, r.Message)
-		} else {
-			failCount++
-			log.Printf("[失败] %s: %s", r.Domain, r.Message)
-		}
-	}
-
-	log.Printf("部署完成: 成功 %d, 失败 %d", successCount, failCount)
-
-	for _, warning := range report.Warnings {
-		log.Printf("[警告] %s", warning)
-	}
-	if err := report.Err(); err != nil {
-		return err
-	}
-	return nil
+	return AutoDeploy(cfg, deployer, RunOptions{ScatterDelay: true})
 }
 
 // deployCertAutoMode 自动绑定模式部署：查找 IIS 中已有的 SSL 绑定并更换证书。

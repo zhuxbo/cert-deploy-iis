@@ -136,7 +136,8 @@ func runDeploy(args []string) {
 		// deploy --all: 自动部署所有
 		setupDeployLog()
 		log.Printf("========== 开始自动部署 ==========")
-		if err := deploy.CheckAndDeploy(); err != nil {
+		reportOut := io.MultiWriter(os.Stdout, log.Writer())
+		if err := deployAllWithRunner(deploy.CheckAndDeploy, reportOut); err != nil {
 			log.Printf("部署失败: %v", err)
 			fmt.Fprintf(os.Stderr, "部署失败: %v\n", err)
 			os.Exit(1)
@@ -192,6 +193,21 @@ func deploySingleCertWithRunner(cfg *config.Config, deployer *deploy.Deployer, o
 	}
 
 	report := run(cfg, deployer, deploy.RunOptions{OnlyOrderID: orderID})
+	reportErr := writeRunReport(out, report)
+
+	var attentionErrors []error
+	for _, attention := range report.Attention {
+		attentionErrors = append(attentionErrors,
+			fmt.Errorf("订单 %d 需要人工处理: %s", attention.OrderID, attention.Reason))
+	}
+	return errors.Join(reportErr, errors.Join(attentionErrors...))
+}
+
+func deployAllWithRunner(run func() deploy.RunReport, out io.Writer) error {
+	return writeRunReport(out, run())
+}
+
+func writeRunReport(out io.Writer, report deploy.RunReport) error {
 	for _, r := range report.Results {
 		if r.Success {
 			fmt.Fprintf(out, "[成功] %s: %s\n", r.Domain, r.Message)
@@ -202,23 +218,24 @@ func deploySingleCertWithRunner(cfg *config.Config, deployer *deploy.Deployer, o
 	for _, warning := range report.Warnings {
 		fmt.Fprintf(out, "[警告] %s\n", warning)
 	}
-
-	var attentionErrors []error
 	for _, attention := range report.Attention {
-		attentionErrors = append(attentionErrors,
-			fmt.Errorf("订单 %d 需要人工处理: %s", attention.OrderID, attention.Reason))
+		fmt.Fprintf(out, "[需人工处理] 订单 %d %s: %s\n",
+			attention.OrderID, attention.Domain, attention.Reason)
 	}
-	if err := errors.Join(report.Err(), errors.Join(attentionErrors...)); err != nil {
-		return err
+	for _, runErr := range report.Errors {
+		if runErr != nil {
+			fmt.Fprintf(out, "[错误] %v\n", runErr)
+		}
 	}
 	if report.AlreadyRunning {
 		fmt.Fprintln(out, "已有部署正在运行，本次跳过")
-		return nil
 	}
-	if len(report.Results) == 0 {
+	if len(report.Results) == 0 && len(report.Errors) == 0 &&
+		len(report.Warnings) == 0 && len(report.Attention) == 0 &&
+		!report.AlreadyRunning {
 		fmt.Fprintln(out, "本次无需部署")
 	}
-	return nil
+	return report.Err()
 }
 
 // runStatus 显示状态
@@ -266,27 +283,46 @@ func runStatus() {
 	if taskName == "" {
 		taskName = config.DefaultTaskName
 	}
-	if !util.IsTaskExists(taskName) {
-		fmt.Printf("计划任务: %s (未创建)\n", taskName)
-		return
-	}
-	fmt.Printf("计划任务: %s (已创建)\n", taskName)
+	_ = writeTaskHealthStatus(os.Stdout, cfg.AutoCheckEnabled, taskName, time.Now(), util.GetTaskHealth)
+}
 
-	// 任务运行健康：上次运行时间/结果，停摆时明确告警
-	health, err := util.GetTaskHealth(taskName)
-	if err != nil {
-		fmt.Printf("  运行状态: 查询失败 (%v)\n", err)
-		return
+func writeTaskHealthStatus(
+	out io.Writer,
+	enabled bool,
+	taskName string,
+	now time.Time,
+	query func(string) (*util.TaskHealth, error),
+) error {
+	if !enabled {
+		fmt.Fprintf(out, "计划任务: %s (不健康)\n", taskName)
+		fmt.Fprintln(out, "  [告警] 自动部署已停止")
+		return nil
 	}
+
+	health, err := query(taskName)
+	if err != nil {
+		fmt.Fprintf(out, "计划任务: %s (不健康)\n", taskName)
+		fmt.Fprintf(out, "  [告警] 任务运行信息查询失败: %v\n", err)
+		return err
+	}
+
+	warnings := util.EvaluateTaskHealth(health, now)
+	state := "健康"
+	if len(warnings) > 0 {
+		state = "不健康"
+	}
+	fmt.Fprintf(out, "计划任务: %s (%s)\n", taskName, state)
+
 	if health.HasRun {
-		fmt.Printf("  上次运行: %s (结果: 0x%X)\n",
+		fmt.Fprintf(out, "  上次运行: %s (结果: 0x%X)\n",
 			health.LastRunTime.Format("2006-01-02 15:04:05"), health.LastTaskResult)
 	} else {
-		fmt.Println("  上次运行: 从未运行")
+		fmt.Fprintln(out, "  上次运行: 从未运行")
 	}
-	for _, w := range util.EvaluateTaskHealth(health, time.Now()) {
-		fmt.Printf("  [告警] %s\n", w)
+	for _, warning := range warnings {
+		fmt.Fprintf(out, "  [告警] %s\n", warning)
 	}
+	return nil
 }
 
 // certTokenHealth 返回证书 API Token 的健康描述

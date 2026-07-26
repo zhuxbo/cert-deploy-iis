@@ -76,7 +76,10 @@ sslctlw help
 
 ### 自动部署
 
-计划任务调用 `sslctlw deploy --all` 实现自动续签。`setup` 命令通过 Windows 自带的 `schtasks` 参数创建每日 SYSTEM 任务，兼容 Windows Server 2012+（包括 Server 2016）；`status` 命令显示任务上次运行时间与结果，停摆时告警。
+计划任务调用 `sslctlw deploy --all` 实现自动续签。`setup` 命令通过 Windows 自带的 `schtasks` 参数创建每日 SYSTEM 任务，兼容 Windows Server 2012+（包括 Server 2016）。CLI 与 GUI 会完整展示自动部署报告中的部署结果、运行错误、警告、人工处理事项和“已有部署正在运行”状态，不会把“结果为空但有错误”误报为无需更新。
+
+`status` 命令与 GUI 会综合计划任务查询结果、上次运行时间和退出结果判断健康状态；查询失败、从未运行、超过 25 小时未运行或上次结果非零都会明确显示为不健康。GUI 手动检查的 10 分钟限制仅是观察超时：部署工作不会因此被中止，按钮会在实际后台工作结束后恢复。
+
 续签替换 IIS 证书时会保留原绑定的 AppID，以及已由 Windows HTTP API 确认的客户端证书协商、CTL 和吊销检查参数；结构化查询不可用而降级捕获时会记录无法完整保真的警告。
 
 ## API 接口

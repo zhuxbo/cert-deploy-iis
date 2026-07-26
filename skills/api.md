@@ -288,6 +288,16 @@ GUI 模式传 `false` 不延迟。区间由启用证书数量 N 决定（`calcSp
 - 每证书延迟区间上界 = `clamp(600/N, 5, 120)`
 - 第一张证书不延迟，其后每张在区间内随机延迟
 
+### 运行报告消费
+
+`CheckAndDeploy` 返回完整 `RunReport`，CLI `deploy --all` 与 GUI 必须逐类消费
+`Results`、`Errors`、`Warnings`、`Attention` 和 `AlreadyRunning`。只有这些集合均为空且
+`AlreadyRunning=false` 时才能显示“无需更新”；不得仅凭 `Results` 为空推断成功或无操作。
+
+`Warnings` 是非致命提示，必须与成功结果一同可见；`Attention` 表示需要人工处理，GUI
+按失败状态突出显示，CLI 明确输出事项；`AlreadyRunning` 表示已有部署占用运行锁，不得
+显示为本次无需更新。
+
 ### 部署成功后回填配置
 
 订单内全部绑定成功且 API 返回证书内容非空时，才完成生命周期并回填配置：
@@ -352,7 +362,7 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 
 ### sendCallback goroutine 生命周期
 
-`deploy/auto.go` 中的 `sendCallback` 在 goroutine 中执行回调请求。`Deployer` 使用 `callbackWg sync.WaitGroup` 跟踪所有活跃的回调 goroutine。`CheckAndDeploy` 在统计结果前调用 `deployer.WaitCallbacks()` 确保所有回调完成，避免 `-auto` 模式下 `os.Exit` 截断未完成的回调。
+`deploy/auto.go` 中的 `sendCallback` 在 goroutine 中执行回调请求。`Deployer` 使用 `callbackWg sync.WaitGroup` 跟踪所有活跃的回调 goroutine。`AutoDeploy` 在返回 `RunReport` 前调用 `deployer.WaitCallbacks()` 确保所有回调完成，避免 CLI 或 GUI 提前结束本轮处理。
 
 ### 定时任务重试（延迟）
 

@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"sslctlw/config"
 	"sslctlw/deploy"
+	"sslctlw/util"
 )
 
 func enabledSingleCertConfig(orderID int) *config.Config {
@@ -165,5 +167,104 @@ func TestDeploySingleCertWithRunnerPreservesErrorIdentity(t *testing.T) {
 	err := deploySingleCertWithRunner(enabledSingleCertConfig(101), &deploy.Deployer{}, 101, runner, &bytes.Buffer{})
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("必须保留 RunReport 错误链: %v", err)
+	}
+}
+
+func TestDeployAllWithRunnerConsumesCompleteRunReport(t *testing.T) {
+	sentinel := errors.New("cursor save failed")
+	tests := []struct {
+		name    string
+		report  deploy.RunReport
+		wantOut string
+		wantErr error
+		notOut  string
+	}{
+		{
+			name:    "已有运行",
+			report:  deploy.RunReport{AlreadyRunning: true},
+			wantOut: "已有部署正在运行",
+		},
+		{
+			name: "人工处理项",
+			report: deploy.RunReport{Attention: []deploy.CertAttention{{
+				OrderID: 9, Domain: "attention.example.com", Reason: "CAPPED",
+			}}},
+			wantOut: "需人工处理",
+		},
+		{
+			name:    "空结果运行错误",
+			report:  deploy.RunReport{Errors: []error{sentinel}},
+			wantOut: "cursor save failed",
+			wantErr: sentinel,
+			notOut:  "无需部署",
+		},
+		{
+			name:    "只有警告",
+			report:  deploy.RunReport{Warnings: []string{"callback failed"}},
+			wantOut: "callback failed",
+			notOut:  "无需部署",
+		},
+		{
+			name:    "真正无动作",
+			report:  deploy.RunReport{},
+			wantOut: "本次无需部署",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := deployAllWithRunner(func() deploy.RunReport { return tt.report }, &out)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("error=%v want=%v", err, tt.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("error=%v", err)
+			}
+			if !strings.Contains(out.String(), tt.wantOut) {
+				t.Fatalf("output=%q want contains %q", out.String(), tt.wantOut)
+			}
+			if tt.notOut != "" && strings.Contains(out.String(), tt.notOut) {
+				t.Fatalf("output=%q must not contain %q", out.String(), tt.notOut)
+			}
+		})
+	}
+}
+
+func TestWriteTaskHealthStatusDoesNotMisreportQueryFailureAsMissing(t *testing.T) {
+	var out bytes.Buffer
+	queryErr := errors.New("powershell unavailable")
+	err := writeTaskHealthStatus(
+		&out,
+		true,
+		"SSLCtlW",
+		time.Date(2026, 7, 26, 12, 0, 0, 0, time.Local),
+		func(string) (*util.TaskHealth, error) { return nil, queryErr },
+	)
+	if !errors.Is(err, queryErr) {
+		t.Fatalf("error=%v want=%v", err, queryErr)
+	}
+	if !strings.Contains(out.String(), "不健康") || strings.Contains(out.String(), "未创建") {
+		t.Fatalf("output=%q", out.String())
+	}
+}
+
+func TestWriteTaskHealthStatusDisabledDoesNotQuery(t *testing.T) {
+	var out bytes.Buffer
+	err := writeTaskHealthStatus(
+		&out,
+		false,
+		"SSLCtlW",
+		time.Date(2026, 7, 26, 12, 0, 0, 0, time.Local),
+		func(string) (*util.TaskHealth, error) {
+			t.Fatal("自动部署已停止时不应查询任务")
+			return nil, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("error=%v", err)
+	}
+	if !strings.Contains(out.String(), "不健康") || !strings.Contains(out.String(), "已停止") {
+		t.Fatalf("output=%q", out.String())
 	}
 }

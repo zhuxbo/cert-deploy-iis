@@ -13,6 +13,7 @@ import (
 	"sslctlw/config"
 	"sslctlw/deploy"
 	"sslctlw/iis"
+	"sslctlw/util"
 )
 
 // TaskStatus 任务状态
@@ -35,13 +36,36 @@ type BackgroundTask struct {
 	checking bool
 	onUpdate func()
 	results  []deploy.Result
+	report   deploy.RunReport
+
+	loadConfig func() (*config.Config, error)
+	runDeploy  func(*config.Config) deploy.RunReport
+	now        func() time.Time
 }
 
 // NewBackgroundTask 创建后台任务
 func NewBackgroundTask() *BackgroundTask {
+	return newBackgroundTask(
+		config.Load,
+		func(cfg *config.Config) deploy.RunReport {
+			store := cert.NewOrderStore()
+			return deploy.AutoDeploy(cfg, deploy.DefaultDeployer(cfg, store), deploy.RunOptions{})
+		},
+		time.Now,
+	)
+}
+
+func newBackgroundTask(
+	loadConfig func() (*config.Config, error),
+	runDeploy func(*config.Config) deploy.RunReport,
+	now func() time.Time,
+) *BackgroundTask {
 	return &BackgroundTask{
-		status:  TaskStatusIdle,
-		message: "未启动",
+		status:     TaskStatusIdle,
+		message:    "未启动",
+		loadConfig: loadConfig,
+		runDeploy:  runDeploy,
+		now:        now,
 	}
 }
 
@@ -70,7 +94,14 @@ func (t *BackgroundTask) GetLastRun() time.Time {
 func (t *BackgroundTask) GetResults() []deploy.Result {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.results
+	return append([]deploy.Result(nil), t.results...)
+}
+
+// GetReport 获取最近一次完整运行报告。
+func (t *BackgroundTask) GetReport() deploy.RunReport {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return cloneRunReport(t.report)
 }
 
 // RunOnce 立即执行一次检测（异步）
@@ -97,9 +128,14 @@ func (t *BackgroundTask) doCheck() {
 		}
 	}()
 
+	t.mu.Lock()
+	t.results = nil
+	t.report = deploy.RunReport{}
+	t.mu.Unlock()
+
 	t.updateStatus(TaskStatusRunning, "正在检测证书...")
 
-	cfg, err := config.Load()
+	cfg, err := t.loadConfig()
 	if err != nil {
 		t.updateStatus(TaskStatusFailed, fmt.Sprintf("加载配置失败: %v", err))
 		return
@@ -112,32 +148,99 @@ func (t *BackgroundTask) doCheck() {
 
 	t.updateStatus(TaskStatusRunning, fmt.Sprintf("正在检查 %d 个证书...", len(cfg.Certificates)))
 
-	store := cert.NewOrderStore()
-	report := deploy.AutoDeploy(cfg, deploy.DefaultDeployer(cfg, store), deploy.RunOptions{})
-	results := report.Results
+	report := t.runDeploy(cfg)
 
 	t.mu.Lock()
-	t.lastRun = time.Now()
-	t.results = results
+	t.lastRun = t.now()
+	t.results = append([]deploy.Result(nil), report.Results...)
+	t.report = cloneRunReport(report)
+	lastRun := t.lastRun
 	t.mu.Unlock()
 
-	// 统计结果
-	successCount := 0
-	failCount := 0
-	for _, r := range results {
-		if r.Success {
-			successCount++
-		} else {
-			failCount++
-		}
+	status, message := backgroundStatusFromReport(report, lastRun)
+	t.updateStatus(status, message)
+}
+
+func backgroundStatusFromReport(report deploy.RunReport, lastRun time.Time) (TaskStatus, string) {
+	suffix := fmt.Sprintf(" (上次: %s)", lastRun.Format("15:04:05"))
+	if err := report.Err(); err != nil {
+		return TaskStatusFailed, fmt.Sprintf("检测失败: %v%s", err, suffix)
+	}
+	if len(report.Attention) > 0 {
+		return TaskStatusFailed, fmt.Sprintf("需人工处理 %d 个证书%s", len(report.Attention), suffix)
+	}
+	if report.AlreadyRunning {
+		return TaskStatusRunning, "已有部署正在运行"
+	}
+	if len(report.Warnings) > 0 && len(report.Results) == 0 {
+		return TaskStatusSuccess, fmt.Sprintf("检测完成，警告 %d 条%s", len(report.Warnings), suffix)
 	}
 
-	if len(results) == 0 {
-		t.updateStatus(TaskStatusSuccess, fmt.Sprintf("检测完成，无需更新 (上次: %s)", t.lastRun.Format("15:04:05")))
-	} else if failCount == 0 {
-		t.updateStatus(TaskStatusSuccess, fmt.Sprintf("部署成功 %d 个 (上次: %s)", successCount, t.lastRun.Format("15:04:05")))
-	} else {
-		t.updateStatus(TaskStatusFailed, fmt.Sprintf("成功 %d, 失败 %d (上次: %s)", successCount, failCount, t.lastRun.Format("15:04:05")))
+	successCount := 0
+	for _, result := range report.Results {
+		if result.Success {
+			successCount++
+		}
+	}
+	if len(report.Results) == 0 {
+		return TaskStatusSuccess, "检测完成，无需更新" + suffix
+	}
+	if len(report.Warnings) > 0 {
+		return TaskStatusSuccess, fmt.Sprintf("部署成功 %d 个，警告 %d 条%s", successCount, len(report.Warnings), suffix)
+	}
+	return TaskStatusSuccess, fmt.Sprintf("部署成功 %d 个%s", successCount, suffix)
+}
+
+func cloneRunReport(report deploy.RunReport) deploy.RunReport {
+	report.Results = append([]deploy.Result(nil), report.Results...)
+	report.Errors = append([]error(nil), report.Errors...)
+	report.Warnings = append([]string(nil), report.Warnings...)
+	report.Attention = append([]deploy.CertAttention(nil), report.Attention...)
+	return report
+}
+
+func queryTaskHealthPresentation(
+	enabled bool,
+	taskName string,
+	now time.Time,
+	query func(string) (*util.TaskHealth, error),
+) (bool, string) {
+	if !enabled {
+		return false, "自动部署已停止"
+	}
+	health, err := query(taskName)
+	if err != nil {
+		return false, fmt.Sprintf("任务计划不健康: %v", err)
+	}
+	warnings := util.EvaluateTaskHealth(health, now)
+	if len(warnings) > 0 {
+		return false, "任务计划不健康: " + strings.Join(warnings, "；")
+	}
+	return true, "任务计划健康"
+}
+
+func observeWorker(
+	done <-chan struct{},
+	timeout <-chan time.Time,
+	cancelled <-chan struct{},
+	onTimeout func(),
+) bool {
+	select {
+	case <-done:
+		return true
+	case <-timeout:
+		if onTimeout != nil {
+			onTimeout()
+		}
+	case <-cancelled:
+		return false
+	}
+
+	select {
+	case <-done:
+		return true
+	case <-cancelled:
+		return false
 	}
 }
 
