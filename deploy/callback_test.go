@@ -483,3 +483,28 @@ func TestAppendRetryCapNotice(t *testing.T) {
 		t.Errorf("重复追加应幂等: %q -> %q", once, twice)
 	}
 }
+
+func TestWaitCallbacks_ReturnsAndClearsConcurrentWarnings(t *testing.T) {
+	d := NewMockDeployer()
+	client := &MockAPIClient{CallbackFunc: func(context.Context, *api.CallbackRequest) error {
+		return fmt.Errorf("manager rejected callback")
+	}}
+
+	const callbackCount = 16
+	for i := 0; i < callbackCount; i++ {
+		sendCallback(d, client, 400+i, "warning.example.com", false, "deploy failed")
+	}
+
+	warnings := d.WaitCallbacks()
+	if len(warnings) != callbackCount {
+		t.Fatalf("并发 callback warning 数量 = %d, want %d: %v", len(warnings), callbackCount, warnings)
+	}
+	for _, warning := range warnings {
+		if !strings.Contains(warning, "manager rejected callback") {
+			t.Fatalf("warning 未保留 callback 最终错误: %q", warning)
+		}
+	}
+	if stale := d.WaitCallbacks(); len(stale) != 0 {
+		t.Fatalf("读取后必须清空，避免下一轮串入旧 warning: %v", stale)
+	}
+}

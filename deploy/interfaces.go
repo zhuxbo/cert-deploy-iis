@@ -2,6 +2,8 @@ package deploy
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 
 	"sslctlw/api"
@@ -9,6 +11,55 @@ import (
 	"sslctlw/config"
 	"sslctlw/iis"
 )
+
+// RunOptions 控制一次自动部署运行的范围与节奏。
+type RunOptions struct {
+	ScatterDelay    bool
+	OnlyOrderID     int
+	MaxCertificates int
+}
+
+// CertAttention 表示需要人工处理、但不应令本次运行报错的证书状态。
+type CertAttention struct {
+	OrderID int
+	Domain  string
+	Reason  string
+}
+
+// RunReport 汇总一次自动部署运行的结构化结果。
+type RunReport struct {
+	Results        []Result
+	Errors         []error
+	Warnings       []string
+	Attention      []CertAttention
+	AlreadyRunning bool
+}
+
+// Err 聚合失败结果与运行级错误；warning、attention 和正常锁占用不属于错误。
+func (r RunReport) Err() error {
+	errs := make([]error, 0, len(r.Results)+len(r.Errors))
+	for _, result := range r.Results {
+		if result.Success {
+			continue
+		}
+		key := result.Message
+		if key == "" {
+			key = "部署失败"
+		}
+		identity := result.Domain
+		if identity == "" {
+			identity = fmt.Sprintf("订单 %d", result.OrderID)
+		}
+		errs = append(errs, fmt.Errorf("%s: %s", identity, key))
+	}
+	for _, err := range r.Errors {
+		if err == nil {
+			continue
+		}
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
 
 // CertConverter 证书转换接口
 type CertConverter interface {
@@ -83,20 +134,32 @@ type OrderStore interface {
 
 // Deployer 部署器，聚合所有依赖（不含 API Client，每个证书独立创建）
 type Deployer struct {
-	Converter   CertConverter
-	Installer   CertInstaller
-	Binder      IISBinder
-	Store       OrderStore
-	callbackWg  sync.WaitGroup
-	callbackMu  sync.Mutex
-	callbackSeq uint64
-	renewSeq    uint64
-	renewDays   int
+	Converter        CertConverter
+	Installer        CertInstaller
+	Binder           IISBinder
+	Store            OrderStore
+	callbackWg       sync.WaitGroup
+	callbackMu       sync.Mutex
+	callbackSeq      uint64
+	renewSeq         uint64
+	renewDays        int
+	callbackWarnings []string
 }
 
-// WaitCallbacks 等待所有回调 goroutine 完成
-func (d *Deployer) WaitCallbacks() {
+// WaitCallbacks 等待所有回调完成，返回并清空本轮 warning。
+func (d *Deployer) WaitCallbacks() []string {
 	d.callbackWg.Wait()
+	d.callbackMu.Lock()
+	defer d.callbackMu.Unlock()
+	warnings := append([]string(nil), d.callbackWarnings...)
+	d.callbackWarnings = nil
+	return warnings
+}
+
+func (d *Deployer) recordCallbackWarning(warning string) {
+	d.callbackMu.Lock()
+	defer d.callbackMu.Unlock()
+	d.callbackWarnings = append(d.callbackWarnings, warning)
 }
 
 func (d *Deployer) nextCallbackSequence() uint64 {

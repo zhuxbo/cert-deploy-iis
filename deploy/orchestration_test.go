@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -148,8 +149,19 @@ func TestProcessOneCert_PromoteFailureReachesCap(t *testing.T) {
 	}}
 
 	for round := 1; round <= config.MaxDeployAttempts+2; round++ {
-		processOneCert(cfg, d, 0, nil)
+		results, _ := processOneCert(cfg, d, 0, nil)
 		d.WaitCallbacks()
+		if round <= config.MaxDeployAttempts {
+			foundFailure := false
+			for _, result := range results {
+				if !result.Success && strings.Contains(result.Message, "pending 私钥转正失败") {
+					foundFailure = true
+				}
+			}
+			if !foundFailure {
+				t.Fatalf("第 %d 轮转正失败必须进入失败 Result: %+v", round, results)
+			}
+		}
 	}
 
 	meta := cfg.Certificates[0].Metadata
@@ -167,5 +179,103 @@ func TestProcessOneCert_PromoteFailureReachesCap(t *testing.T) {
 	}
 	if len(callbacks) != config.MaxDeployAttempts {
 		t.Errorf("触顶后应停止回调, 共 %d 条", len(callbacks))
+	}
+}
+
+func TestProcessOneCert_PersistenceFailuresBecomeFailedResults(t *testing.T) {
+	tests := []struct {
+		name               string
+		saveCertificateErr error
+		finalSaveErr       error
+		wantMessage        string
+		wantCallbackStatus string
+	}{
+		{
+			name:               "save deployed certificate",
+			saveCertificateErr: errors.New("certificate cache disk full"),
+			wantMessage:        "certificate cache disk full",
+			wantCallbackStatus: "failure",
+		},
+		{
+			name:         "save deployment result",
+			finalSaveErr: errors.New("config disk full"),
+			wantMessage:  "config disk full",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			certPEM, keyPEM := genSelfSignedPair(t, "persist-result.example.com")
+			var callbackStatuses []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/callback" {
+					var req api.CallbackRequest
+					_ = json.NewDecoder(r.Body).Decode(&req)
+					callbackStatuses = append(callbackStatuses, req.Status)
+					_ = json.NewEncoder(w).Encode(map[string]any{"code": 1, "msg": "ok"})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"code": 1, "msg": "ok", "data": map[string]any{
+					"data": []api.CertData{{
+						OrderID: 601, Domains: "persist-result.example.com", Status: "active",
+						ExpiresAt:   time.Now().AddDate(0, 0, 5).Format("2006-01-02"),
+						Certificate: certPEM, PrivateKey: keyPEM, CACert: testCACertPEM,
+					}},
+					"currentPage": 1, "pageSize": 20, "total": 1,
+				}})
+			}))
+			defer srv.Close()
+
+			certAPI := config.CertAPIConfig{URL: srv.URL}
+			if err := certAPI.SetToken("test-token"); err != nil {
+				t.Fatalf("SetToken() error = %v", err)
+			}
+			cfg := config.DefaultConfig()
+			cfg.Schedule.RenewMode = "pull"
+			cfg.Certificates = []config.CertConfig{{
+				OrderID: 601, Domain: "persist-result.example.com", Enabled: true,
+				BindRules: []config.BindRule{{Domain: "persist-result.example.com", Port: 443}},
+				API:       certAPI,
+			}}
+			d := NewMockDeployer()
+			d.Store.(*MockOrderStore).SaveCertificateFunc = func(int, string, string) error {
+				return tt.saveCertificateErr
+			}
+			saveCalls := 0
+			results, _ := processOneCertWithSave(cfg, d, 0, nil, func() error {
+				saveCalls++
+				if saveCalls == 2 {
+					return tt.finalSaveErr
+				}
+				return nil
+			})
+			d.WaitCallbacks()
+
+			found := false
+			for _, result := range results {
+				if !result.Success && strings.Contains(result.Message, tt.wantMessage) {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("持久化失败必须进入失败 Result: %+v", results)
+			}
+			if tt.wantCallbackStatus == "" {
+				if len(callbackStatuses) != 0 {
+					t.Fatalf("部署结果未保存时不得 callback: %v", callbackStatuses)
+				}
+				if cfg.Certificates[0].Metadata.DeployStartedAt == "" {
+					t.Fatal("部署结果未保存时必须恢复已落盘的在途状态，供下轮重放")
+				}
+				replayResults, _ := processOneCertWithSave(cfg, d, 0, nil, func() error { return nil })
+				d.WaitCallbacks()
+				if len(callbackStatuses) != 1 || callbackStatuses[0] != "success" {
+					t.Fatalf("下轮重放必须完成并 callback: %v，results=%+v", callbackStatuses, replayResults)
+				}
+			} else if len(callbackStatuses) != 1 || callbackStatuses[0] != tt.wantCallbackStatus {
+				t.Fatalf("callback = %v, want [%s]", callbackStatuses, tt.wantCallbackStatus)
+			}
+		})
 	}
 }

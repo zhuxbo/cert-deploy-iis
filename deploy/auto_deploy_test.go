@@ -2,7 +2,10 @@ package deploy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +17,65 @@ import (
 	"sslctlw/config"
 	"sslctlw/iis"
 )
+
+type testAutoDeployLock struct {
+	closed bool
+}
+
+func (l *testAutoDeployLock) Close() error {
+	l.closed = true
+	return nil
+}
+
+func successfulAutoDeployDependencies(save func(*config.Config) error) autoDeployDependencies {
+	if save == nil {
+		save = func(*config.Config) error { return nil }
+	}
+	return autoDeployDependencies{
+		openLock: func(string) (autoDeployLock, error) { return &testAutoDeployLock{}, nil },
+		tryLock:  func(autoDeployLock) (bool, error) { return true, nil },
+		removeLock: func(string) error {
+			return nil
+		},
+		saveConfig: save,
+	}
+}
+
+func runReportCertConfig(t *testing.T, certData api.CertData, callbackCode int, calls *atomic.Int32) config.CertConfig {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/callback") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": callbackCode, "msg": "callback response"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 1,
+			"msg":  "ok",
+			"data": map[string]any{
+				"data":        []api.CertData{certData},
+				"currentPage": 1,
+				"pageSize":    20,
+				"total":       1,
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	certAPI := config.CertAPIConfig{URL: server.URL}
+	if err := certAPI.SetToken("test-token"); err != nil {
+		t.Fatalf("SetToken() error = %v", err)
+	}
+	return config.CertConfig{
+		OrderID:   certData.OrderID,
+		Domain:    certData.Domain(),
+		Domains:   []string{certData.Domain()},
+		Enabled:   true,
+		BindRules: []config.BindRule{{Domain: certData.Domain(), Port: 443}},
+		API:       certAPI,
+	}
+}
 
 // testCertAPI 返回测试用的 CertAPIConfig（使用明文存储，避免 DPAPI 依赖）
 func testCertAPI() config.CertAPIConfig {
@@ -30,7 +92,7 @@ func TestAutoDeploy_NoCertificates(t *testing.T) {
 	}
 
 	d := NewMockDeployer()
-	results := AutoDeploy(cfg, d, false)
+	results := AutoDeploy(cfg, d, RunOptions{}).Results
 
 	if len(results) != 0 {
 		t.Errorf("没有配置证书时应该返回空结果，得到 %d 个结果", len(results))
@@ -46,7 +108,7 @@ func TestAutoDeploy_NoAPIConfig(t *testing.T) {
 	}
 
 	d := NewMockDeployer()
-	results := AutoDeploy(cfg, d, false)
+	results := AutoDeploy(cfg, d, RunOptions{}).Results
 
 	// 无 API 配置应该返回失败结果
 	if len(results) != 1 {
@@ -66,7 +128,7 @@ func TestAutoDeploy_DisabledCertificate(t *testing.T) {
 	}
 
 	d := NewMockDeployer()
-	results := AutoDeploy(cfg, d, false)
+	results := AutoDeploy(cfg, d, RunOptions{}).Results
 
 	if len(results) != 0 {
 		t.Errorf("禁用的证书应该被跳过，得到 %d 个结果", len(results))
@@ -1381,7 +1443,7 @@ func TestAutoDeploy_Integration_NoAPI(t *testing.T) {
 			},
 		}
 
-		results := AutoDeploy(cfg, d, false)
+		results := AutoDeploy(cfg, d, RunOptions{}).Results
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -1422,7 +1484,7 @@ func TestAutoDeploy_Integration_NoAPI(t *testing.T) {
 			},
 		}
 
-		results := AutoDeploy(cfg, d, false)
+		results := AutoDeploy(cfg, d, RunOptions{}).Results
 
 		if len(results) != 2 {
 			t.Fatalf("期望 2 个结果，得到 %d 个", len(results))
@@ -1531,4 +1593,267 @@ func TestHandleFileValidation(t *testing.T) {
 			t.Error("危险扩展名 .aspx 时期望返回错误")
 		}
 	})
+}
+
+func TestRunReportErr_AggregatesIndependentFailuresWithoutTextDeduplication(t *testing.T) {
+	shared := errors.New("disk full")
+	report := RunReport{
+		Results: []Result{
+			{OrderID: 101, Domain: "bad.example.com", Success: false, Message: shared.Error()},
+			{OrderID: 104, Domain: "other.example.com", Success: false, Message: shared.Error()},
+			{OrderID: 102, Domain: "ok.example.com", Success: true, Message: "deployed"},
+		},
+		Errors:         []error{shared, errors.New("final save failed")},
+		Warnings:       []string{"callback rejected"},
+		Attention:      []CertAttention{{OrderID: 103, Domain: "manual.example.com", Reason: "CAPPED"}},
+		AlreadyRunning: true,
+	}
+
+	err := report.Err()
+	if err == nil {
+		t.Fatal("失败 Result 与运行级错误必须通过 Err 暴露")
+	}
+	got := err.Error()
+	if strings.Count(got, shared.Error()) != 3 {
+		t.Fatalf("不同证书和运行级错误即使文本相同也必须全部保留: %q", got)
+	}
+	if !errors.Is(err, shared) {
+		t.Fatalf("聚合后必须保留运行级错误链: %v", err)
+	}
+	if !strings.Contains(got, "final save failed") {
+		t.Fatalf("运行级错误未聚合: %q", got)
+	}
+	if strings.Contains(got, "callback rejected") || strings.Contains(got, "CAPPED") {
+		t.Fatalf("warning/attention 不得进入 Err: %q", got)
+	}
+}
+
+func TestRunReportErr_NonErrorStatesAreNil(t *testing.T) {
+	report := RunReport{
+		Warnings:       []string{"callback rejected"},
+		Attention:      []CertAttention{{OrderID: 103, Domain: "manual.example.com", Reason: "EXPIRED"}},
+		AlreadyRunning: true,
+	}
+	if err := report.Err(); err != nil {
+		t.Fatalf("正常锁占用、warning 与 attention 都不是运行错误: %v", err)
+	}
+}
+
+func TestRunAutoDeploy_LockFailuresStopBeforeExternalCalls(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*autoDeployDependencies)
+		wantText  string
+	}{
+		{
+			name: "open error",
+			configure: func(deps *autoDeployDependencies) {
+				deps.openLock = func(string) (autoDeployLock, error) {
+					return nil, errors.New("open denied")
+				}
+			},
+			wantText: "open denied",
+		},
+		{
+			name: "lock error",
+			configure: func(deps *autoDeployDependencies) {
+				deps.tryLock = func(autoDeployLock) (bool, error) {
+					return false, errors.New("lock denied")
+				}
+			},
+			wantText: "lock denied",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			certData := *makeTestCertData(t, 501, "locked.example.com", "active",
+				time.Now().AddDate(0, 0, 5).Format("2006-01-02"))
+			cfg := config.DefaultConfig()
+			cfg.Certificates = []config.CertConfig{runReportCertConfig(t, certData, 1, &calls)}
+
+			deps := successfulAutoDeployDependencies(nil)
+			tt.configure(&deps)
+			report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, deps)
+
+			if calls.Load() != 0 {
+				t.Fatalf("锁失败后不得发起外部调用，got %d", calls.Load())
+			}
+			if len(report.Results) != 0 || len(report.Errors) != 1 {
+				t.Fatalf("锁失败只能产生一个运行级错误: %+v", report)
+			}
+			if err := report.Err(); err == nil || !strings.Contains(err.Error(), tt.wantText) {
+				t.Fatalf("锁错误必须通过 Err 暴露: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunAutoDeploy_AlreadyRunningIsNotAnError(t *testing.T) {
+	deps := successfulAutoDeployDependencies(nil)
+	deps.tryLock = func(autoDeployLock) (bool, error) { return false, nil }
+	cfg := &config.Config{Certificates: []config.CertConfig{{OrderID: 502, Domain: "busy.example.com", Enabled: true}}}
+
+	report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, deps)
+	if !report.AlreadyRunning {
+		t.Fatal("正常锁占用必须设置 AlreadyRunning")
+	}
+	if err := report.Err(); err != nil {
+		t.Fatalf("正常锁占用不是错误: %v", err)
+	}
+}
+
+func TestRunAutoDeploy_PersistFailuresAreClassified(t *testing.T) {
+	t.Run("per certificate save is a Result", func(t *testing.T) {
+		saveCalls := 0
+		deps := successfulAutoDeployDependencies(func(*config.Config) error {
+			saveCalls++
+			if saveCalls == 1 {
+				return errors.New("certificate state save failed")
+			}
+			return nil
+		})
+		cfg := &config.Config{Certificates: []config.CertConfig{{
+			OrderID: 503, Domain: "persist.example.com", Enabled: true,
+		}}}
+
+		report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, deps)
+		if len(report.Errors) != 0 {
+			t.Fatalf("逐证书保存错误不得进入运行级 Errors: %v", report.Errors)
+		}
+		found := false
+		for _, result := range report.Results {
+			if !result.Success && strings.Contains(result.Message, "certificate state save failed") {
+				found = result.OrderID == 503 && result.Domain == "persist.example.com"
+			}
+		}
+		if !found {
+			t.Fatalf("逐证书保存错误必须保留订单/域名语义: %+v", report.Results)
+		}
+		if err := report.Err(); err == nil || !strings.Contains(err.Error(), "certificate state save failed") {
+			t.Fatalf("逐证书保存错误必须通过 Err 暴露: %v", err)
+		}
+	})
+
+	t.Run("final save is a runtime Error", func(t *testing.T) {
+		deps := successfulAutoDeployDependencies(func(*config.Config) error {
+			return errors.New("final config save failed")
+		})
+		cfg := &config.Config{Certificates: []config.CertConfig{{Enabled: false}}}
+
+		report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, deps)
+		if len(report.Results) != 0 || len(report.Errors) != 1 {
+			t.Fatalf("最终保存失败只能进入运行级 Errors: %+v", report)
+		}
+		if err := report.Err(); err == nil || !strings.Contains(err.Error(), "final config save failed") {
+			t.Fatalf("最终保存错误必须通过 Err 暴露: %v", err)
+		}
+	})
+}
+
+func TestRunAutoDeploy_CertificateValidationFailuresAreResults(t *testing.T) {
+	tests := []struct {
+		name     string
+		mutate   func(*api.CertData)
+		wantText string
+	}{
+		{"invalid expiry", func(certData *api.CertData) { certData.ExpiresAt = "not-a-date" }, "过期时间"},
+		{"oversized chain", func(certData *api.CertData) { certData.CACert = strings.Repeat("x", cert.MaxCertChainSize+1) }, "证书链"},
+		{"oversized private key", func(certData *api.CertData) { certData.PrivateKey = strings.Repeat("x", cert.MaxPrivateKeySize+1) }, "私钥"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			certData := *makeTestCertData(t, 504, "invalid.example.com", "active",
+				time.Now().AddDate(0, 0, 5).Format("2006-01-02"))
+			tt.mutate(&certData)
+			cfg := config.DefaultConfig()
+			cfg.Certificates = []config.CertConfig{runReportCertConfig(t, certData, 1, &calls)}
+
+			report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, successfulAutoDeployDependencies(nil))
+			if len(report.Errors) != 0 || len(report.Results) != 1 || report.Results[0].Success {
+				t.Fatalf("证书级校验失败必须是失败 Result: %+v", report)
+			}
+			if !strings.Contains(report.Results[0].Message, tt.wantText) {
+				t.Fatalf("失败原因 = %q, want contains %q", report.Results[0].Message, tt.wantText)
+			}
+			if err := report.Err(); err == nil {
+				t.Fatal("证书级校验失败必须通过 Err 暴露")
+			}
+		})
+	}
+}
+
+func TestRunAutoDeploy_NonErrorStates(t *testing.T) {
+	t.Run("processing", func(t *testing.T) {
+		var calls atomic.Int32
+		certData := *makeTestCertData(t, 505, "processing.example.com", "processing",
+			time.Now().AddDate(0, 0, 5).Format("2006-01-02"))
+		cfg := config.DefaultConfig()
+		cfg.Certificates = []config.CertConfig{runReportCertConfig(t, certData, 1, &calls)}
+
+		report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, successfulAutoDeployDependencies(nil))
+		if len(report.Results) != 0 || len(report.Attention) != 0 || report.Err() != nil {
+			t.Fatalf("processing 只等待，不是错误或 attention: %+v", report)
+		}
+	})
+
+	t.Run("API expired certificate", func(t *testing.T) {
+		var calls atomic.Int32
+		certData := *makeTestCertData(t, 505, "expired-api.example.com", "active",
+			time.Now().AddDate(0, 0, -1).Format("2006-01-02"))
+		cfg := config.DefaultConfig()
+		cfg.Certificates = []config.CertConfig{runReportCertConfig(t, certData, 1, &calls)}
+
+		report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, successfulAutoDeployDependencies(nil))
+		if len(report.Attention) != 1 || report.Attention[0].Reason != "EXPIRED" {
+			t.Fatalf("API 返回的已过期证书必须进入 Attention: %+v", report)
+		}
+		if report.Err() != nil {
+			t.Fatalf("EXPIRED attention 不是运行错误: %v", report.Err())
+		}
+	})
+
+	tests := []struct {
+		name string
+		meta config.CertMetadata
+	}{
+		{"CAPPED", config.CertMetadata{LastIssueState: config.IssueStateCapped}},
+		{"EXPIRED", config.CertMetadata{LastIssueState: config.IssueStateExpired}},
+		{"policy", config.CertMetadata{LastIssueState: config.IssueStatePolicyBlocked}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{Certificates: []config.CertConfig{{
+				OrderID: 506, Domain: "attention.example.com", Enabled: true, Metadata: tt.meta,
+			}}}
+			report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, successfulAutoDeployDependencies(nil))
+			if len(report.Attention) != 1 || report.Attention[0].OrderID != 506 {
+				t.Fatalf("人工状态必须进入 Attention: %+v", report)
+			}
+			if len(report.Results) != 0 || report.Err() != nil {
+				t.Fatalf("attention 不得变成失败结果: %+v", report)
+			}
+		})
+	}
+}
+
+func TestRunAutoDeploy_WaitsAndCollectsCallbackWarning(t *testing.T) {
+	var calls atomic.Int32
+	certData := *makeTestCertData(t, 507, "callback-warning.example.com", "active",
+		time.Now().AddDate(0, 0, 5).Format("2006-01-02"))
+	cfg := config.DefaultConfig()
+	cfg.Certificates = []config.CertConfig{runReportCertConfig(t, certData, 0, &calls)}
+
+	report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, successfulAutoDeployDependencies(nil))
+	if len(report.Results) == 0 || !report.Results[0].Success {
+		t.Fatalf("callback 失败不得改写已成功部署结果: %+v", report.Results)
+	}
+	if len(report.Warnings) != 1 || !strings.Contains(report.Warnings[0], "callback") {
+		t.Fatalf("AutoDeploy 必须等待并汇总 callback warning: %+v", report.Warnings)
+	}
+	if err := report.Err(); err != nil {
+		t.Fatalf("callback warning 不得进入 Err: %v", err)
+	}
 }

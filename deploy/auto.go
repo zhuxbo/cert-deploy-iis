@@ -49,36 +49,74 @@ type Result struct {
 	OrderID    int
 }
 
-// AutoDeploy 自动部署证书（证书维度，per-cert client）
-// scatterDelay: 是否在证书间插入分散延迟（CLI deploy --all 启用，GUI 不启用）
-func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
-	results := make([]Result, 0)
+// autoDeployLock 是自动部署锁的最小内部测试缝。
+type autoDeployLock interface {
+	Close() error
+}
+
+type autoDeployDependencies struct {
+	openLock   func(path string) (autoDeployLock, error)
+	tryLock    func(autoDeployLock) (bool, error)
+	removeLock func(path string) error
+	saveConfig func(*config.Config) error
+}
+
+func defaultAutoDeployDependencies() autoDeployDependencies {
+	return autoDeployDependencies{
+		openLock: func(path string) (autoDeployLock, error) {
+			return os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+		},
+		tryLock: func(lock autoDeployLock) (bool, error) {
+			file, ok := lock.(*os.File)
+			if !ok {
+				return false, fmt.Errorf("无效的部署锁类型 %T", lock)
+			}
+			return tryLockFile(file)
+		},
+		removeLock: os.Remove,
+		saveConfig: func(cfg *config.Config) error {
+			return cfg.Save()
+		},
+	}
+}
+
+// AutoDeploy 自动部署证书（证书维度，per-cert client）。
+// RunOptions 控制分散延迟，并为后续单证书与批次选择保留统一入口。
+func AutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions) RunReport {
+	return runAutoDeploy(cfg, d, opts, defaultAutoDeployDependencies())
+}
+
+func runAutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions, deps autoDeployDependencies) RunReport {
+	report := RunReport{Results: make([]Result, 0)}
 
 	if len(cfg.Certificates) == 0 {
 		log.Println("没有配置任何证书")
-		return results
+		return report
 	}
 
 	// 并发保护：获取文件锁，防止多进程同时续签
 	lockPath := filepath.Join(config.GetDataDir(), "deploy.lock")
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	lockFile, err := deps.openLock(lockPath)
 	if err != nil {
-		// 无锁运行时多进程可能并发续签（重复提交 CSR、重复计数、争抢配置写入），必须留痕
-		log.Printf("警告: 无法打开部署锁 %s，本次将在无并发保护下运行: %v", lockPath, err)
-	} else {
-		locked, lockErr := tryLockFile(lockFile)
-		if lockErr != nil {
-			log.Printf("警告: 获取部署锁失败: %v", lockErr)
-		} else if !locked {
-			log.Println("另一个部署进程正在运行，跳过本次检查")
-			lockFile.Close()
-			return results
-		}
-		defer func() {
-			lockFile.Close()
-			os.Remove(lockPath)
-		}()
+		report.Errors = append(report.Errors, fmt.Errorf("打开部署锁失败: %w", err))
+		return report
 	}
+	locked, lockErr := deps.tryLock(lockFile)
+	if lockErr != nil {
+		_ = lockFile.Close()
+		report.Errors = append(report.Errors, fmt.Errorf("获取部署锁失败: %w", lockErr))
+		return report
+	}
+	if !locked {
+		log.Println("另一个部署进程正在运行，跳过本次检查")
+		_ = lockFile.Close()
+		report.AlreadyRunning = true
+		return report
+	}
+	defer func() {
+		_ = lockFile.Close()
+		_ = deps.removeLock(lockPath)
+	}()
 
 	// 检查域名冲突
 	conflicts := checkDomainConflicts(cfg.Certificates)
@@ -90,7 +128,7 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 
 	// 统计启用证书数量，计算分散延迟
 	var sleepMin, sleepMax int
-	if scatterDelay {
+	if opts.ScatterDelay {
 		enabledCount := 0
 		for _, c := range cfg.Certificates {
 			if c.Enabled {
@@ -113,19 +151,30 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 		}
 
 		// 分散延迟：第一个证书不延迟
-		if scatterDelay && processedIndex > 0 && sleepMin > 0 {
+		if opts.ScatterDelay && processedIndex > 0 && sleepMin > 0 {
 			delay := sleepMin + rand.IntN(sleepMax-sleepMin+1)
 			log.Printf("分散延迟 %d 秒...", delay)
 			time.Sleep(time.Duration(delay) * time.Second)
 		}
 		processedIndex++
 
-		certResults, attempted := processOneCert(cfg, d, i, conflicts)
-		results = append(results, certResults...)
+		certResults, attempted := processOneCertWithSave(cfg, d, i, conflicts, func() error {
+			return deps.saveConfig(cfg)
+		})
+		report.Results = append(report.Results, certResults...)
+		if attention, ok := certAttention(&cfg.Certificates[i]); ok {
+			report.Attention = append(report.Attention, attention)
+		}
 
 		// 逐证书持久化：状态变更（重试计数/CSR 哈希/订单号等）立即落盘，
 		// 中途中断不丢失，避免重试上限被绕过、CSR 去重失效
-		if err := cfg.Save(); err != nil {
+		if err := deps.saveConfig(cfg); err != nil {
+			report.Results = append(report.Results, Result{
+				Domain:  cfg.Certificates[i].Domain,
+				OrderID: cfg.Certificates[i].OrderID,
+				Success: false,
+				Message: fmt.Sprintf("保存证书状态失败: %v", err),
+			})
 			log.Printf("警告: 保存配置失败: %v", err)
 		}
 
@@ -136,21 +185,42 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 
 	// 回调响应同样携带 renew_before_days。等待非关键回调结束后统一应用，
 	// 避免 goroutine 与证书循环并发修改配置，也覆盖 GUI 未显式 WaitCallbacks 的入口。
-	d.WaitCallbacks()
+	report.Warnings = append(report.Warnings, d.WaitCallbacks()...)
 	d.ApplyCallbackRenewBeforeDays(cfg)
 
 	// 更新检查时间
 	cfg.LastCheck = time.Now().Format("2006-01-02 15:04:05")
-	if err := cfg.Save(); err != nil {
+	if err := deps.saveConfig(cfg); err != nil {
+		report.Errors = append(report.Errors, fmt.Errorf("保存最终配置失败: %w", err))
 		log.Printf("警告: 保存配置失败: %v", err)
 	}
 
-	return results
+	return report
 }
 
 // processOneCert 处理单个证书的续签检查与部署
 // 返回该证书的部署结果与是否实际执行了部署尝试（用于单次批量上限统计）
+func certAttention(certCfg *config.CertConfig) (CertAttention, bool) {
+	reason := ""
+	switch {
+	case certCfg.Metadata.IsPolicyBlocked():
+		reason = "policy"
+	case certCfg.Metadata.IsExpiredState():
+		reason = "EXPIRED"
+	case certCfg.Metadata.IsCapped():
+		reason = "CAPPED"
+	}
+	if reason == "" {
+		return CertAttention{}, false
+	}
+	return CertAttention{OrderID: certCfg.OrderID, Domain: certCfg.Domain, Reason: reason}, true
+}
+
 func processOneCert(cfg *config.Config, d *Deployer, i int, conflicts map[string][]int) (certResults []Result, attempted bool) {
+	return processOneCertWithSave(cfg, d, i, conflicts, cfg.Save)
+}
+
+func processOneCertWithSave(cfg *config.Config, d *Deployer, i int, conflicts map[string][]int, save func() error) (certResults []Result, attempted bool) {
 	results := make([]Result, 0)
 	certCfg := cfg.Certificates[i]
 
@@ -188,7 +258,7 @@ func processOneCert(cfg *config.Config, d *Deployer, i int, conflicts map[string
 	if isLocal {
 		// 本机提交：签发阶段的失败只记本地日志与本地计数，一律不发送回调（deploy-spec §2.8）
 		var reason string
-		certData, privateKey, reason, err = handleLocalKeyMode(d, client, &cfg.Certificates[i], cfg.Schedule.RenewBeforeDays, cfg.Save)
+		certData, privateKey, reason, err = handleLocalKeyMode(d, client, &cfg.Certificates[i], cfg.Schedule.RenewBeforeDays, save)
 		// API 调用完成后更新续签提前天数（无论成功或跳过）
 		updateRenewBeforeDays(cfg, client)
 		if err != nil {
@@ -245,12 +315,21 @@ func processOneCert(cfg *config.Config, d *Deployer, i int, conflicts map[string
 		// 检查是否到了拉取时间
 		expiresAt, err := time.Parse("2006-01-02", certData.ExpiresAt)
 		if err != nil {
+			results = append(results, Result{
+				Domain:  certCfg.Domain,
+				Success: false,
+				Message: fmt.Sprintf("解析证书过期时间失败: %v", err),
+				OrderID: certData.OrderID,
+			})
 			log.Printf("解析证书 %s (订单 %d) 过期时间失败（值: %q）: %v", certData.Domain(), certData.OrderID, certData.ExpiresAt, err)
 			return results, false
 		}
 
 		daysUntilExpiry := int(time.Until(expiresAt).Hours() / 24)
 		if daysUntilExpiry < 0 {
+			deployCertCfg := &cfg.Certificates[i]
+			deployCertCfg.Metadata.LastIssueState = config.IssueStateExpired
+			deployCertCfg.Metadata.CapPhase = ""
 			log.Printf("证书 %s 已过期 %d 天，跳过（需人工介入）", certData.Domain(), -daysUntilExpiry)
 			return results, false
 		}
@@ -276,10 +355,22 @@ func processOneCert(cfg *config.Config, d *Deployer, i int, conflicts map[string
 	}
 	chainSize := len(certData.Certificate) + len(certData.CACert)
 	if chainSize > cert.MaxCertChainSize {
+		results = append(results, Result{
+			Domain:  certCfg.Domain,
+			Success: false,
+			Message: fmt.Sprintf("证书链大小 %d 超过上限 %d", chainSize, cert.MaxCertChainSize),
+			OrderID: certData.OrderID,
+		})
 		log.Printf("证书 %s 证书链大小 %d 超过上限 %d", certData.Domain(), chainSize, cert.MaxCertChainSize)
 		return results, false
 	}
 	if certData.PrivateKey != "" && len(certData.PrivateKey) > cert.MaxPrivateKeySize {
+		results = append(results, Result{
+			Domain:  certCfg.Domain,
+			Success: false,
+			Message: fmt.Sprintf("私钥大小 %d 超过上限 %d", len(certData.PrivateKey), cert.MaxPrivateKeySize),
+			OrderID: certData.OrderID,
+		})
 		log.Printf("证书 %s 私钥大小 %d 超过上限 %d", certData.Domain(), len(certData.PrivateKey), cert.MaxPrivateKeySize)
 		return results, false
 	}
@@ -290,7 +381,7 @@ func processOneCert(cfg *config.Config, d *Deployer, i int, conflicts map[string
 
 	// 部署意图落盘（deploy-spec §5.1）：新尝试先递增部署计数并写入在途标记再落盘；
 	// 崩溃恢复重放（标记已存在）复用同一意图不重复计数；触顶转 CAPPED 静默、不回调。
-	capped, replaying, persistErr := persistDeployAttempt(&deployCertCfg.Metadata, cfg.Save)
+	capped, replaying, persistErr := persistDeployAttempt(&deployCertCfg.Metadata, save)
 	if persistErr != nil {
 		msg := fmt.Sprintf("持久化部署意图失败，已停止部署: %v", persistErr)
 		log.Printf("证书 %s %s", certData.Domain(), msg)
@@ -301,6 +392,7 @@ func processOneCert(cfg *config.Config, d *Deployer, i int, conflicts map[string
 		log.Printf("证书 %s 部署计数已触顶，进入 CAPPED 静默", certData.Domain())
 		return results, false
 	}
+	persistedCertCfg := *deployCertCfg
 
 	// 底层部署函数只返回结构化结果，不自行发送回调（deploy-spec §2.8）
 	var deployResults []Result
@@ -324,23 +416,37 @@ func processOneCert(cfg *config.Config, d *Deployer, i int, conflicts map[string
 		// 全部绑定成功：落盘证书、转正 pending 私钥、清零签发与部署状态
 		if err := d.Store.SaveCertificate(certData.OrderID, certData.Certificate, certData.CACert); err != nil {
 			log.Printf("警告: 保存已部署证书失败: %v", err)
-		}
-		// 转正失败说明生命周期未收敛（本地正式私钥仍是旧的），本轮按失败处理：
-		// 必须清掉在途标记让部署计数继续推进，否则 DeployStartedAt 永久残留会使后续每轮
-		// 都被判为崩溃恢复重放而不计数，绕过 CAPPED 兜底并每轮重复上报一次 success 回调。
-		if finalizeSuccessfulDeployment(d, deployCertCfg, certData, privateKey, isLocal) {
+			msg := fmt.Sprintf("保存已部署证书失败: %v", err)
+			results = append(results, Result{
+				Domain: certCfg.Domain, OrderID: certData.OrderID, Success: false, Message: msg,
+			})
+			finalized = false
+			rep = deployReport{report: true, success: false, message: msg}
+		} else if finalizeSuccessfulDeployment(d, deployCertCfg, certData, privateKey, isLocal) {
+			// 转正失败说明生命周期未收敛（本地正式私钥仍是旧的），本轮按失败处理：
+			// 必须清掉在途标记让部署计数继续推进，否则 DeployStartedAt 永久残留会使后续每轮
+			// 都被判为崩溃恢复重放而不计数，绕过 CAPPED 兜底并每轮重复上报一次 success 回调。
 			updateCertDomains(deployCertCfg, certData.Certificate)
 			updateCertSerial(deployCertCfg, certData.Certificate)
 		} else {
 			finalized = false
-			rep = deployReport{report: true, success: false, message: "pending 私钥转正失败，部署生命周期未收敛"}
+			msg := "pending 私钥转正失败，部署生命周期未收敛"
+			results = append(results, Result{
+				Domain: certCfg.Domain, OrderID: certData.OrderID, Success: false, Message: msg,
+			})
+			rep = deployReport{report: true, success: false, message: msg}
 		}
 	}
 	if !finalized {
 		reconcileFailedDeploy(&deployCertCfg.Metadata, rep.report, replaying)
 	}
-	if err := cfg.Save(); err != nil {
+	if err := save(); err != nil {
 		log.Printf("警告: 保存部署结果失败，不发送回调: %v", err)
+		*deployCertCfg = persistedCertCfg
+		results = append(results, Result{
+			Domain: certCfg.Domain, OrderID: certData.OrderID, Success: false,
+			Message: fmt.Sprintf("保存部署结果失败: %v", err),
+		})
 		return results, true
 	}
 
@@ -1149,6 +1255,7 @@ func sendCallback(d *Deployer, client APIClient, orderID int, domain string, suc
 		}
 
 		if err := client.Callback(ctx, req); err != nil {
+			d.recordCallbackWarning(fmt.Sprintf("回调失败 (%s): %v", domain, err))
 			log.Printf("回调失败 (%s): %v", domain, err)
 			return
 		}
@@ -1184,10 +1291,10 @@ func CheckAndDeploy() error {
 
 	store := cert.NewOrderStore()
 	deployer := DefaultDeployer(cfg, store)
-	results := AutoDeploy(cfg, deployer, true)
+	report := AutoDeploy(cfg, deployer, RunOptions{ScatterDelay: true})
+	results := report.Results
 
 	// 等待所有回调 goroutine 完成
-	deployer.WaitCallbacks()
 
 	successCount := 0
 	failCount := 0
@@ -1203,10 +1310,12 @@ func CheckAndDeploy() error {
 
 	log.Printf("部署完成: 成功 %d, 失败 %d", successCount, failCount)
 
-	if failCount > 0 {
-		return fmt.Errorf("部分证书部署失败")
+	for _, warning := range report.Warnings {
+		log.Printf("[警告] %s", warning)
 	}
-
+	if err := report.Err(); err != nil {
+		return err
+	}
 	return nil
 }
 

@@ -180,8 +180,8 @@ func deploySingleCert(orderID int) error {
 		Schedule:     cfg.Schedule,
 	}
 	_ = client // client 由 AutoDeploy 内部通过 NewClientForCert 创建
-	results := deploy.AutoDeploy(singleCfg, deployer, false)
-	deployer.WaitCallbacks()
+	report := deploy.AutoDeploy(singleCfg, deployer, deploy.RunOptions{})
+	results := report.Results
 
 	for _, r := range results {
 		if r.Success {
