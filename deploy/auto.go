@@ -93,6 +93,41 @@ func AutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions) RunReport {
 	return runAutoDeploy(cfg, d, opts, defaultAutoDeployDependencies())
 }
 
+func selectBatch(certs []config.CertConfig, startOrderID, limit int) (indexes []int, nextOrderID int) {
+	if limit <= 0 {
+		return nil, 0
+	}
+	enabled := make([]int, 0, len(certs))
+	for i := range certs {
+		if certs[i].Enabled {
+			enabled = append(enabled, i)
+		}
+	}
+	start := 0
+	if startOrderID != 0 {
+		found := false
+		for pos, index := range enabled {
+			if certs[index].OrderID == startOrderID {
+				start = pos
+				found = true
+				break
+			}
+		}
+		if !found {
+			start = 0
+		}
+	}
+	end := start + limit
+	if end > len(enabled) {
+		end = len(enabled)
+	}
+	indexes = append(indexes, enabled[start:end]...)
+	if end < len(enabled) {
+		nextOrderID = certs[enabled[end]].OrderID
+	}
+	return indexes, nextOrderID
+}
+
 func runAutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions, deps autoDeployDependencies) RunReport {
 	report := RunReport{Results: make([]Result, 0)}
 
@@ -133,33 +168,41 @@ func runAutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions, deps autoDe
 		}
 	}
 
-	// 统计启用证书数量，计算分散延迟
-	var sleepMin, sleepMax int
-	if opts.ScatterDelay {
+	oldCursor := cfg.NextBatchOrderID
+	nextCursor := oldCursor
+	var batchIndexes []int
+	if opts.OnlyOrderID != 0 {
+		for i := range cfg.Certificates {
+			if cfg.Certificates[i].Enabled && cfg.Certificates[i].OrderID == opts.OnlyOrderID {
+				batchIndexes = append(batchIndexes, i)
+			}
+		}
+	} else {
+		limit := opts.MaxCertificates
+		if limit <= 0 || limit > maxRenewBatch {
+			limit = maxRenewBatch
+		}
+		batchIndexes, nextCursor = selectBatch(cfg.Certificates, oldCursor, limit)
 		enabledCount := 0
-		for _, c := range cfg.Certificates {
-			if c.Enabled && (opts.OnlyOrderID == 0 || c.OrderID == opts.OnlyOrderID) {
+		for _, certCfg := range cfg.Certificates {
+			if certCfg.Enabled {
 				enabledCount++
 			}
 		}
-		sleepMin, sleepMax = calcSpreadDelay(enabledCount)
+		if enabledCount > limit {
+			report.Warnings = append(report.Warnings,
+				fmt.Sprintf("启用证书 %d 张，本轮最多处理 %d 张", enabledCount, limit))
+		}
+	}
+
+	// 按已选批次计算分散延迟
+	var sleepMin, sleepMax int
+	if opts.ScatterDelay {
+		sleepMin, sleepMax = calcSpreadDelay(len(batchIndexes))
 	}
 	processedIndex := 0
 
-	// 遍历证书配置
-	processed := 0
-	for i := range cfg.Certificates {
-		if opts.OnlyOrderID != 0 && cfg.Certificates[i].OrderID != opts.OnlyOrderID {
-			continue
-		}
-		if !cfg.Certificates[i].Enabled {
-			continue
-		}
-		if processed >= maxRenewBatch {
-			log.Printf("已达单次处理上限 %d，剩余证书下次处理", maxRenewBatch)
-			break
-		}
-
+	for _, i := range batchIndexes {
 		// 分散延迟：第一个证书不延迟
 		if opts.ScatterDelay && processedIndex > 0 && sleepMin > 0 {
 			delay := sleepMin + rand.IntN(sleepMax-sleepMin+1)
@@ -169,7 +212,7 @@ func runAutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions, deps autoDe
 		processedIndex++
 
 		supplemental := &runSupplemental{}
-		certResults, attempted := processOneCertWithSave(cfg, d, i, conflicts, func() error {
+		certResults, _ := processOneCertWithSave(cfg, d, i, conflicts, func() error {
 			return deps.saveConfig(cfg)
 		}, supplemental)
 		report.Results = append(report.Results, certResults...)
@@ -191,9 +234,6 @@ func runAutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions, deps autoDe
 			log.Printf("警告: 保存配置失败: %v", err)
 		}
 
-		if attempted {
-			processed++
-		}
 	}
 
 	// 回调响应同样携带 renew_before_days。等待非关键回调结束后统一应用，
@@ -203,7 +243,13 @@ func runAutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions, deps autoDe
 
 	// 更新检查时间
 	cfg.LastCheck = time.Now().Format("2006-01-02 15:04:05")
+	if opts.OnlyOrderID == 0 {
+		cfg.NextBatchOrderID = nextCursor
+	}
 	if err := deps.saveConfig(cfg); err != nil {
+		if opts.OnlyOrderID == 0 {
+			cfg.NextBatchOrderID = oldCursor
+		}
 		report.Errors = append(report.Errors, fmt.Errorf("保存最终配置失败: %w", err))
 		log.Printf("警告: 保存配置失败: %v", err)
 	}

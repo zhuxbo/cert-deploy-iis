@@ -38,6 +38,31 @@ func TestValidationFileRecordsJSONRoundTripAndZeroValue(t *testing.T) {
 	}
 }
 
+func TestNextBatchOrderIDJSONRoundTripAndZeroValue(t *testing.T) {
+	data, err := json.Marshal(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var zero Config
+	if err := json.Unmarshal(data, &zero); err != nil {
+		t.Fatal(err)
+	}
+	if zero.NextBatchOrderID != 0 {
+		t.Fatalf("旧配置零值 cursor = %d", zero.NextBatchOrderID)
+	}
+	data, err = json.Marshal(Config{NextBatchOrderID: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Config
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.NextBatchOrderID != 42 {
+		t.Fatalf("round-trip cursor = %d", got.NextBatchOrderID)
+	}
+}
+
 func TestValidateValidationMethod(t *testing.T) {
 	tests := []struct {
 		name     string
