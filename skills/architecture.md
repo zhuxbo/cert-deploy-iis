@@ -170,22 +170,26 @@ netsh http add sslcert ipport=0.0.0.0:443 certhash=... appid=...
 
 ```json
 {
-  "api_base_url": "https://api.example.com/deploy",
-  "token": "encrypted-token",
   "certificates": [
     {
       "order_id": 12345,
       "domain": "example.com",
       "domains": ["example.com", "www.example.com"],
       "enabled": true,
-      "use_local_key": false,
+      "api": {
+        "url": "https://api.example.com/deploy",
+        "encrypted_token": "<DPAPI ciphertext>"
+      },
       "auto_bind_mode": true,
       "bind_rules": []
     }
   ],
-  "check_interval": 6,
-  "renew_days_fetch": 14,
-  "renew_days_local": 15
+  "schedule": {
+    "renew_mode": "pull",
+    "renew_before_days": 14
+  },
+  "auto_check_enabled": true,
+  "task_name": "SSLCtlW"
 }
 ```
 

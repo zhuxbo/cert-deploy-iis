@@ -14,9 +14,10 @@ func TestParseCommand(t *testing.T) {
 	}{
 		{
 			name:      "完整命令",
-			input:     "sslctlw setup --url https://api.example.com --token abc123",
+			input:     "sslctlw setup --url https://api.example.com --token abc123 --order 123",
 			wantURL:   "https://api.example.com",
 			wantToken: "abc123",
+			wantOrder: "123",
 		},
 		{
 			name:      "带 order",
@@ -27,33 +28,38 @@ func TestParseCommand(t *testing.T) {
 		},
 		{
 			name:      "sslctl 格式",
-			input:     "sslctl setup --url https://api.example.com --token abc123",
+			input:     "sslctl setup --url https://api.example.com --token abc123 --order 123",
 			wantURL:   "https://api.example.com",
 			wantToken: "abc123",
+			wantOrder: "123",
 		},
 		{
 			name:      "无程序名",
-			input:     "--url https://api.example.com --token abc123",
+			input:     "--url https://api.example.com --token abc123 --order 123",
 			wantURL:   "https://api.example.com",
 			wantToken: "abc123",
+			wantOrder: "123",
 		},
 		{
 			name:      "带引号的 token",
-			input:     `sslctlw setup --url https://api.example.com --token "abc 123"`,
+			input:     `sslctlw setup --url https://api.example.com --token "abc 123" --order 123`,
 			wantURL:   "https://api.example.com",
 			wantToken: "abc 123",
+			wantOrder: "123",
 		},
 		{
 			name:      "多行输入",
-			input:     "sslctlw setup\n--url https://api.example.com\n--token abc123",
+			input:     "sslctlw setup\n--url https://api.example.com\n--token abc123\n--order 123",
 			wantURL:   "https://api.example.com",
 			wantToken: "abc123",
+			wantOrder: "123",
 		},
 		{
 			name:      "带 debug",
-			input:     "sslctlw setup --debug --url https://api.example.com --token abc123",
+			input:     "sslctlw setup --debug --url https://api.example.com --token abc123 --order 123",
 			wantURL:   "https://api.example.com",
 			wantToken: "abc123",
+			wantOrder: "123",
 		},
 		{
 			name:    "空命令",
@@ -82,9 +88,10 @@ func TestParseCommand(t *testing.T) {
 		},
 		{
 			name:        "带 key",
-			input:       "sslctlw setup --url https://api.example.com --token abc123 --key /path/to/key.pem",
+			input:       "sslctlw setup --url https://api.example.com --token abc123 --order 123 --key /path/to/key.pem",
 			wantURL:     "https://api.example.com",
 			wantToken:   "abc123",
+			wantOrder:   "123",
 			wantKeyPath: "/path/to/key.pem",
 		},
 		{
@@ -100,14 +107,28 @@ func TestParseCommand(t *testing.T) {
 			wantOrder: "12345",
 		},
 		{
-			name:      "URL 格式无 order",
-			input:     "https://www.cnssl.com/api/deploy?token=abc123",
-			wantURL:   "https://www.cnssl.com/api/deploy",
-			wantToken: "abc123",
+			name:    "URL 格式无 order",
+			input:   "https://www.cnssl.com/api/deploy?token=abc123",
+			wantErr: true,
 		},
 		{
 			name:    "URL 格式缺少 token",
 			input:   "https://www.cnssl.com/api/deploy?order=12345",
+			wantErr: true,
+		},
+		{
+			name:    "命令格式 order 为零",
+			input:   "sslctlw setup --url https://api.example.com --token abc123 --order 0",
+			wantErr: true,
+		},
+		{
+			name:    "URL 格式 order 为零",
+			input:   "https://www.cnssl.com/api/deploy?token=abc123&order=0",
+			wantErr: true,
+		},
+		{
+			name:    "批量 order 含零",
+			input:   "sslctlw setup --url https://api.example.com --token abc123 --order 1,0",
 			wantErr: true,
 		},
 	}

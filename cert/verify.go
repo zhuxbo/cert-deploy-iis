@@ -6,11 +6,14 @@ import (
 	"crypto/ed25519"
 	"crypto/rsa"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"strings"
+
+	"sslctlw/util"
 )
 
 // VerifyKeyPair 检查证书和私钥是否匹配（比较公钥）
@@ -53,6 +56,70 @@ func VerifyCSRKeyPair(csrPEM, keyPEM string) (bool, error) {
 		return false, fmt.Errorf("解析私钥失败: %w", err)
 	}
 	return privateKeyMatchesPublicKey(privateKey, csr.PublicKey)
+}
+
+// CSRDERHash 解析并验证 CSR 签名，返回其 DER 的 SHA256。
+// 使用 DER 而不是 PEM 原文，避免换行与包裹宽度差异破坏归属判断。
+func CSRDERHash(csrPEM string) (string, error) {
+	csr, err := ParseCSR(csrPEM)
+	if err != nil {
+		return "", err
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return "", fmt.Errorf("CSR 签名验证失败: %w", err)
+	}
+	sum := sha256.Sum256(csr.Raw)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// VerifyCSRIdentity 验证服务端 CSR 是否属于本机已持久化的签发意图。
+// 解析或签名错误返回 error；合法但 hash、公钥或 CN 不匹配返回 (false, nil)。
+func VerifyCSRIdentity(csrPEM, keyPEM, expectedHash, expectedCN string) (bool, error) {
+	csr, err := ParseCSR(csrPEM)
+	if err != nil {
+		return false, err
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return false, fmt.Errorf("CSR 签名验证失败: %w", err)
+	}
+	sum := sha256.Sum256(csr.Raw)
+	if expectedHash == "" || !strings.EqualFold(hex.EncodeToString(sum[:]), expectedHash) {
+		return false, nil
+	}
+	privateKey, err := parsePrivateKeyFromPEM(keyPEM, "")
+	if err != nil {
+		return false, fmt.Errorf("解析私钥失败: %w", err)
+	}
+	matched, err := privateKeyMatchesPublicKey(privateKey, csr.PublicKey)
+	if err != nil || !matched {
+		return matched, err
+	}
+	return util.NormalizeDomain(csr.Subject.CommonName) == util.NormalizeDomain(expectedCN), nil
+}
+
+// VerifyCSRCertificateIdentity 验证 CSR 与已签发证书是否属于同一公钥和 CN。
+func VerifyCSRCertificateIdentity(csrPEM, certPEM, expectedCN string) (bool, error) {
+	csr, err := ParseCSR(csrPEM)
+	if err != nil {
+		return false, err
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return false, fmt.Errorf("CSR 签名验证失败: %w", err)
+	}
+	parsedCert, err := ParseCertificate(certPEM)
+	if err != nil {
+		return false, err
+	}
+	csrPublic, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
+	if err != nil {
+		return false, fmt.Errorf("编码 CSR 公钥失败: %w", err)
+	}
+	certPublic, err := x509.MarshalPKIXPublicKey(parsedCert.PublicKey)
+	if err != nil {
+		return false, fmt.Errorf("编码证书公钥失败: %w", err)
+	}
+	return bytes.Equal(csrPublic, certPublic) &&
+		util.NormalizeDomain(csr.Subject.CommonName) == util.NormalizeDomain(expectedCN), nil
 }
 
 func privateKeyMatchesPublicKey(privateKey, publicKey any) (bool, error) {

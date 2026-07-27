@@ -84,11 +84,11 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 	var err error
 
 	queryCtx, queryCancel := context.WithTimeout(context.Background(), 60*api.APIQueryTimeout/30)
-	if opts.Order != "" {
-		certs, err = client.ListCertsByQuery(queryCtx, opts.Order)
-	} else {
-		certs, err = client.ListAllCerts(queryCtx)
+	if err := validateSetupOrderQuery(opts.Order); err != nil {
+		queryCancel()
+		return nil, fmt.Errorf("查询证书失败: %w", err)
 	}
+	certs, err = client.ListCertsByQuery(queryCtx, opts.Order)
 	queryCancel()
 	if err != nil {
 		return nil, fmt.Errorf("查询证书失败: %w", err)
@@ -125,7 +125,17 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 		serialNumber, _ := cert.GetCertSerialNumber(certData.Certificate)
 		if serialNumber != "" {
 			exists, certInfo, _ := cert.IsCertExists(serialNumber)
-			if exists {
+			usableExisting := exists && certInfo != nil && certInfo.HasPrivKey
+			if usableExisting && strings.TrimSpace(certData.CSR) != "" {
+				matched, verifyErr := cert.VerifyCSRCertificateIdentity(
+					certData.CSR, certData.Certificate, certData.Domain(),
+				)
+				if verifyErr != nil || !matched {
+					usableExisting = false
+					log.Printf("证书 %s 的本地证书与服务端 CSR 归属不一致，继续查找原私钥", certData.Domain())
+				}
+			}
+			if usableExisting {
 				log.Printf("证书 %s 已存在，跳过导入", certData.Domain())
 				// 已存在证书仍需绑定生效才算部署成功：与新装路径共用 evalBindOutcome 判定，
 				// 查找出错/全部失败/零匹配（含无法取指纹）同样计失败、发 failure 回调
@@ -152,8 +162,13 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 					log.Printf("证书 %s 配置构造失败: %v", certData.Domain(), configErr)
 					continue
 				}
+				if br.Succeeded > 0 && br.Failed > 0 {
+					certConfig.Metadata.FailedBindings = append(
+						[]config.BindingRetryTarget(nil), br.FailedTargets...,
+					)
+				}
 				certConfigs = append(certConfigs, certConfig)
-				if !dec.Deployed {
+				if !dec.Deployed && br.Succeeded == 0 {
 					continue
 				}
 				// 补通知服务端续签模式：installCert 是新装唯一通知点，首跑绑定失败不通知，
@@ -167,6 +182,12 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 
 		// 优先级 1-2：尝试获取私钥
 		keyPEM, source := resolvePrivateKey(certData.Certificate, certData.PrivateKey, opts.KeyPath)
+		if keyPEM != "" {
+			if err := verifySetupCSRKey(certData, keyPEM); err != nil {
+				log.Printf("证书 %s 的 %s 私钥未通过服务端 CSR 归属校验: %v", certData.Domain(), source, err)
+				keyPEM = ""
+			}
+		}
 		if keyPEM == "" {
 			// 需要私钥，归入阶段 2
 			log.Printf("证书 %s 未找到可用私钥，等待用户提供", certData.Domain())
@@ -218,6 +239,13 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 			if !matched {
 				log.Printf("证书 %s 私钥与证书不匹配", nk.certData.Domain())
 				sendSetupCallback(client, nk.certData.OrderID, nk.certData.Domain(), false, "私钥与证书不匹配")
+				result.Failed++
+				result.NeedKey--
+				continue
+			}
+			if err := verifySetupCSRKey(nk.certData, keyPEM); err != nil {
+				log.Printf("证书 %s 私钥与服务端 CSR 不匹配: %v", nk.certData.Domain(), err)
+				sendSetupCallback(client, nk.certData.OrderID, nk.certData.Domain(), false, "私钥与服务端 CSR 不匹配")
 				result.Failed++
 				result.NeedKey--
 				continue
@@ -342,7 +370,19 @@ func installCert(
 		}
 		return bindOK, configErr
 	}
+	if br.Succeeded > 0 && br.Failed > 0 {
+		certConfig.Metadata.FailedBindings = append(
+			[]config.BindingRetryTarget(nil), br.FailedTargets...,
+		)
+	}
 	*certConfigs = append(*certConfigs, certConfig)
+
+	// 任一绑定成功即已接纳并纳入管理；即使订单级回调为 failure，也要设置续签模式。
+	if notifyReissue && (bindOK || br.Succeeded > 0) {
+		toggleAutoReissue(client, certData.OrderID, useLocalKey)
+	} else if !notifyReissue && (bindOK || br.Succeeded > 0) {
+		log.Printf("跳过服务端续签模式通知 (订单 %d)：现有配置不可读，无法确认既有模式", certData.OrderID)
+	}
 
 	if !bindOK {
 		log.Printf("证书 %s 部署失败: %s", certData.Domain(), bindReason)
@@ -351,13 +391,6 @@ func installCert(
 	}
 	if bindReason != "" {
 		log.Printf("证书 %s %s", certData.Domain(), bindReason)
-	}
-
-	// 通知服务端续签模式：按订单现有配置的生效模式（未配置的新订单默认 pull）
-	if notifyReissue {
-		toggleAutoReissue(client, certData.OrderID, useLocalKey)
-	} else {
-		log.Printf("跳过服务端续签模式通知 (订单 %d)：现有配置不可读，无法确认既有模式", certData.OrderID)
 	}
 
 	// 部署完成回调（spec 4.2 / 5.1，非关键路径）
@@ -424,6 +457,24 @@ func resolvePrivateKey(certPEM string, apiKey string, keyPath string) (string, s
 	return "", ""
 }
 
+func verifySetupCSRKey(certData api.CertData, keyPEM string) error {
+	if strings.TrimSpace(certData.CSR) == "" {
+		return nil
+	}
+	hash, err := cert.CSRDERHash(certData.CSR)
+	if err != nil {
+		return err
+	}
+	matched, err := cert.VerifyCSRIdentity(certData.CSR, keyPEM, hash, certData.Domain())
+	if err != nil {
+		return err
+	}
+	if !matched {
+		return errors.New("CSR 公钥或 Common Name 与私钥/订单不匹配")
+	}
+	return nil
+}
+
 // readKeyFile 读取私钥文件（带大小限制）
 func readKeyFile(path string) (string, error) {
 	info, err := os.Stat(path)
@@ -442,8 +493,9 @@ func readKeyFile(path string) (string, error) {
 
 // bindResult IIS 绑定尝试结果计数
 type bindResult struct {
-	Succeeded int
-	Failed    int
+	Succeeded     int
+	Failed        int
+	FailedTargets []config.BindingRetryTarget
 }
 
 // bindCertToIIS 将证书绑定到 IIS 匹配的站点，返回逐绑定的成败计数
@@ -462,6 +514,7 @@ func bindCertToIIS(certData api.CertData, thumbprint string) (bindResult, error)
 		dnsResult, err := bindDNSCertToIIS(dnsNames, thumbprint)
 		br.Succeeded += dnsResult.Succeeded
 		br.Failed += dnsResult.Failed
+		br.FailedTargets = append(br.FailedTargets, dnsResult.FailedTargets...)
 		if err != nil {
 			bindErrs = append(bindErrs, err)
 		}
@@ -470,6 +523,7 @@ func bindCertToIIS(certData api.CertData, thumbprint string) (bindResult, error)
 		ipResult, err := bindIPCertToIIS(ips, thumbprint)
 		br.Succeeded += ipResult.Succeeded
 		br.Failed += ipResult.Failed
+		br.FailedTargets = append(br.FailedTargets, ipResult.FailedTargets...)
 		if err != nil {
 			bindErrs = append(bindErrs, err)
 		}
@@ -491,6 +545,9 @@ func bindDNSCertToIIS(domains []string, thumbprint string) (bindResult, error) {
 		if err := iis.BindCertificate(match.Host, match.Port, thumbprint); err != nil {
 			log.Printf("更新绑定 %s:%d 失败: %v", match.Host, match.Port, err)
 			br.Failed++
+			br.FailedTargets = append(br.FailedTargets, config.BindingRetryTarget{
+				Host: match.Host, Port: match.Port,
+			})
 		} else {
 			log.Printf("更新绑定: %s:%d", match.Host, match.Port)
 			br.Succeeded++
@@ -502,11 +559,17 @@ func bindDNSCertToIIS(domains []string, thumbprint string) (bindResult, error) {
 		if err := iis.AddHttpsBinding(match.SiteName, match.Host, match.Port); err != nil {
 			log.Printf("添加 HTTPS 绑定 %s 失败: %v", match.Host, err)
 			br.Failed++
+			br.FailedTargets = append(br.FailedTargets, config.BindingRetryTarget{
+				Host: match.Host, Port: match.Port,
+			})
 			continue
 		}
 		if err := iis.BindCertificate(match.Host, match.Port, thumbprint); err != nil {
 			log.Printf("绑定证书 %s 失败: %v", match.Host, err)
 			br.Failed++
+			br.FailedTargets = append(br.FailedTargets, config.BindingRetryTarget{
+				Host: match.Host, Port: match.Port,
+			})
 		} else {
 			log.Printf("添加绑定: %s:%d (站点: %s)", match.Host, match.Port, match.SiteName)
 			br.Succeeded++
@@ -545,6 +608,9 @@ func bindIPCertToIIS(ips []string, thumbprint string) (bindResult, error) {
 		if err := iis.BindCertificateByIP(ip, port, thumbprint); err != nil {
 			log.Printf("IP 绑定 %s:%d 失败: %v", ip, port, err)
 			br.Failed++
+			br.FailedTargets = append(br.FailedTargets, config.BindingRetryTarget{
+				Host: ip, Port: port, IPBinding: true,
+			})
 			continue
 		}
 		log.Printf("IP 绑定成功: %s:%d", ip, port)

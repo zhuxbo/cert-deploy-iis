@@ -28,7 +28,10 @@ const (
 	spreadTotalMax = 600 // 总延迟上限（秒）
 )
 
-var errPendingKeyMismatch = errors.New("pending 私钥与目标证书不匹配")
+var (
+	errPendingKeyMismatch = errors.New("pending 私钥与目标证书不匹配")
+	errNoUsableIssuedKey  = errors.New("没有与目标证书配对的可用私钥")
+)
 
 // Local 模式健壮性常量
 const (
@@ -99,7 +102,7 @@ func selectBatch(certs []config.CertConfig, startOrderID, limit int) (indexes []
 	}
 	enabled := make([]int, 0, len(certs))
 	for i := range certs {
-		if certs[i].Enabled {
+		if certs[i].Enabled && certs[i].OrderID > 0 {
 			enabled = append(enabled, i)
 		}
 	}
@@ -171,6 +174,7 @@ func runAutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions, deps autoDe
 	oldCursor := cfg.NextBatchOrderID
 	nextCursor := oldCursor
 	var batchIndexes []int
+	var invalidIndexes []int
 	if opts.OnlyOrderID != 0 {
 		for i := range cfg.Certificates {
 			if cfg.Certificates[i].Enabled && cfg.Certificates[i].OrderID == opts.OnlyOrderID {
@@ -178,6 +182,11 @@ func runAutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions, deps autoDe
 			}
 		}
 	} else {
+		for i := range cfg.Certificates {
+			if cfg.Certificates[i].Enabled && cfg.Certificates[i].OrderID <= 0 {
+				invalidIndexes = append(invalidIndexes, i)
+			}
+		}
 		limit := opts.MaxCertificates
 		if limit <= 0 || limit > maxRenewBatch {
 			limit = maxRenewBatch
@@ -185,7 +194,7 @@ func runAutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions, deps autoDe
 		batchIndexes, nextCursor = selectBatch(cfg.Certificates, oldCursor, limit)
 		enabledCount := 0
 		for _, certCfg := range cfg.Certificates {
-			if certCfg.Enabled {
+			if certCfg.Enabled && certCfg.OrderID > 0 {
 				enabledCount++
 			}
 		}
@@ -200,21 +209,23 @@ func runAutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions, deps autoDe
 	if opts.ScatterDelay {
 		sleepMin, sleepMax = calcSpreadDelay(len(batchIndexes))
 	}
-	processedIndex := 0
-
-	for _, i := range batchIndexes {
-		// 分散延迟：第一个证书不延迟
-		if opts.ScatterDelay && processedIndex > 0 && sleepMin > 0 {
+	gate := &authGate{}
+	apiRequestCertCount := 0
+	beforeAPICall := func() {
+		if opts.ScatterDelay && apiRequestCertCount > 0 && sleepMin > 0 {
 			delay := sleepMin + rand.IntN(sleepMax-sleepMin+1)
 			log.Printf("分散延迟 %d 秒...", delay)
 			time.Sleep(time.Duration(delay) * time.Second)
 		}
-		processedIndex++
+		apiRequestCertCount++
+	}
 
+	processIndexes := append(invalidIndexes, batchIndexes...)
+	for _, i := range processIndexes {
 		supplemental := &runSupplemental{}
-		certResults, _ := processOneCertWithSave(cfg, d, i, conflicts, func() error {
+		certResults, _ := processOneCertWithSaveAndGate(cfg, d, i, conflicts, func() error {
 			return deps.saveConfig(cfg)
-		}, supplemental)
+		}, gate, beforeAPICall, supplemental)
 		report.Results = append(report.Results, certResults...)
 		report.Errors = append(report.Errors, supplemental.Errors...)
 		report.Warnings = append(report.Warnings, supplemental.Warnings...)
@@ -240,6 +251,10 @@ func runAutoDeploy(cfg *config.Config, d *Deployer, opts RunOptions, deps autoDe
 	// 避免 goroutine 与证书循环并发修改配置，也覆盖 GUI 未显式 WaitCallbacks 的入口。
 	report.Warnings = append(report.Warnings, d.WaitCallbacks()...)
 	d.ApplyCallbackRenewBeforeDays(cfg)
+	if summary := gate.summary(); summary != "" {
+		report.Warnings = append(report.Warnings, summary)
+		log.Printf("警告: %s", summary)
+	}
 
 	// 更新检查时间
 	cfg.LastCheck = time.Now().Format("2006-01-02 15:04:05")
@@ -287,15 +302,76 @@ func processOneCertWithSave(
 	save func() error,
 	supplementals ...*runSupplemental,
 ) (certResults []Result, attempted bool) {
+	return processOneCertWithSaveAndGate(cfg, d, i, conflicts, save, nil, nil, supplementals...)
+}
+
+func processOneCertWithSaveAndGate(
+	cfg *config.Config,
+	d *Deployer,
+	i int,
+	conflicts map[iis.EndpointKey][]int,
+	save func() error,
+	gate *authGate,
+	beforeAPICall func(),
+	supplementals ...*runSupplemental,
+) (certResults []Result, attempted bool) {
 	results := make([]Result, 0)
 	certCfg := cfg.Certificates[i]
+	var supplemental *runSupplemental
+	if len(supplementals) > 0 {
+		supplemental = supplementals[0]
+	}
 
-	// 自动动作准入门禁：触顶(CAPPED)/过期(EXPIRED)/策略阻断/剩余不足安全余量时，
+	// Deploy API 只操作既有订单。旧版、手工或损坏配置中的非正订单号保持可加载，
+	// 但本轮不得创建客户端、请求 API、生成/清理 pending 或消耗尝试计数。
+	if certCfg.OrderID <= 0 {
+		results = append(results, Result{
+			Domain:  certCfg.Domain,
+			OrderID: certCfg.OrderID,
+			Success: false,
+			Message: "订单 ID 无效，请重新运行 setup 选择已有订单",
+		})
+		return results, false
+	}
+
+	// 上轮已可靠标记为待清理时，优先收敛本地产物；即使同时处于 CAPPED，
+	// 也不能让前置终态门禁把清理恢复永久挡住。
+	recoveredPending := false
+	if handled, reason, err := recoverPendingCleanup(d, &cfg.Certificates[i], save); handled {
+		if err != nil {
+			results = append(results, Result{
+				Domain: certCfg.Domain, OrderID: certCfg.OrderID, Success: false,
+				Message: fmt.Sprintf("清理失效在途产物失败: %v", err),
+			})
+			return results, false
+		}
+		recoveredPending = true
+		if reason != "" {
+			log.Printf("证书 %s %s", certCfg.Domain, reason)
+		}
+	}
+	// 停更清理还包含本客户端拥有的验证文件。记录本身就是可恢复标记：
+	// 删除或保存失败时保留记录，下轮仍在 CAPPED 门禁前重试。
+	if cfg.Certificates[i].Metadata.IsCapped() &&
+		cfg.Certificates[i].Metadata.CapPhase == config.CapPhaseStalled &&
+		len(cfg.Certificates[i].Metadata.ValidationFiles) > 0 {
+		cleanupOwnedValidationFiles(d, &cfg.Certificates[i], save, supplemental)
+		return results, false
+	}
+	if recoveredPending {
+		return results, false
+	}
+
+	// 自动动作准入门禁：触顶(CAPPED)/过期(EXPIRED)/策略阻断时，
 	// 本轮不发起任何动作、不发送任何回调（deploy-spec §3.2）。
 	if skip, reason := evaluateAutoActionGate(&cfg.Certificates[i], time.Now()); skip {
 		if reason != "" {
 			log.Printf("证书 %s 跳过自动动作: %s", certCfg.Domain, reason)
 		}
+		return results, false
+	}
+	if stalledTooLong(&cfg.Certificates[i], time.Now()) {
+		markStalled(d, &cfg.Certificates[i], save, supplementals...)
 		return results, false
 	}
 
@@ -312,6 +388,45 @@ func processOneCertWithSave(
 		})
 		return results, false
 	}
+	if block, blocked := gate.blockedBy(client); blocked {
+		gate.markSkipped()
+		log.Printf("证书 %s 跳过本轮：该 API 凭据已被服务端拒绝（%s）", certCfg.Domain, block.description())
+		return results, false
+	}
+	tracker := &apiCallTracker{trackNoProgress: true}
+	trackedClient := &trackedAPIClient{
+		APIClient:       client,
+		concrete:        client,
+		gate:            gate,
+		tracker:         tracker,
+		beforeFirstCall: beforeAPICall,
+	}
+	progressBefore := snapshotProgress(&cfg.Certificates[i])
+	defer func() {
+		settleNoProgress(&cfg.Certificates[i], progressBefore,
+			tracker.madeCall && !tracker.authBlocked && tracker.trackNoProgress, time.Now())
+	}()
+
+	bindingRetry := len(cfg.Certificates[i].Metadata.FailedBindings) > 0
+	if bindingRetry {
+		if cfg.Certificates[i].Metadata.BindingRetryCount >= config.MaxDeployAttempts {
+			results = append(results, Result{
+				Domain: certCfg.Domain, OrderID: certCfg.OrderID, Success: false,
+				Message: "失败绑定重试已达上限，需人工处理",
+			})
+			return results, false
+		}
+		cfg.Certificates[i].Metadata.BindingRetryCount++
+		if err := save(); err != nil {
+			cfg.Certificates[i].Metadata.BindingRetryCount--
+			results = append(results, Result{
+				Domain: certCfg.Domain, OrderID: certCfg.OrderID, Success: false,
+				Message: fmt.Sprintf("持久化失败绑定重试状态失败: %v", err),
+			})
+			return results, false
+		}
+		certCfg = cfg.Certificates[i]
+	}
 
 	isLocal := certCfg.IsLocalMode(cfg.Schedule.RenewMode)
 	log.Printf("检查证书: %s (订单: %d, 模式: %s)", certCfg.Domain, certCfg.OrderID, map[bool]string{true: "local", false: "pull"}[isLocal])
@@ -324,10 +439,11 @@ func processOneCertWithSave(
 	if isLocal {
 		// 本机提交：签发阶段的失败只记本地日志与本地计数，一律不发送回调（deploy-spec §2.8）
 		var reason string
-		certData, privateKey, reason, err = handleLocalKeyMode(d, client, &cfg.Certificates[i], cfg.Schedule.RenewBeforeDays, save)
+		certData, privateKey, reason, err = handleLocalKeyMode(d, trackedClient, &cfg.Certificates[i], cfg.Schedule.RenewBeforeDays, save)
 		// API 调用完成后更新续签提前天数（无论成功或跳过）
 		updateRenewBeforeDays(cfg, client)
 		if err != nil {
+			trackAPIOrderError(&cfg.Certificates[i], err)
 			log.Printf("本机提交处理失败: %v", err)
 			results = append(results, Result{
 				Domain:  certCfg.Domain,
@@ -338,6 +454,15 @@ func processOneCertWithSave(
 			return results, false
 		}
 		if certData == nil {
+			if bindingRetry && isWaitingOrderStatus(cfg.Certificates[i].Metadata.LastOrderStatus) {
+				rollbackBindingRetry(&cfg.Certificates[i], save)
+			}
+			if cfg.Certificates[i].Metadata.LastOrderStatus == config.OrderStatusActive &&
+				cfg.Certificates[i].Metadata.LastIssueState == "" {
+				// active 且不在续签窗口是健康跳过，不属于停更计时覆盖的无进展轮询。
+				tracker.trackNoProgress = false
+				cfg.Certificates[i].Metadata.NoProgressSince = ""
+			}
 			if reason != "" {
 				log.Printf("证书 %s 跳过: %s", certCfg.Domain, reason)
 			}
@@ -346,9 +471,10 @@ func processOneCertWithSave(
 	} else {
 		// 自动签发：拉取失败属签发/获取阶段，只记本地日志、不发送回调（deploy-spec §2.8）
 		ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
-		certData, err = client.GetCertByOrderID(ctx, certCfg.OrderID)
+		certData, err = trackedClient.GetCertByOrderID(ctx, certCfg.OrderID)
 		cancel()
 		if err != nil {
+			trackAPIOrderError(&cfg.Certificates[i], err)
 			log.Printf("获取证书失败: %v", err)
 			results = append(results, Result{
 				Domain:  certCfg.Domain,
@@ -363,43 +489,52 @@ func processOneCertWithSave(
 		updateRenewBeforeDays(cfg, client)
 
 		// 检查证书状态（pending/approving 归一为 processing，只等待不动作，deploy-spec §2.4）
-		if certData.Status == "processing" || certData.Status == "pending" || certData.Status == "approving" {
-			log.Printf("证书 %s 处理中，等待下次检查", certData.Domain())
+		changed := trackOrderStatus(&cfg.Certificates[i], certData.Status)
+		switch classifyOrderStatus(certData.Status) {
+		case orderClassWaiting, orderClassUnknown:
+			if bindingRetry {
+				rollbackBindingRetry(&cfg.Certificates[i], save)
+			}
+			log.Printf("证书 %s 订单状态 %s，继续等待", certData.Domain(), certData.Status)
 			return results, false
-		}
-		if certData.Status != "active" {
-			log.Printf("证书状态非活跃: %s", certData.Status)
-			results = append(results, Result{
-				Domain:  certCfg.Domain,
-				Success: false,
-				Message: fmt.Sprintf("证书状态: %s", certData.Status),
-				OrderID: certData.OrderID,
-			})
+		case orderClassTerminal, orderClassChainAnomaly:
+			if changed {
+				results = append(results, Result{
+					Domain: certCfg.Domain, Success: false,
+					Message: fmt.Sprintf("证书订单状态: %s", certData.Status), OrderID: certData.OrderID,
+				})
+			}
 			return results, false
+		case orderClassActive:
+			// 继续部署判定
 		}
 
 		// 检查是否到了拉取时间
-		expiresAt, err := time.Parse("2006-01-02", certData.ExpiresAt)
-		if err != nil {
+		expiresAt, ok := parseCertExpiry(certData.ExpiresAt)
+		if !ok {
 			results = append(results, Result{
 				Domain:  certCfg.Domain,
 				Success: false,
-				Message: fmt.Sprintf("解析证书过期时间失败: %v", err),
+				Message: "解析证书过期时间失败",
 				OrderID: certData.OrderID,
 			})
-			log.Printf("解析证书 %s (订单 %d) 过期时间失败（值: %q）: %v", certData.Domain(), certData.OrderID, certData.ExpiresAt, err)
+			log.Printf("解析证书 %s (订单 %d) 过期时间失败（值: %q）", certData.Domain(), certData.OrderID, certData.ExpiresAt)
 			return results, false
 		}
 
-		daysUntilExpiry := int(time.Until(expiresAt).Hours() / 24)
-		if daysUntilExpiry < 0 {
+		remaining := time.Until(expiresAt)
+		if remaining <= 0 {
 			deployCertCfg := &cfg.Certificates[i]
 			deployCertCfg.Metadata.LastIssueState = config.IssueStateExpired
 			deployCertCfg.Metadata.CapPhase = ""
-			log.Printf("证书 %s 已过期 %d 天，跳过（需人工介入）", certData.Domain(), -daysUntilExpiry)
+			deployCertCfg.Metadata.ResubmitRequired = false
+			log.Printf("证书 %s 已过期，跳过（需人工介入）", certData.Domain())
 			return results, false
 		}
-		if daysUntilExpiry > cfg.Schedule.RenewBeforeDays {
+		daysUntilExpiry := int(remaining.Hours() / 24)
+		if !bindingRetry && daysUntilExpiry > cfg.Schedule.RenewBeforeDays {
+			tracker.trackNoProgress = false
+			cfg.Certificates[i].Metadata.NoProgressSince = ""
 			log.Printf("证书 %s 还有 %d 天过期，未到续签时间（<=%d天后拉取）", certData.Domain(), daysUntilExpiry, cfg.Schedule.RenewBeforeDays)
 			return results, false
 		}
@@ -444,10 +579,15 @@ func processOneCertWithSave(
 	log.Printf("证书 %s 开始部署...", certData.Domain())
 
 	deployCertCfg := &cfg.Certificates[i]
+	prevSerial := deployCertCfg.Metadata.CertSerial
+	prevExpiry := deployCertCfg.Metadata.CertExpiresAt
 
 	// 部署意图落盘（deploy-spec §5.1）：新尝试先递增部署计数并写入在途标记再落盘；
 	// 崩溃恢复重放（标记已存在）复用同一意图不重复计数；触顶转 CAPPED 静默、不回调。
-	capped, replaying, persistErr := persistDeployAttempt(&deployCertCfg.Metadata, save)
+	capped, replaying, persistErr := false, false, error(nil)
+	if !bindingRetry {
+		capped, replaying, persistErr = persistDeployAttempt(&deployCertCfg.Metadata, save)
+	}
 	if persistErr != nil {
 		msg := fmt.Sprintf("持久化部署意图失败，已停止部署: %v", persistErr)
 		log.Printf("证书 %s %s", certData.Domain(), msg)
@@ -476,17 +616,18 @@ func processOneCertWithSave(
 		deployCertCfg.OrderID = certData.OrderID
 	}
 
-	// 部署结果原子落盘 + 部署计数收敛
-	finalized := shouldFinalizeDeployment(rep, certData.Certificate != "")
-	if finalized {
-		// 全部绑定成功：落盘证书、转正 pending 私钥、清零签发与部署状态
+	// 部署结果原子落盘 + 部署计数收敛。任一绑定成功即接纳证书；
+	// 部分失败只把失败端点留给独立重试状态。
+	accepted := rep.report && certData.Certificate != "" &&
+		(rep.success || len(rep.successfulTargets) > 0)
+	if accepted {
 		if err := d.Store.SaveCertificate(certData.OrderID, certData.Certificate, certData.CACert); err != nil {
 			log.Printf("警告: 保存已部署证书失败: %v", err)
 			msg := fmt.Sprintf("保存已部署证书失败: %v", err)
 			results = append(results, Result{
 				Domain: certCfg.Domain, OrderID: certData.OrderID, Success: false, Message: msg,
 			})
-			finalized = false
+			accepted = false
 			rep = deployReport{report: true, success: false, message: msg}
 		} else if finalizeSuccessfulDeployment(d, deployCertCfg, certData, privateKey, isLocal) {
 			// 转正失败说明生命周期未收敛（本地正式私钥仍是旧的），本轮按失败处理：
@@ -494,8 +635,28 @@ func processOneCertWithSave(
 			// 都被判为崩溃恢复重放而不计数，绕过 CAPPED 兜底并每轮重复上报一次 success 回调。
 			updateCertDomains(deployCertCfg, certData.Certificate)
 			updateCertSerial(deployCertCfg, certData.Certificate)
+			if rep.success {
+				if unchanged := trackCertUnchanged(deployCertCfg, prevSerial, prevExpiry); unchanged != "" {
+					// 物理写入成功但证书没有更替，契约上属于部署失败：恢复成功路径刚清掉的
+					// 部署计数与进展字段，让后续轮次继续累积并最终受 CAPPED 约束。
+					preserveUnchangedFailureState(&deployCertCfg.Metadata, persistedCertCfg.Metadata)
+					accepted = false
+					rep = deployReport{report: true, success: false, message: unchanged}
+					results = append(results, Result{
+						Domain: certCfg.Domain, OrderID: certData.OrderID, Success: false, Message: unchanged,
+					})
+				}
+			}
+			if accepted && len(rep.failedTargets) > 0 {
+				deployCertCfg.Metadata.FailedBindings = append(
+					[]config.BindingRetryTarget(nil), rep.failedTargets...,
+				)
+				if bindingRetry {
+					deployCertCfg.Metadata.BindingRetryCount = persistedCertCfg.Metadata.BindingRetryCount
+				}
+			}
 		} else {
-			finalized = false
+			accepted = false
 			msg := "pending 私钥转正失败，部署生命周期未收敛"
 			results = append(results, Result{
 				Domain: certCfg.Domain, OrderID: certData.OrderID, Success: false, Message: msg,
@@ -503,7 +664,7 @@ func processOneCertWithSave(
 			rep = deployReport{report: true, success: false, message: msg}
 		}
 	}
-	if !finalized {
+	if !accepted {
 		reconcileFailedDeploy(&deployCertCfg.Metadata, rep.report, replaying)
 	}
 	if err := save(); err != nil {
@@ -515,7 +676,7 @@ func processOneCertWithSave(
 		})
 		return results, true
 	}
-	if finalized && len(deployCertCfg.Metadata.ValidationFiles) > 0 {
+	if accepted && len(deployCertCfg.Metadata.ValidationFiles) > 0 {
 		var supplemental *runSupplemental
 		if len(supplementals) > 0 {
 			supplemental = supplementals[0]
@@ -534,9 +695,11 @@ func processOneCertWithSave(
 // deployReport 部署阶段的结构化结果，供编排层在结果落盘后统一发送一次回调。
 // report=false 表示本轮无绑定被处理（全部因冲突跳过），不产生任何回调。
 type deployReport struct {
-	report  bool   // 是否需要回调
-	success bool   // 是否全部绑定成功
-	message string // 失败原因摘要（success 时为空）
+	report            bool                        // 是否需要回调
+	success           bool                        // 是否全部绑定成功
+	message           string                      // 失败原因摘要（success 时为空）
+	successfulTargets []config.BindingRetryTarget // 本轮成功端点
+	failedTargets     []config.BindingRetryTarget // 本轮失败端点
 }
 
 // beginDeployAttempt 在发起一次部署前更新部署意图计数（deploy-spec §5.1）。
@@ -572,9 +735,9 @@ func persistDeployAttempt(meta *config.CertMetadata, persist func() error) (capp
 	return capped, replaying, nil
 }
 
-// shouldFinalizeDeployment 只有订单内全部绑定成功且证书内容非空时才完成生命周期。
+// shouldFinalizeDeployment 任一绑定成功且证书内容非空时即接纳证书。
 func shouldFinalizeDeployment(rep deployReport, hasCertificate bool) bool {
-	return rep.report && rep.success && hasCertificate
+	return rep.report && hasCertificate && (rep.success || len(rep.successfulTargets) > 0)
 }
 
 // reconcileFailedDeploy 处理未成功部署的计数收敛（deploy-spec §3.2）：
@@ -604,6 +767,41 @@ func reportFromOutcome(o bindOutcome) deployReport {
 		return deployReport{report: true, success: false, message: aggregatedFailureMessage(o.success+o.failed, o.failed, o.firstFail)}
 	}
 	return deployReport{report: true, success: true}
+}
+
+func retryTarget(key iis.EndpointKey) config.BindingRetryTarget {
+	return config.BindingRetryTarget{Host: key.Host, Port: key.Port, IPBinding: key.IPBinding}
+}
+
+func isPendingBindingTarget(key iis.EndpointKey, pending []config.BindingRetryTarget) bool {
+	if len(pending) == 0 {
+		return true
+	}
+	for _, target := range pending {
+		if target.Port == key.Port && target.IPBinding == key.IPBinding &&
+			strings.EqualFold(target.Host, key.Host) {
+			return true
+		}
+	}
+	return false
+}
+
+func isWaitingOrderStatus(status string) bool {
+	class := classifyOrderStatus(status)
+	return class == orderClassWaiting || class == orderClassUnknown
+}
+
+func rollbackBindingRetry(certCfg *config.CertConfig, persist func() error) {
+	if certCfg.Metadata.BindingRetryCount <= 0 {
+		return
+	}
+	certCfg.Metadata.BindingRetryCount--
+	if persist != nil {
+		if err := persist(); err != nil {
+			certCfg.Metadata.BindingRetryCount++
+			log.Printf("回滚失败绑定查询轮次失败: %v", err)
+		}
+	}
 }
 
 // appendRetryCapNotice 在部署失败摘要末尾追加"已达重试上限"标注（deploy-spec §2.8）
@@ -642,7 +840,7 @@ func evaluateAutoActionGate(certCfg *config.CertConfig, now time.Time) (skip boo
 	var expiry time.Time
 	haveExpiry := false
 	if meta.CertExpiresAt != "" {
-		if e, err := time.Parse("2006-01-02", meta.CertExpiresAt); err == nil {
+		if e, ok := parseCertExpiry(meta.CertExpiresAt); ok {
 			expiry, haveExpiry = e, true
 		}
 	}
@@ -652,6 +850,7 @@ func evaluateAutoActionGate(certCfg *config.CertConfig, now time.Time) (skip boo
 		if !meta.IsExpiredState() {
 			meta.LastIssueState = config.IssueStateExpired
 			meta.CapPhase = ""
+			meta.ResubmitRequired = false
 		}
 		return true, "证书已过期，静默终止（EXPIRED）"
 	}
@@ -663,10 +862,6 @@ func evaluateAutoActionGate(certCfg *config.CertConfig, now time.Time) (skip boo
 	}
 	if meta.IsCapped() {
 		return true, "尝试计数已触顶（CAPPED），等待人工处理"
-	}
-	// 剩余有效期不足安全余量：不启动新动作（保持当前状态，不改状态、不回调）。
-	if haveExpiry && expiry.Sub(now) < autoActionSafetyMargin {
-		return true, "剩余有效期不足安全余量，本轮不发起新动作"
 	}
 	return false, ""
 }
@@ -768,6 +963,7 @@ func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, 
 
 	// 绑定到 IIS（循环内只收集结果，报告按订单聚合到循环后返回，回调由编排层单发）
 	var outcome bindOutcome
+	var successfulTargets, failedTargets []config.BindingRetryTarget
 	for _, target := range targets {
 		rule := target.rule
 		port := target.key.Port
@@ -792,6 +988,7 @@ func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, 
 				OrderID:    certData.OrderID,
 			})
 			outcome.fail(fmt.Sprintf("%s: %v", rule.Domain, bindErr))
+			failedTargets = append(failedTargets, retryTarget(target.key))
 		} else {
 			log.Printf("绑定成功: %s", rule.Domain)
 			results = append(results, Result{
@@ -802,10 +999,14 @@ func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, 
 				OrderID:    certData.OrderID,
 			})
 			outcome.ok()
+			successfulTargets = append(successfulTargets, retryTarget(target.key))
 		}
 	}
 
-	return results, reportFromOutcome(outcome)
+	rep := reportFromOutcome(outcome)
+	rep.successfulTargets = successfulTargets
+	rep.failedTargets = failedTargets
+	return results, rep
 }
 
 type executableRuleTarget struct {
@@ -837,6 +1038,9 @@ func executableRuleTargets(certCfg config.CertConfig, currentCertIndex int, conf
 				log.Printf("端点 %s:%d 存在冲突，跳过（将由其他证书处理）", key.Host, key.Port)
 				continue
 			}
+		}
+		if !isPendingBindingTarget(key, certCfg.Metadata.FailedBindings) {
+			continue
 		}
 		targets = append(targets, executableRuleTarget{rule: rule, key: key})
 	}
@@ -961,6 +1165,122 @@ func handleProcessingOrder(
 	}
 	log.Printf("验证文件已创建，等待 CA 验证")
 	return "CSR 已提交，等待签发", nil
+}
+
+type pendingOwnership int
+
+const (
+	pendingOwnershipNone pendingOwnership = iota
+	pendingOwnershipConfirmed
+	pendingOwnershipMismatch
+	pendingOwnershipOrphan
+	pendingOwnershipUnknown
+)
+
+// checkPendingOwnership 用服务端当前动作的 CSR 判断本地 pending 是否属于该动作。
+// 缺失或非法 CSR 无法形成安全结论，必须保留 pending；合法但不匹配时才清理。
+func checkPendingOwnership(
+	d *Deployer,
+	certCfg *config.CertConfig,
+	certData *api.CertData,
+	persistConfig ...func() error,
+) (pendingOwnership, string, error) {
+	if !d.Store.HasPendingPrivateKey(certCfg.CertName) {
+		return pendingOwnershipNone, "", nil
+	}
+	if certCfg.Metadata.LastCSRHash == "" || certCfg.Metadata.CSRSubmittedAt == "" {
+		nextState := config.IssueStateProcessing
+		if classifyOrderStatus(certData.Status) == orderClassActive {
+			nextState = ""
+		}
+		if err := discardPendingIntent(d, certCfg, nextState, persistConfig...); err != nil {
+			return pendingOwnershipUnknown, "", err
+		}
+		return pendingOwnershipOrphan, "", nil
+	}
+	if strings.TrimSpace(certData.CSR) == "" {
+		return pendingOwnershipUnknown, "服务端当前动作缺少 CSR，已保留 pending 并停止本轮", nil
+	}
+	pendingKey, err := d.Store.LoadPendingPrivateKey(certCfg.CertName)
+	if err != nil {
+		return pendingOwnershipUnknown, "", fmt.Errorf("加载 pending 私钥失败: %w", err)
+	}
+
+	expectedHash := certCfg.Metadata.LastCSRHash
+	serverHash, hashErr := cert.CSRDERHash(certData.CSR)
+	if hashErr != nil {
+		return pendingOwnershipUnknown, "服务端 CSR 无法解析或签名无效，已保留 pending 并停止本轮", nil
+	}
+	// 兼容本版落地前按 PEM 原文保存的 hash：只在本地 pending CSR 可解析且
+	// 原文 hash 与旧 metadata 相符时迁移为 DER hash。
+	if pendingCSR, loadErr := d.Store.LoadPendingCSR(certCfg.CertName); loadErr == nil {
+		legacyHash := fmt.Sprintf("%x", sha256.Sum256([]byte(pendingCSR)))
+		if strings.EqualFold(expectedHash, legacyHash) {
+			if pendingDERHash, derErr := cert.CSRDERHash(pendingCSR); derErr == nil {
+				expectedHash = pendingDERHash
+			}
+		}
+	}
+	matched, verifyErr := cert.VerifyCSRIdentity(
+		certData.CSR,
+		pendingKey,
+		expectedHash,
+		certCfg.Domain,
+	)
+	if verifyErr != nil {
+		return pendingOwnershipUnknown, "服务端 CSR 无法验证，已保留 pending 并停止本轮", nil
+	}
+	if matched {
+		changed := certCfg.Metadata.ResubmitRequired ||
+			!strings.EqualFold(certCfg.Metadata.LastCSRHash, serverHash)
+		certCfg.Metadata.ResubmitRequired = false
+		certCfg.Metadata.LastCSRHash = serverHash
+		if changed && len(persistConfig) > 0 && persistConfig[0] != nil {
+			if err := persistConfig[0](); err != nil {
+				return pendingOwnershipUnknown, "", fmt.Errorf("持久化 CSR 归属确认失败: %w", err)
+			}
+		}
+		return pendingOwnershipConfirmed, "", nil
+	}
+
+	nextState := config.IssueStateProcessing
+	if classifyOrderStatus(certData.Status) == orderClassActive {
+		nextState = ""
+	}
+	if err := discardPendingIntent(d, certCfg, nextState, persistConfig...); err != nil {
+		return pendingOwnershipUnknown, "", err
+	}
+	return pendingOwnershipMismatch, "", nil
+}
+
+// discardPendingIntent 先落盘“待清理”状态，再删除本地敏感产物，保证崩溃后可恢复。
+func discardPendingIntent(
+	d *Deployer,
+	certCfg *config.CertConfig,
+	nextState string,
+	persistConfig ...func() error,
+) error {
+	if len(persistConfig) == 0 || persistConfig[0] == nil {
+		return errors.New("清理不匹配 pending 前缺少完整配置持久化函数")
+	}
+	persist := persistConfig[0]
+	certCfg.Metadata.LastIssueState = nextState
+	certCfg.Metadata.CSRSubmittedAt = ""
+	certCfg.Metadata.LastCSRHash = ""
+	certCfg.Metadata.ResubmitRequired = false
+	certCfg.Metadata.PendingCleanup = true
+	if err := persist(); err != nil {
+		return fmt.Errorf("持久化 pending 清理意图失败: %w", err)
+	}
+	if err := d.Store.RemovePendingArtifacts(certCfg.CertName); err != nil {
+		return fmt.Errorf("清理不匹配 pending 产物失败: %w", err)
+	}
+	certCfg.Metadata.PendingCleanup = false
+	if err := persist(); err != nil {
+		certCfg.Metadata.PendingCleanup = true
+		return fmt.Errorf("持久化 pending 清理结果失败: %w", err)
+	}
+	return nil
 }
 
 func resolveValidationRoots(resolver ValidationWebRootResolver, certCfg *config.CertConfig) ([]iis.ValidationWebRoot, error) {
@@ -1104,7 +1424,7 @@ func selectIssuedPrivateKey(d *Deployer, certData *api.CertData, certCfg *config
 			log.Printf("使用 pending 私钥（证书 %s，部署成功后转正）", certCfg.CertName)
 			return pendingKey, nil
 		}
-		return "", fmt.Errorf("%w，已保留并等待重放同一 CSR", errPendingKeyMismatch)
+		return "", fmt.Errorf("%w，已保留并等待服务端签发推进", errPendingKeyMismatch)
 	}
 	if certData.PrivateKey != "" {
 		matched, err := cert.VerifyKeyPair(certData.Certificate, certData.PrivateKey)
@@ -1116,23 +1436,77 @@ func selectIssuedPrivateKey(d *Deployer, certData *api.CertData, certCfg *config
 	if _, key, ok := tryUseLocalKey(d, certData, certCfg); ok {
 		return key, nil
 	}
-	return "", errors.New("没有与目标证书配对的可用私钥")
+	return "", errNoUsableIssuedKey
+}
+
+// resetIssueStateForResubmit 在服务端订单已 active、但本地已无对应 pending 私钥且其他私钥
+// 也无法配对时，先持久化清除失效的在途标记。调用方随后同轮创建新的逻辑签发尝试，
+// 避免按服务端新证书的长有效期健康跳过，导致本地旧证书静默过期。
+func resetIssueStateForResubmit(certCfg *config.CertConfig, cause error, persistConfig ...func() error) error {
+	before := certCfg.Metadata
+	certCfg.Metadata.LastIssueState = ""
+	certCfg.Metadata.CSRSubmittedAt = ""
+	certCfg.Metadata.LastCSRHash = ""
+	certCfg.Metadata.ResubmitRequired = true
+	var persist func() error
+	if len(persistConfig) > 0 {
+		persist = persistConfig[0]
+	}
+	if persist != nil {
+		if err := persist(); err != nil {
+			certCfg.Metadata = before
+			return errors.Join(cause, fmt.Errorf("重置失效签发状态失败: %w", err))
+		}
+	}
+	return nil
 }
 
 // submitNewCSR 生成并提交新的 CSR
 func submitNewCSR(d *Deployer, client APIClient, certCfg *config.CertConfig, persistConfig ...func() error) (*api.CertData, string, string, error) {
+	if certCfg.OrderID <= 0 {
+		return nil, "", "", fmt.Errorf("订单 ID 必须为正整数，请重新运行 setup 配置已有订单")
+	}
 	if certCfg.CertName == "" {
 		certCfg.CertName = fmt.Sprintf("%s-%d", certCfg.Domain, certCfg.OrderID)
 	}
-	// 已有 pending：重放同一 CSR（属同一签发尝试，不重复计数）
+	if handled, reason, err := recoverPendingCleanup(d, certCfg, persistConfig...); handled {
+		return nil, "", reason, err
+	}
+	// 已有已落盘意图时只等待 GET 证明归属，绝不重放 CSR POST。
 	if d.Store.HasPendingPrivateKey(certCfg.CertName) {
-		return retryPendingCSR(d, client, certCfg, persistConfig...)
+		if certCfg.Metadata.LastCSRHash != "" && certCfg.Metadata.CSRSubmittedAt != "" {
+			certCfg.Metadata.LastIssueState = config.IssueStateProcessing
+			return nil, "", "已有 CSR 结果待确认，后续仅查询订单", nil
+		}
+		// pending 已写入但意图元数据尚未落盘，按规范视为未提交孤儿，先清理再建新尝试。
+		if err := d.Store.RemovePendingArtifacts(certCfg.CertName); err != nil {
+			return nil, "", "", fmt.Errorf("清理未提交的 pending 孤儿失败: %w", err)
+		}
+	}
+	// 安全余量只禁止建立新 CSR；既有 pending 的 query-first 判断与孤儿清理先于此门禁。
+	if expiresAt, ok := parseCertExpiry(certCfg.Metadata.CertExpiresAt); ok &&
+		time.Until(expiresAt) < autoActionSafetyMargin {
+		return nil, "", "剩余有效期不足安全余量，不建立新的 CSR 尝试", nil
 	}
 	// 签发触顶：不再提交新 CSR，进入 CAPPED 静默，不发送任何回调（deploy-spec §3.2）
 	retryCount := certCfg.Metadata.IssueRetryCount
 	if retryCount >= config.MaxIssueRetries {
+		certCfg.Metadata.ResubmitRequired = false
 		certCfg.Metadata.MarkCapped(config.CapPhaseIssue)
 		return nil, "", fmt.Sprintf("签发计数已达上限 %d，进入 CAPPED，等待人工处理", config.MaxIssueRetries), nil
+	}
+
+	// 先单独落盘恢复标记，再生成/写入 pending。否则 pending 已写成但新意图保存失败时，
+	// metadata 会回滚到无标记状态，重启后把旧 active 与新 pending 的错配误当成“继续等签发”。
+	if !certCfg.Metadata.ResubmitRequired {
+		before := certCfg.Metadata
+		certCfg.Metadata.ResubmitRequired = true
+		if len(persistConfig) > 0 && persistConfig[0] != nil {
+			if err := persistConfig[0](); err != nil {
+				certCfg.Metadata = before
+				return nil, "", "", fmt.Errorf("持久化 CSR 恢复标记失败: %w", err)
+			}
+		}
 	}
 
 	log.Printf("生成新的 CSR (重试: %d/%d)", retryCount, config.MaxIssueRetries)
@@ -1141,8 +1515,11 @@ func submitNewCSR(d *Deployer, client APIClient, certCfg *config.CertConfig, per
 		return nil, "", "", fmt.Errorf("生成 CSR 失败: %w", err)
 	}
 
-	// CSR 哈希去重（spec 5.8）
-	csrHash := fmt.Sprintf("%x", sha256.Sum256([]byte(csrPEM)))
+	// CSR 哈希去重使用解析后的 DER，避免 PEM 换行差异影响归属判断（spec 5.8）。
+	csrHash, err := cert.CSRDERHash(csrPEM)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("计算 CSR 标识失败: %w", err)
+	}
 	if certCfg.Metadata.LastCSRHash == csrHash {
 		log.Printf("CSR 与上次相同，跳过重复提交")
 		return nil, "", "CSR 未变化，等待签发", nil
@@ -1153,40 +1530,50 @@ func submitNewCSR(d *Deployer, client APIClient, certCfg *config.CertConfig, per
 	if err := d.Store.SavePendingPrivateKey(certCfg.CertName, keyPEM); err != nil {
 		return nil, "", "", fmt.Errorf("保存 pending 私钥失败: %w", err)
 	}
-	return submitPendingCSR(d, client, certCfg, csrPEM, false, persistConfig...)
+	return submitPendingCSR(d, client, certCfg, csrPEM, persistConfig...)
 }
 
-// retryPendingCSR 重放与现存 pending 私钥严格配对的原始 CSR。
-// 网络结果不确定时绝不生成新密钥，避免覆盖服务端可能已经受理的唯一私钥。
-func retryPendingCSR(d *Deployer, client APIClient, certCfg *config.CertConfig, persistConfig ...func() error) (*api.CertData, string, string, error) {
-	csrPEM, err := d.Store.LoadPendingCSR(certCfg.CertName)
-	if err != nil {
-		return nil, "", "", fmt.Errorf("加载 pending CSR 失败，无法安全重试: %w", err)
+// recoverPendingCleanup 收敛“拒绝状态已落盘、pending 删除尚未完成”的崩溃/IO 失败窗口。
+// 标记存在时只做本地清理，绝不把残留文件误当成可重放的签发意图。
+func recoverPendingCleanup(
+	d *Deployer,
+	certCfg *config.CertConfig,
+	persistConfig ...func() error,
+) (handled bool, reason string, err error) {
+	if !certCfg.Metadata.PendingCleanup {
+		return false, "", nil
 	}
-	keyPEM, err := d.Store.LoadPendingPrivateKey(certCfg.CertName)
-	if err != nil {
-		return nil, "", "", fmt.Errorf("加载 pending 私钥失败，无法安全重试: %w", err)
+	var persist func() error
+	if len(persistConfig) > 0 {
+		persist = persistConfig[0]
 	}
-	matched, err := cert.VerifyCSRKeyPair(csrPEM, keyPEM)
-	if err != nil {
-		return nil, "", "", fmt.Errorf("验证 pending CSR 失败，无法安全重试: %w", err)
+	if persist == nil {
+		return true, "", errors.New("清理已失效的 pending 产物前缺少配置持久化函数")
 	}
-	if !matched {
-		return nil, "", "", errors.New("pending CSR 与 pending 私钥不匹配，无法安全重试")
+	if err := d.Store.RemovePendingArtifacts(certCfg.CertName); err != nil {
+		return true, "", fmt.Errorf("清理已失效的 pending 产物失败: %w", err)
 	}
-	return submitPendingCSR(d, client, certCfg, csrPEM, true, persistConfig...)
+	certCfg.Metadata.PendingCleanup = false
+	if err := persist(); err != nil {
+		certCfg.Metadata.PendingCleanup = true
+		return true, "", fmt.Errorf("保存 pending 清理结果失败: %w", err)
+	}
+	return true, "已清理失效的在途产物，下轮重新检查", nil
 }
 
-func submitPendingCSR(d *Deployer, client APIClient, certCfg *config.CertConfig, csrPEM string, replaying bool, persistConfig ...func() error) (*api.CertData, string, string, error) {
-	csrHash := fmt.Sprintf("%x", sha256.Sum256([]byte(csrPEM)))
+func submitPendingCSR(d *Deployer, client APIClient, certCfg *config.CertConfig, csrPEM string, persistConfig ...func() error) (*api.CertData, string, string, error) {
+	csrHash, err := cert.CSRDERHash(csrPEM)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("计算 CSR 标识失败: %w", err)
+	}
 	before := certCfg.Metadata
 	var persist func() error
 	if len(persistConfig) > 0 {
 		persist = persistConfig[0]
 	}
 
-	// pending 文件已存在即视为同一签发意图的崩溃恢复重放；即使哈希尚未入配置，也只补齐元数据而不重复计数。
-	if !replaying && certCfg.Metadata.LastCSRHash != csrHash {
+	// 每次进入本函数都建立新的逻辑尝试；结果不确定后的恢复只走 GET。
+	if certCfg.Metadata.LastCSRHash != csrHash {
 		if certCfg.Metadata.IssueRetryCount >= config.MaxIssueRetries {
 			certCfg.Metadata.MarkCapped(config.CapPhaseIssue)
 			if persist != nil {
@@ -1200,11 +1587,14 @@ func submitPendingCSR(d *Deployer, client APIClient, certCfg *config.CertConfig,
 		certCfg.Metadata.IssueRetryCount++
 	}
 
-	// 提交尝试的元数据必须在请求前持久化；重放同一 CSR 不重复计数（deploy-spec §3.2）。
-	// 结果未确认时统一记为 processing 在途态：崩溃/失败后 pending 私钥留存供下轮重放。
+	// 提交尝试的元数据必须在请求前持久化。结果未确认时保留 pending，
+	// 下轮通过 GET 返回的服务端 CSR 判断归属。
 	certCfg.Metadata.CSRSubmittedAt = time.Now().Format(timeFormat)
 	certCfg.Metadata.LastCSRHash = csrHash
 	certCfg.Metadata.LastIssueState = config.IssueStateProcessing
+	// 从“新意图已落盘”到“服务端确定响应”之间无法原子提交。标记保持到
+	// 后续 GET 通过服务端 CSR 证明归属；任何情况下都不重放这个 POST。
+	certCfg.Metadata.ResubmitRequired = true
 	if persist != nil {
 		if err := persist(); err != nil {
 			certCfg.Metadata = before
@@ -1223,6 +1613,55 @@ func submitPendingCSR(d *Deployer, client APIClient, certCfg *config.CertConfig,
 	defer cancel()
 	csrResp, err := client.SubmitCSR(ctx, csrReq)
 	if err != nil {
+		var apiErr *api.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == 200 {
+			cleanupPending := false
+			if api.IsAuthBlockErrorCode(apiErr.ErrorCode) {
+				// 整批共通失败未接收本次提交：回滚计数与在途状态，修复凭据后可自动恢复。
+				certCfg.Metadata = before
+				certCfg.Metadata.PendingCleanup = true
+				cleanupPending = true
+			} else if apiErr.ErrorCode == api.ErrorCodeOrderInProgress {
+				// 唯一过渡态：服务端已有在途订单，下轮只 GET 等待，不重复 POST、不升级为永久阻断。
+				certCfg.Metadata.LastIssueState = config.IssueStateProcessing
+				certCfg.Metadata.ResubmitRequired = false
+				certCfg.Metadata.LastCSRHash = ""
+				certCfg.Metadata.CSRSubmittedAt = ""
+				certCfg.Metadata.PendingCleanup = true
+				cleanupPending = true
+			} else {
+				// 单条目或未分类业务拒绝已确定未接收：保留本次计数，清理本轮意图。
+				certCfg.Metadata.LastIssueState = ""
+				certCfg.Metadata.CSRSubmittedAt = ""
+				certCfg.Metadata.LastCSRHash = ""
+				certCfg.Metadata.ResubmitRequired = false
+				certCfg.Metadata.PendingCleanup = true
+				cleanupPending = true
+			}
+			if persist != nil {
+				if persistErr := persist(); persistErr != nil {
+					return nil, "", "", errors.Join(err,
+						fmt.Errorf("保存 CSR 拒绝状态失败，已保留在途产物: %w", persistErr))
+				}
+			}
+			if cleanupPending {
+				if removeErr := d.Store.RemovePendingArtifacts(certCfg.CertName); removeErr != nil {
+					return nil, "", "", errors.Join(err,
+						fmt.Errorf("清理未被服务端接收的 pending 产物失败: %w", removeErr))
+				}
+				certCfg.Metadata.PendingCleanup = false
+				if persist != nil {
+					if persistErr := persist(); persistErr != nil {
+						certCfg.Metadata.PendingCleanup = true
+						return nil, "", "", errors.Join(err,
+							fmt.Errorf("保存 pending 清理结果失败: %w", persistErr))
+					}
+				}
+			}
+			if apiErr.ErrorCode == api.ErrorCodeOrderInProgress {
+				return nil, "", "订单已在途，等待签发", nil
+			}
+		}
 		return nil, "", "", fmt.Errorf("提交 CSR 失败: %w", err)
 	}
 
@@ -1230,22 +1669,21 @@ func submitPendingCSR(d *Deployer, client APIClient, certCfg *config.CertConfig,
 	certCfg.OrderID = newOrderID
 	log.Printf("CSR 已提交，订单 ID: %d，状态: %s", newOrderID, csrResp.Data.Status)
 
-	// 归一化服务端状态：pending/approving 与 processing 统一按 processing 处理（deploy-spec §2.4/§2.6）
-	if csrResp.Data.Status == "processing" || csrResp.Data.Status == "pending" || csrResp.Data.Status == "approving" {
-		certCfg.Metadata.LastIssueState = config.IssueStateProcessing
-		if persist != nil {
-			if err := persist(); err != nil {
-				return nil, "", "", fmt.Errorf("持久化新订单 %d processing 状态失败: %w", newOrderID, err)
-			}
-		} else if csrResp.Data.CertData.File != nil && csrResp.Data.CertData.File.Path != "" {
-			return nil, "", "", fmt.Errorf("新订单 %d 文件验证前缺少完整配置持久化函数", newOrderID)
+	trackOrderStatus(certCfg, csrResp.Data.Status)
+	// 已收到服务端确定响应，新的 CSR 已进入服务端状态机；此后只需按订单状态查询恢复。
+	certCfg.Metadata.ResubmitRequired = false
+	// 提交成功按契约只应返回 pending/processing。即使服务端异常返回 active，
+	// 本轮也不得直接消费响应证书；统一进入 query-first，下一轮 GET 再验证 CSR 归属。
+	certCfg.Metadata.LastIssueState = config.IssueStateProcessing
+	if persist != nil {
+		if err := persist(); err != nil {
+			return nil, "", "", fmt.Errorf("持久化新订单 %d processing 状态失败: %w", newOrderID, err)
 		}
-		reason, err := handleProcessingOrder(d, certCfg, &csrResp.Data.CertData, persist)
-		return nil, "", reason, err
+	} else if csrResp.Data.CertData.File != nil && csrResp.Data.CertData.File.Path != "" {
+		return nil, "", "", fmt.Errorf("新订单 %d 文件验证前缺少完整配置持久化函数", newOrderID)
 	}
-
-	certCfg.Metadata.LastIssueState = csrResp.Data.Status
-	return nil, "", fmt.Sprintf("CSR 已提交，等待后续查询（当前状态: %s）", csrResp.Data.Status), nil
+	reason, err := handleProcessingOrder(d, certCfg, &csrResp.Data.CertData, persist)
+	return nil, "", reason, err
 }
 
 // handleLocalKeyMode 处理本机提交模式
@@ -1256,6 +1694,9 @@ func handleLocalKeyMode(d *Deployer, client APIClient, certCfg *config.CertConfi
 	// 1. 校验配置
 	if err := validateCertConfig(certCfg); err != nil {
 		return nil, "", "", err
+	}
+	if handled, reason, err := recoverPendingCleanup(d, certCfg, persistConfig...); handled {
+		return nil, "", reason, err
 	}
 
 	// 2. 检查现有订单。LastIssueState 非空表示已有 CSR 在途，此时 active 是新签发完成，
@@ -1268,19 +1709,31 @@ func handleLocalKeyMode(d *Deployer, client APIClient, certCfg *config.CertConfi
 			// API 请求失败时返回错误，不要静默提交新 CSR（防止重复生成订单）
 			return nil, "", "", fmt.Errorf("获取订单 %d 证书失败: %w", certCfg.OrderID, err)
 		}
+		statusChanged := trackOrderStatus(certCfg, certData.Status)
+
+		ownership, ownershipReason, ownershipErr := checkPendingOwnership(
+			d, certCfg, certData, persistConfig...,
+		)
+		if ownershipErr != nil {
+			return nil, "", "", ownershipErr
+		}
+		if ownership == pendingOwnershipUnknown {
+			return nil, "", ownershipReason, nil
+		}
 
 		// 只有真正在途的签发（processing 或残留 pending 私钥）才跳过续签窗口直接部署。
 		// 不能用 LastIssueState != ""：default 分支会把 unpaid/cancelled 等非预期状态写进来，
 		// 那样订单一旦转 active 就会绕过续签窗口，把远未到期的证书重新部署一遍。
 		waitingForIssue := certCfg.Metadata.LastIssueState == config.IssueStateProcessing ||
+			certCfg.Metadata.LastIssueState == config.IssueStateActive ||
 			d.Store.HasPendingPrivateKey(certCfg.CertName)
-		switch certData.Status {
-		case "processing", "pending", "approving":
-			// 服务端 pending/approving 归一为 processing：只等待/查询，不重复提交、不增计数（deploy-spec §2.4）
+		switch classifyOrderStatus(certData.Status) {
+		case orderClassWaiting, orderClassUnknown:
+			// 在途、可自愈和未知状态都保守等待：只 GET，不重复提交、不增计数。
 			certCfg.Metadata.LastIssueState = config.IssueStateProcessing
 			// 证书已过期则停止，等待人工处理
 			if certData.ExpiresAt != "" {
-				if expiresAt, err := time.Parse("2006-01-02", certData.ExpiresAt); err == nil {
+				if expiresAt, ok := parseCertExpiry(certData.ExpiresAt); ok {
 					if time.Now().After(expiresAt) {
 						return nil, "", "", fmt.Errorf("证书已过期，processing 状态下停止续签，需人工处理")
 					}
@@ -1291,16 +1744,46 @@ func handleLocalKeyMode(d *Deployer, client APIClient, certCfg *config.CertConfi
 				return nil, "", "", handleErr
 			}
 			return nil, "", reason, nil
-		case "active":
+		case orderClassActive:
+			if ownership == pendingOwnershipMismatch ||
+				ownership == pendingOwnershipOrphan ||
+				(certCfg.Metadata.ResubmitRequired && ownership == pendingOwnershipNone) {
+				// 当前 active 不是本机提交结果。先利用服务端或正式本地私钥部署；
+				// 全部不可用时按 §3.2 门禁建立新的 CSR 尝试，不受普通续签窗口限制。
+				if certData.PrivateKey != "" {
+					if matched, keyErr := cert.VerifyKeyPair(certData.Certificate, certData.PrivateKey); keyErr == nil && matched {
+						return certData, certData.PrivateKey, "", nil
+					}
+				}
+				if _, localKey, ok := tryUseLocalKey(d, certData, certCfg); ok {
+					return certData, localKey, "", nil
+				}
+				return submitNewCSR(d, client, certCfg, persistConfig...)
+			}
 			if waitingForIssue {
-				certCfg.Metadata.LastIssueState = certData.Status
+				certCfg.Metadata.LastIssueState = config.IssueStateActive
 				privateKey, err := selectIssuedPrivateKey(d, certData, certCfg)
 				if err != nil {
 					if errors.Is(err, errPendingKeyMismatch) {
-						log.Printf("当前 active 证书尚未匹配 pending 私钥，重放同一 CSR 查询/推进签发")
-						return retryPendingCSR(d, client, certCfg, persistConfig...)
+						log.Printf("当前 active 证书尚未匹配 pending 私钥，继续只查询等待服务端签发推进")
+						return nil, "", "当前证书尚未匹配在途私钥，等待签发", nil
+					}
+					if errors.Is(err, errNoUsableIssuedKey) {
+						if resetErr := resetIssueStateForResubmit(certCfg, err, persistConfig...); resetErr != nil {
+							return nil, "", "", resetErr
+						}
+						log.Printf("当前 active 证书无可用配对私钥，已重置失效状态并重新提交 CSR")
+						return submitNewCSR(d, client, certCfg, persistConfig...)
 					}
 					return nil, "", "", err
+				}
+				return certData, privateKey, "", nil
+			}
+
+			if len(certCfg.Metadata.FailedBindings) > 0 {
+				privateKey, err := selectIssuedPrivateKey(d, certData, certCfg)
+				if err != nil {
+					return nil, "", "", fmt.Errorf("失败绑定重试无法取得已接纳证书私钥: %w", err)
 				}
 				return certData, privateKey, "", nil
 			}
@@ -1314,11 +1797,13 @@ func handleLocalKeyMode(d *Deployer, client APIClient, certCfg *config.CertConfi
 			// 当前 active 是旧证书；进入续签窗口后提交新 CSR，不重部署旧证书。
 			certCfg.Metadata.LastIssueState = ""
 			return submitNewCSR(d, client, certCfg, persistConfig...)
-		default:
-			// 非预期状态（pending/unpaid/cancelled 等），不提交新 CSR 防止重复下单
-			certCfg.Metadata.LastIssueState = certData.Status
-			log.Printf("订单 %d 状态为 %q，跳过", certCfg.OrderID, certData.Status)
-			return nil, "", fmt.Sprintf("订单状态: %s", certData.Status), nil
+		case orderClassTerminal, orderClassChainAnomaly:
+			// 订单状态只写展示字段，不污染 last_issue_state；继续每日 GET 以允许服务端自愈。
+			log.Printf("订单 %d 状态为 %q，停止本轮", certCfg.OrderID, certData.Status)
+			if statusChanged {
+				return nil, "", "", fmt.Errorf("订单状态: %s", certData.Status)
+			}
+			return nil, "", fmt.Sprintf("订单状态未变化: %s", certData.Status), nil
 		}
 	}
 
@@ -1429,11 +1914,12 @@ func parseCertExpiry(value string) (time.Time, bool) {
 	if value == "" {
 		return time.Time{}, false
 	}
-	parsed, err := time.Parse("2006-01-02", value)
-	if err != nil {
-		return time.Time{}, false
+	for _, layout := range []string{"2006-01-02", time.RFC3339} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed, true
+		}
 	}
-	return parsed, true
+	return time.Time{}, false
 }
 
 // updateCertMetadata 部署成功后更新证书元数据，清零签发与部署状态（deploy-spec §3.8）
@@ -1448,6 +1934,50 @@ func updateCertMetadata(certCfg *config.CertConfig, certData *api.CertData) {
 	certCfg.Metadata.DeployStartedAt = ""
 	certCfg.Metadata.CSRSubmittedAt = ""
 	certCfg.Metadata.LastCSRHash = ""
+	certCfg.Metadata.NoProgressSince = ""
+	certCfg.Metadata.BlockReportCount = 0
+	certCfg.Metadata.LastDeployBlockReason = ""
+	certCfg.Metadata.FailedBindings = nil
+	certCfg.Metadata.BindingRetryCount = 0
+	certCfg.Metadata.PendingCleanup = false
+	certCfg.Metadata.ResubmitRequired = false
+}
+
+// trackCertUnchanged 在自动部署全部成功后判断服务端是否真的换了证书。
+// 序列号可用时只看序列号；仅在序列号缺失时才用到期时间未前移作降级判据。
+func trackCertUnchanged(certCfg *config.CertConfig, prevSerial, prevExpiry string) string {
+	newSerial := certCfg.Metadata.CertSerial
+	newExpiry := certCfg.Metadata.CertExpiresAt
+	same := false
+	identity := ""
+	switch {
+	case prevSerial != "" && newSerial != "":
+		same = prevSerial == newSerial
+		identity = fmt.Sprintf("序列号 %s 未变", newSerial)
+	case prevExpiry != "" && newExpiry != "":
+		same = prevExpiry == newExpiry
+		identity = fmt.Sprintf("到期时间 %s 未前移", newExpiry)
+	}
+	if !same {
+		certCfg.Metadata.UnchangedCertRounds = 0
+		return ""
+	}
+	certCfg.Metadata.UnchangedCertRounds++
+	rounds := certCfg.Metadata.UnchangedCertRounds
+	log.Printf("证书 %s 服务端返回的证书未更替（第 %d 轮，%s）", certCfg.Domain, rounds, identity)
+	if rounds < config.CertUnchangedRounds {
+		return ""
+	}
+	return fmt.Sprintf("服务端连续 %d 轮返回同一张证书（%s），证书未实际更新", rounds, identity)
+}
+
+func preserveUnchangedFailureState(meta *config.CertMetadata, before config.CertMetadata) {
+	meta.DeployAttemptCount = before.DeployAttemptCount
+	meta.DeployStartedAt = before.DeployStartedAt
+	meta.LastDeployAt = before.LastDeployAt
+	meta.CertExpiresAt = before.CertExpiresAt
+	meta.CertSerial = before.CertSerial
+	meta.NoProgressSince = before.NoProgressSince
 }
 
 // calcSpreadDelay 根据证书数量计算分散延迟区间（秒）
@@ -1610,6 +2140,18 @@ func deployCertAutoMode(d *Deployer, client APIClient, certData *api.CertData, p
 		}
 		endpoints = append(endpoints, endpoint)
 	}
+	if len(certCfg.Metadata.FailedBindings) > 0 {
+		filtered := endpoints[:0]
+		for _, endpoint := range endpoints {
+			if isPendingBindingTarget(endpoint, certCfg.Metadata.FailedBindings) {
+				filtered = append(filtered, endpoint)
+			}
+		}
+		endpoints = filtered
+		if len(endpoints) == 0 {
+			return nil, deployReport{}
+		}
+	}
 
 	// 2. 确认存在可执行端点后才转换并安装证书。
 	pfxPath, err := d.Converter.PEMToPFX(certData.Certificate, privateKey, certData.CACert, "")
@@ -1638,6 +2180,7 @@ func deployCertAutoMode(d *Deployer, client APIClient, certData *api.CertData, p
 
 	// 3. 更新匹配的绑定（循环内只收集结果，报告按订单聚合到循环后返回，回调由编排层单发）
 	var outcome bindOutcome
+	var successfulTargets, failedTargets []config.BindingRetryTarget
 	for _, endpoint := range endpoints {
 		domain := endpoint.Host
 
@@ -1654,14 +2197,19 @@ func deployCertAutoMode(d *Deployer, client APIClient, certData *api.CertData, p
 			log.Printf("绑定失败: %v", bindErr)
 			results = append(results, Result{Domain: domain, Success: false, Message: bindErr.Error(), Thumbprint: thumbprint, OrderID: certData.OrderID})
 			outcome.fail(fmt.Sprintf("%s: %v", domain, bindErr))
+			failedTargets = append(failedTargets, retryTarget(endpoint))
 		} else {
 			log.Printf("绑定成功: %s", domain)
 			results = append(results, Result{Domain: domain, Success: true, Message: "部署成功", Thumbprint: thumbprint, OrderID: certData.OrderID})
 			outcome.ok()
+			successfulTargets = append(successfulTargets, retryTarget(endpoint))
 		}
 	}
 
-	return results, reportFromOutcome(outcome)
+	rep := reportFromOutcome(outcome)
+	rep.successfulTargets = successfulTargets
+	rep.failedTargets = failedTargets
+	return results, rep
 }
 
 // isIPBinding 判断是否是 IP 绑定（如 0.0.0.0:443，支持 IPv4 和 IPv6）

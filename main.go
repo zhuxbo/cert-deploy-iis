@@ -273,8 +273,12 @@ func runStatus() {
 			hasAPI = "已配置"
 		}
 		tokenHealth := certTokenHealth(&c.API)
-		fmt.Printf("  %-30s 订单:%-8d 过期:%s 状态:%s 模式:%s API:%s Token:%s\n",
-			c.Domain, c.OrderID, c.Metadata.CertExpiresAt, status, mode, hasAPI, tokenHealth)
+		orderStatus := c.Metadata.LastOrderStatus
+		if orderStatus == "" {
+			orderStatus = "-"
+		}
+		fmt.Printf("  %-30s 订单:%-8d 过期:%s 状态:%s 订单状态:%s 模式:%s API:%s Token:%s\n",
+			c.Domain, c.OrderID, c.Metadata.CertExpiresAt, status, orderStatus, mode, hasAPI, tokenHealth)
 	}
 
 	// 计划任务状态
@@ -461,10 +465,9 @@ func printUsage() {
 无参数运行进入 GUI 模式。
 
 一键部署:
-  sslctlw setup --url <url> --token <token>
   sslctlw setup --url <url> --token <token> --order <id>
   sslctlw setup --url <url> --token <token> --order "123,456"
-  sslctlw setup --url <url> --token <token> --key key.pem
+  sslctlw setup --url <url> --token <token> --order <id> --key key.pem
 
 扫描:
   sslctlw scan

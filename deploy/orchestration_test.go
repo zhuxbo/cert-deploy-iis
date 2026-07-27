@@ -44,6 +44,7 @@ func newCertAPIServer(t *testing.T, certData api.CertData) *httptest.Server {
 // 部署触顶（CAPPED）兜底被绕过，且每轮重复上报一次 success 回调。
 func TestProcessOneCert_PromoteFailureKeepsAttemptConverging(t *testing.T) {
 	certPEM, keyPEM := genSelfSignedPair(t, "example.com")
+	csrPEM := genCSRForTestKey(t, "example.com", keyPEM)
 	srv := newCertAPIServer(t, api.CertData{
 		OrderID:     100,
 		Domains:     "example.com",
@@ -51,6 +52,7 @@ func TestProcessOneCert_PromoteFailureKeepsAttemptConverging(t *testing.T) {
 		ExpiresAt:   time.Now().AddDate(0, 0, 5).Format("2006-01-02"),
 		Certificate: certPEM,
 		CACert:      testCACertPEM,
+		CSR:         csrPEM,
 	})
 
 	d := NewMockDeployer()
@@ -75,7 +77,11 @@ func TestProcessOneCert_PromoteFailureKeepsAttemptConverging(t *testing.T) {
 		Enabled:   true,
 		BindRules: []config.BindRule{{Domain: "example.com", Port: 443}},
 		API:       certAPI,
-		Metadata:  config.CertMetadata{LastIssueState: config.IssueStateProcessing},
+		Metadata: config.CertMetadata{
+			LastIssueState: config.IssueStateProcessing,
+			LastCSRHash:    mustCSRHash(t, csrPEM),
+			CSRSubmittedAt: "2026-07-01T00:00:00Z",
+		},
 	}}
 
 	if _, attempted := processOneCert(cfg, d, 0, nil); !attempted {
@@ -105,6 +111,7 @@ func TestProcessOneCert_PromoteFailureKeepsAttemptConverging(t *testing.T) {
 // 进入 CAPPED 静默，而不是每轮都重新部署并重复上报 success 回调。
 func TestProcessOneCert_PromoteFailureReachesCap(t *testing.T) {
 	certPEM, keyPEM := genSelfSignedPair(t, "example.com")
+	csrPEM := genCSRForTestKey(t, "example.com", keyPEM)
 	var callbacks []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -119,7 +126,7 @@ func TestProcessOneCert_PromoteFailureReachesCap(t *testing.T) {
 			"data": []api.CertData{{
 				OrderID: 100, Domains: "example.com", Status: "active",
 				ExpiresAt:   time.Now().AddDate(0, 0, 5).Format("2006-01-02"),
-				Certificate: certPEM, CACert: testCACertPEM,
+				Certificate: certPEM, CACert: testCACertPEM, CSR: csrPEM,
 			}},
 			"currentPage": 1, "pageSize": 20, "total": 1,
 		}})
@@ -145,7 +152,11 @@ func TestProcessOneCert_PromoteFailureReachesCap(t *testing.T) {
 		Domains: []string{"example.com"}, Enabled: true,
 		BindRules: []config.BindRule{{Domain: "example.com", Port: 443}},
 		API:       certAPI,
-		Metadata:  config.CertMetadata{LastIssueState: config.IssueStateProcessing},
+		Metadata: config.CertMetadata{
+			LastIssueState: config.IssueStateProcessing,
+			LastCSRHash:    mustCSRHash(t, csrPEM),
+			CSRSubmittedAt: "2026-07-01T00:00:00Z",
+		},
 	}}
 
 	for round := 1; round <= config.MaxDeployAttempts+2; round++ {

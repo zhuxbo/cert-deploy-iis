@@ -417,7 +417,7 @@ func TestSubmitPendingCSRPersistsNewOrderBeforePlacingToken(t *testing.T) {
 		events = append(events, fmt.Sprintf("persist:%d", cfg.OrderID))
 		return nil
 	}
-	if _, _, _, err := submitPendingCSR(d, client, cfg, "csr", true, persist); err != nil {
+	if _, _, _, err := submitPendingCSR(d, client, cfg, validTestCSR(t), persist); err != nil {
 		t.Fatalf("submitPendingCSR() error = %v, events=%v", err, events)
 	}
 	if len(cfg.Metadata.ValidationFiles) != 1 {
@@ -605,5 +605,49 @@ func TestRunAutoDeployCleanupSaveFailureIsSupplemental(t *testing.T) {
 	}
 	if len(cfg.Certificates[0].Metadata.ValidationFiles) != 1 {
 		t.Fatalf("cleanup save 失败必须恢复 record: %+v", cfg.Certificates[0].Metadata.ValidationFiles)
+	}
+}
+
+func TestStalledValidationCleanupRetriesBeforeCappedGate(t *testing.T) {
+	record := config.ValidationFileRecord{
+		SiteName: "A", RelativePath: filepath.Join(".well-known", "token"), SHA256: "a",
+	}
+	cfg := config.DefaultConfig()
+	cfg.Certificates = []config.CertConfig{{
+		CertName: "stalled.example.com-903", OrderID: 903,
+		Domain: "stalled.example.com", Domains: []string{"stalled.example.com"}, Enabled: true,
+		Metadata: config.CertMetadata{
+			LastIssueState: config.IssueStateCapped,
+			CapPhase:       config.CapPhaseStalled,
+			ValidationFiles: []config.ValidationFileRecord{
+				record,
+			},
+		},
+	}}
+	d := NewMockDeployer()
+	d.ValidationRoots.(*MockValidationWebRootResolver).ResolveFunc = func(_ []string, _ string) ([]iis.ValidationWebRoot, error) {
+		return []iis.ValidationWebRoot{{SiteName: "A", PhysicalPath: `C:\sites\a`}}, nil
+	}
+	removeCalls := 0
+	d.ValidationFiles.(*MockValidationFileStore).RemoveTokenFunc = func(iis.ValidationWebRoot, config.ValidationFileRecord) (validationTokenRemoveStatus, error) {
+		removeCalls++
+		if removeCalls == 1 {
+			return validationTokenOwnershipChanged, errors.New("access denied")
+		}
+		return validationTokenRemoved, nil
+	}
+
+	first := &runSupplemental{}
+	_, _ = processOneCertWithSaveAndGate(cfg, d, 0, nil, func() error { return nil }, nil, nil, first)
+	if len(first.Errors) != 1 || len(cfg.Certificates[0].Metadata.ValidationFiles) != 1 {
+		t.Fatalf("首次失败必须保留记录供重试: errors=%+v records=%+v",
+			first.Errors, cfg.Certificates[0].Metadata.ValidationFiles)
+	}
+
+	second := &runSupplemental{}
+	_, _ = processOneCertWithSaveAndGate(cfg, d, 0, nil, func() error { return nil }, nil, nil, second)
+	if len(second.Errors) != 0 || len(cfg.Certificates[0].Metadata.ValidationFiles) != 0 || removeCalls != 2 {
+		t.Fatalf("下轮应在 CAPPED 门禁前收敛: errors=%+v records=%+v calls=%d",
+			second.Errors, cfg.Certificates[0].Metadata.ValidationFiles, removeCalls)
 	}
 }

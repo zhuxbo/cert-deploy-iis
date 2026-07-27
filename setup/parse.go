@@ -4,22 +4,40 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+
+	"sslctlw/api"
 )
 
 // Options 一键部署选项
 type Options struct {
 	URL     string // API 地址
 	Token   string // API Token
-	Order   string // 逗号分隔的订单 ID，空则查询全部
+	Order   string // 逗号分隔的订单 ID（必填，最多 100 个）
 	KeyPath string // 私钥文件路径（--key 参数）
+}
+
+func validateSetupOrderQuery(order string) error {
+	if err := api.ValidateOrderQuery(order); err != nil {
+		return err
+	}
+	for _, item := range strings.Split(order, ",") {
+		if strings.TrimLeft(item, "0") == "" {
+			return &api.APIError{
+				Code:      0,
+				Message:   "setup 只能配置已有的正整数订单 ID",
+				ErrorCode: api.ErrorCodeInvalidOrder,
+			}
+		}
+	}
+	return nil
 }
 
 // ParseCommand 解析部署命令字符串
 // 支持格式:
 //
-//	sslctlw setup --url <url> --token <token> [--order <ids>]
-//	sslctl setup --url <url> --token <token> [--order <ids>]
-//	--url <url> --token <token> [--order <ids>]
+//	sslctlw setup --url <url> --token <token> --order <ids>
+//	sslctl setup --url <url> --token <token> --order <ids>
+//	--url <url> --token <token> --order <ids>
 func ParseCommand(input string) (*Options, error) {
 	// 合并多行为一行
 	input = strings.ReplaceAll(input, "\r\n", " ")
@@ -92,6 +110,12 @@ func ParseCommand(input string) (*Options, error) {
 	if opts.Token == "" {
 		return nil, fmt.Errorf("缺少 --token 参数")
 	}
+	if opts.Order == "" {
+		return nil, fmt.Errorf("缺少 --order 参数")
+	}
+	if err := validateSetupOrderQuery(opts.Order); err != nil {
+		return nil, err
+	}
 
 	return opts, nil
 }
@@ -154,6 +178,12 @@ func parseURL(input string) (*Options, error) {
 		URL:   baseURL,
 		Token: token,
 		Order: query.Get("order"),
+	}
+	if opts.Order == "" {
+		return nil, fmt.Errorf("URL 缺少 order 参数")
+	}
+	if err := validateSetupOrderQuery(opts.Order); err != nil {
+		return nil, err
 	}
 
 	return opts, nil

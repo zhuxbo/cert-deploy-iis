@@ -10,14 +10,30 @@ import (
 	"sslctlw/iis"
 )
 
+func validTestCSR(t *testing.T) string {
+	t.Helper()
+	_, csrPEM, err := cert.GenerateCSR("example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return csrPEM
+}
+
+func mustCSRHash(t *testing.T, csrPEM string) string {
+	t.Helper()
+	hash, err := cert.CSRDERHash(csrPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hash
+}
+
 // MockAPIClient 模拟 API 客户端
 type MockAPIClient struct {
-	GetCertByOrderIDFunc  func(ctx context.Context, orderID int) (*api.CertData, error)
-	ListCertsByDomainFunc func(ctx context.Context, domain string) ([]api.CertData, error)
-	ListCertsByQueryFunc  func(ctx context.Context, query string) ([]api.CertData, error)
-	ListAllCertsFunc      func(ctx context.Context) ([]api.CertData, error)
-	SubmitCSRFunc         func(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error)
-	CallbackFunc          func(ctx context.Context, req *api.CallbackRequest) error
+	GetCertByOrderIDFunc func(ctx context.Context, orderID int) (*api.CertData, error)
+	ListCertsByQueryFunc func(ctx context.Context, query string) ([]api.CertData, error)
+	SubmitCSRFunc        func(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error)
+	CallbackFunc         func(ctx context.Context, req *api.CallbackRequest) error
 }
 
 func (m *MockAPIClient) GetCertByOrderID(ctx context.Context, orderID int) (*api.CertData, error) {
@@ -27,23 +43,9 @@ func (m *MockAPIClient) GetCertByOrderID(ctx context.Context, orderID int) (*api
 	return nil, nil
 }
 
-func (m *MockAPIClient) ListCertsByDomain(ctx context.Context, domain string) ([]api.CertData, error) {
-	if m.ListCertsByDomainFunc != nil {
-		return m.ListCertsByDomainFunc(ctx, domain)
-	}
-	return nil, nil
-}
-
 func (m *MockAPIClient) ListCertsByQuery(ctx context.Context, query string) ([]api.CertData, error) {
 	if m.ListCertsByQueryFunc != nil {
 		return m.ListCertsByQueryFunc(ctx, query)
-	}
-	return nil, nil
-}
-
-func (m *MockAPIClient) ListAllCerts(ctx context.Context) ([]api.CertData, error) {
-	if m.ListAllCertsFunc != nil {
-		return m.ListAllCertsFunc(ctx)
 	}
 	return nil, nil
 }
@@ -72,6 +74,7 @@ type MockOrderStore struct {
 	SavePendingPrivateKeyFunc    func(certName, keyPEM string) error
 	SavePendingCSRFunc           func(certName, csrPEM string) error
 	LoadPendingCSRFunc           func(certName string) (string, error)
+	RemovePendingArtifactsFunc   func(certName string) error
 	PromotePendingPrivateKeyFunc func(certName string, orderID int, deployedKey string) error
 	SaveCertificateFunc          func(orderID int, certPEM, chainPEM string) error
 	LoadCertificateFunc          func(orderID int) (certPEM, chainPEM string, err error)
@@ -133,6 +136,13 @@ func (m *MockOrderStore) LoadPendingCSR(certName string) (string, error) {
 		return m.LoadPendingCSRFunc(certName)
 	}
 	return "", nil
+}
+
+func (m *MockOrderStore) RemovePendingArtifacts(certName string) error {
+	if m.RemovePendingArtifactsFunc != nil {
+		return m.RemovePendingArtifactsFunc(certName)
+	}
+	return nil
 }
 
 func (m *MockOrderStore) PromotePendingPrivateKey(certName string, orderID int, deployedKey string) error {

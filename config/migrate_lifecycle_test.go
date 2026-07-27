@@ -151,9 +151,9 @@ func TestMigrateLegacyCapped(t *testing.T) {
 			if got := metaState(meta); got != tt.wantState {
 				t.Errorf("状态 = %q, want %q", got, tt.wantState)
 			}
-			phase, _ := meta["cap_phase"].(string)
+			phase, _ := meta["capped_phase"].(string)
 			if phase != tt.wantPhase {
-				t.Errorf("cap_phase = %q, want %q", phase, tt.wantPhase)
+				t.Errorf("capped_phase = %q, want %q", phase, tt.wantPhase)
 			}
 			// 部署计数从零开始，不从旧混合计数推断
 			if _, has := meta["deploy_attempt_count"]; has {
@@ -178,8 +178,8 @@ func TestLifecycleMigration_Ordering(t *testing.T) {
 	if got := metaState(meta); got != IssueStatePolicyBlocked {
 		t.Errorf("非法 IP 且触顶应优先 policy_blocked, got %q", got)
 	}
-	if _, has := meta["cap_phase"]; has {
-		t.Error("policy_blocked 不应写 cap_phase")
+	if _, has := meta["capped_phase"]; has {
+		t.Error("policy_blocked 不应写 capped_phase")
 	}
 }
 
@@ -202,5 +202,28 @@ func TestMigrateLegacyCapped_Idempotent(t *testing.T) {
 	}
 	if changed {
 		t.Error("已迁移配置再次迁移不应报告变更（幂等）")
+	}
+}
+
+func TestMigrateCapPhaseFieldName(t *testing.T) {
+	raw := map[string]interface{}{
+		"certificates": []interface{}{
+			map[string]interface{}{
+				"metadata": map[string]interface{}{
+					"last_issue_state": IssueStateCapped,
+					"cap_phase":        CapPhaseDeploy,
+				},
+			},
+		},
+	}
+	if !migrateFields(raw) {
+		t.Fatal("旧 cap_phase 应迁移")
+	}
+	meta := firstCertMeta(t, raw)
+	if got := meta["capped_phase"]; got != CapPhaseDeploy {
+		t.Fatalf("capped_phase = %v, want %q", got, CapPhaseDeploy)
+	}
+	if _, exists := meta["cap_phase"]; exists {
+		t.Fatal("迁移后不应保留 cap_phase")
 	}
 }

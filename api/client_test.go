@@ -350,7 +350,7 @@ func TestParseAPIResponse(t *testing.T) {
 	}
 }
 
-func TestListCertsByDomain_Validation(t *testing.T) {
+func TestListCertsByQuery_Validation(t *testing.T) {
 	// 测试配置验证
 	tests := []struct {
 		name    string
@@ -365,15 +365,15 @@ func TestListCertsByDomain_Validation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := NewClient(tt.baseURL, tt.token)
-			_, err := client.ListCertsByDomain(context.Background(), "example.com")
+			_, err := client.ListCertsByQuery(context.Background(), "123")
 			if (err != nil) != tt.wantErr {
-				t.Errorf("ListCertsByDomain() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("ListCertsByQuery() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
-func TestListCertsByDomain_MockServer(t *testing.T) {
+func TestListCertsByQuery_MockServer(t *testing.T) {
 	// 创建 mock 服务器
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 验证请求头
@@ -412,13 +412,13 @@ func TestListCertsByDomain_MockServer(t *testing.T) {
 
 	// 测试成功请求
 	client := NewClient(server.URL, "test-token")
-	certs, err := client.ListCertsByDomain(context.Background(), "example.com")
+	certs, err := client.ListCertsByQuery(context.Background(), "123")
 	if err != nil {
-		t.Fatalf("ListCertsByDomain() error = %v", err)
+		t.Fatalf("ListCertsByQuery() error = %v", err)
 	}
 
 	if len(certs) != 1 {
-		t.Errorf("ListCertsByDomain() 返回 %d 个证书, want 1", len(certs))
+		t.Errorf("ListCertsByQuery() 返回 %d 个证书, want 1", len(certs))
 	}
 
 	if certs[0].OrderID != 123 {
@@ -427,7 +427,7 @@ func TestListCertsByDomain_MockServer(t *testing.T) {
 
 	// 测试未授权
 	badClient := NewClient(server.URL, "wrong-token")
-	_, err = badClient.ListCertsByDomain(context.Background(), "example.com")
+	_, err = badClient.ListCertsByQuery(context.Background(), "123")
 	if err == nil {
 		t.Error("使用错误 token 应该返回错误")
 	}
@@ -819,10 +819,10 @@ func TestDoWithRetry_Success(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain(context.Background(), "example.com")
+	_, err := client.ListCertsByQuery(context.Background(), "123")
 
 	if err != nil {
-		t.Fatalf("ListCertsByDomain() error = %v", err)
+		t.Fatalf("ListCertsByQuery() error = %v", err)
 	}
 	if callCount != 1 {
 		t.Errorf("请求次数 = %d, want 1", callCount)
@@ -853,10 +853,10 @@ func TestDoWithRetry_5xxRetry(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain(context.Background(), "example.com")
+	_, err := client.ListCertsByQuery(context.Background(), "123")
 
 	if err != nil {
-		t.Fatalf("ListCertsByDomain() error = %v", err)
+		t.Fatalf("ListCertsByQuery() error = %v", err)
 	}
 	if callCount != 3 {
 		t.Errorf("请求次数 = %d, want 3", callCount)
@@ -891,6 +891,7 @@ func TestSubmitCSR_MockServer(t *testing.T) {
 
 	client := NewClient(server.URL, "test-token")
 	resp, err := client.SubmitCSR(context.Background(), &UpdateRequest{
+		OrderID: 123,
 		Domains: "example.com",
 		CSR:     "-----BEGIN CERTIFICATE REQUEST-----\ntest\n-----END CERTIFICATE REQUEST-----",
 	})
@@ -908,7 +909,9 @@ func TestSubmitCSR_MockServer(t *testing.T) {
 
 // TestSubmitCSR_APIError 测试 CSR 提交 API 错误
 func TestSubmitCSR_APIError(t *testing.T) {
+	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 0,
@@ -919,6 +922,7 @@ func TestSubmitCSR_APIError(t *testing.T) {
 
 	client := NewClient(server.URL, "test-token")
 	_, err := client.SubmitCSR(context.Background(), &UpdateRequest{
+		OrderID: 123,
 		Domains: "invalid",
 		CSR:     "test",
 	})
@@ -926,10 +930,16 @@ func TestSubmitCSR_APIError(t *testing.T) {
 	if err == nil {
 		t.Error("SubmitCSR() 应该返回错误")
 	}
+	if callCount != 1 {
+		t.Fatalf("请求次数 = %d, want 1", callCount)
+	}
+	if !strings.Contains(err.Error(), "域名格式错误") {
+		t.Fatalf("错误 = %v, want 服务端业务错误", err)
+	}
 }
 
-// TestGetCertByDomain_MockServer 测试获取最佳证书
-func TestGetCertByDomain_MockServer(t *testing.T) {
+// TestDomainQueryRejected 测试客户端在发请求前拒绝已移除的域名查询形态。
+func TestDomainQueryRejected(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -964,20 +974,13 @@ func TestGetCertByDomain_MockServer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-token")
-	cert, err := client.GetCertByDomain(context.Background(), "example.com")
-
-	if err != nil {
-		t.Fatalf("GetCertByDomain() error = %v", err)
-	}
-	// 应该返回 OrderID=300（active 且过期最晚）
-	if cert.OrderID != 300 {
-		t.Errorf("OrderID = %d, want 300", cert.OrderID)
+	err := ValidateOrderQuery("example.com")
+	if apiCode := ErrorCodeOf(err); apiCode != ErrorCodeInvalidOrder {
+		t.Fatalf("域名查询应在本地按 invalid_order 拒绝，got err=%v code=%q", err, apiCode)
 	}
 }
 
-// TestGetCertByDomain_NoActiveCert 测试没有 active 证书
-func TestGetCertByDomain_NoActiveCert(t *testing.T) {
+func TestDomainQueryRejectedRegardlessOfServerData(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1000,16 +1003,15 @@ func TestGetCertByDomain_NoActiveCert(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-token")
-	_, err := client.GetCertByDomain(context.Background(), "example.com")
+	err := ValidateOrderQuery("example.com")
 
 	if err == nil {
-		t.Error("GetCertByDomain() 应该返回错误（没有 active 证书）")
+		t.Error("域名查询必须按 invalid_order 拒绝")
 	}
 }
 
-// TestListCertsByDomain_HTTPError 测试 HTTP 错误
-func TestListCertsByDomain_HTTPError(t *testing.T) {
+// TestListCertsByQuery_HTTPError 测试 HTTP 错误
+func TestListCertsByQuery_HTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1020,15 +1022,15 @@ func TestListCertsByDomain_HTTPError(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain(context.Background(), "example.com")
+	_, err := client.ListCertsByQuery(context.Background(), "123")
 
 	if err == nil {
-		t.Error("ListCertsByDomain() 应该返回错误")
+		t.Error("ListCertsByQuery() 应该返回错误")
 	}
 }
 
-// TestListCertsByDomain_JSONParseError 测试 JSON 解析失败
-func TestListCertsByDomain_JSONParseError(t *testing.T) {
+// TestListCertsByQuery_JSONParseError 测试 JSON 解析失败
+func TestListCertsByQuery_JSONParseError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("not json"))
@@ -1036,15 +1038,15 @@ func TestListCertsByDomain_JSONParseError(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain(context.Background(), "example.com")
+	_, err := client.ListCertsByQuery(context.Background(), "123")
 
 	if err == nil {
-		t.Error("ListCertsByDomain() 应该返回 JSON 解析错误")
+		t.Error("ListCertsByQuery() 应该返回 JSON 解析错误")
 	}
 }
 
-// TestListCertsByDomain_CodeNotOne 测试 code != 1
-func TestListCertsByDomain_CodeNotOne(t *testing.T) {
+// TestListCertsByQuery_CodeNotOne 测试 code != 1
+func TestListCertsByQuery_CodeNotOne(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1055,10 +1057,10 @@ func TestListCertsByDomain_CodeNotOne(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain(context.Background(), "example.com")
+	_, err := client.ListCertsByQuery(context.Background(), "123")
 
 	if err == nil {
-		t.Error("ListCertsByDomain() 应该返回错误（code != 1）")
+		t.Error("ListCertsByQuery() 应该返回错误（code != 1）")
 	}
 }
 
@@ -1255,7 +1257,7 @@ func TestDoWithRetry_5xxAllFail(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain(context.Background(), "example.com")
+	_, err := client.ListCertsByQuery(context.Background(), "123")
 	if err == nil {
 		t.Error("应该在所有重试失败后返回错误")
 	}
@@ -1434,8 +1436,8 @@ func TestClientRejectsRenewBeforeDaysAboveCap(t *testing.T) {
 
 	client := NewClient(server.URL, "token")
 	client.LastRenewBeforeDays = 14
-	if _, err := client.ListAllCerts(context.Background()); err != nil {
-		t.Fatalf("ListAllCerts() error = %v", err)
+	if _, err := client.ListCertsByQuery(context.Background(), "123"); err != nil {
+		t.Fatalf("ListCertsByQuery() error = %v", err)
 	}
 	if client.LastRenewBeforeDays != 14 {
 		t.Fatalf("超限值不应覆盖本地候选值，got %d", client.LastRenewBeforeDays)

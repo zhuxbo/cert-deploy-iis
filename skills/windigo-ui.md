@@ -338,7 +338,7 @@ btn.Hwnd().EnableWindow(true)   // 启用
 - `cert.ListCertificates()` / `cert.GetCertByThumbprint()`
 - `iis.ScanSites()` / `iis.ListSSLBindings()`
 - `config.Load()` / `config.Save()`
-- `api.Client.GetCertByDomain()`
+- `api.Client.GetCertByOrderID()` / `ListCertsByQuery()`
 - 任何 `exec.Command()` 调用
 
 **解决**: 将这些调用移到 `go func() { ... }` 中，在 `UiThread` 之前执行。

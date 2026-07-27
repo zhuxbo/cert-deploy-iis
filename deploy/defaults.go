@@ -85,6 +85,10 @@ func (d *defaultOrderStore) LoadPendingCSR(certName string) (string, error) {
 	return d.store.LoadPendingCSR(certName)
 }
 
+func (d *defaultOrderStore) RemovePendingArtifacts(certName string) error {
+	return d.store.RemovePendingArtifacts(certName)
+}
+
 func (d *defaultOrderStore) PromotePendingPrivateKey(certName string, orderID int, deployedKey string) error {
 	return d.store.PromotePendingPrivateKey(certName, orderID, deployedKey)
 }

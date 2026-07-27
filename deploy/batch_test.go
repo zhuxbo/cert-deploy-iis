@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,6 +50,60 @@ func TestSelectBatch(t *testing.T) {
 				t.Fatalf("cursor=%d want=%d", cursor, tt.wantCursor)
 			}
 		})
+	}
+}
+
+func TestSelectBatchExcludesNonPositiveOrders(t *testing.T) {
+	certs := []config.CertConfig{
+		{OrderID: 1, Enabled: true},
+		{OrderID: 0, Enabled: true},
+		{OrderID: -1, Enabled: true},
+		{OrderID: 2, Enabled: true},
+	}
+	indexes, cursor := selectBatch(certs, 0, 1)
+	if len(indexes) != 1 || indexes[0] != 0 || cursor != 2 {
+		t.Fatalf("indexes=%v cursor=%d, want [0]/2", indexes, cursor)
+	}
+}
+
+func TestRunAutoDeployInvalidOrderDoesNotResetBatchCursor(t *testing.T) {
+	var calls []int
+	var mu sync.Mutex
+	server := newBatchProcessingServer(t, &calls, &mu)
+	cfg := batchConfig(t, 101, server.URL)
+	cfg.Certificates = append(cfg.Certificates[:100],
+		append([]config.CertConfig{{
+			OrderID: 0, Domain: "invalid.example.com", Domains: []string{"invalid.example.com"},
+			Enabled: true,
+		}}, cfg.Certificates[100:]...)...)
+
+	report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{MaxCertificates: 1000}, successfulAutoDeployDependencies(nil))
+	if err := report.Err(); err == nil || !strings.Contains(err.Error(), "invalid.example.com") {
+		t.Fatalf("first report 应包含无效订单失败，got=%v", err)
+	}
+	if len(calls) != 100 || calls[0] != 1 || calls[99] != 100 {
+		t.Fatalf("first calls count=%d head/tail=%v/%v", len(calls), calls[0], calls[len(calls)-1])
+	}
+	if cfg.NextBatchOrderID != 101 {
+		t.Fatalf("cursor=%d want=101", cfg.NextBatchOrderID)
+	}
+	invalidFailures := 0
+	for _, result := range report.Results {
+		if result.OrderID == 0 && !result.Success && strings.Contains(result.Message, "订单 ID") {
+			invalidFailures++
+		}
+	}
+	if invalidFailures != 1 {
+		t.Fatalf("invalid order failures=%d want=1, results=%+v", invalidFailures, report.Results)
+	}
+
+	calls = nil
+	report = runAutoDeploy(cfg, NewMockDeployer(), RunOptions{MaxCertificates: 1000}, successfulAutoDeployDependencies(nil))
+	if err := report.Err(); err == nil || !strings.Contains(err.Error(), "invalid.example.com") {
+		t.Fatalf("second report 应包含无效订单失败，got=%v", err)
+	}
+	if len(calls) != 1 || calls[0] != 101 || cfg.NextBatchOrderID != 0 {
+		t.Fatalf("second calls=%v cursor=%d", calls, cfg.NextBatchOrderID)
 	}
 }
 

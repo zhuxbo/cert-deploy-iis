@@ -76,7 +76,7 @@ func setupRunOptions(t *testing.T) Options {
 		})
 	}))
 	t.Cleanup(server.Close)
-	return Options{URL: server.URL, Token: "token"}
+	return Options{URL: server.URL, Token: "token", Order: "1"}
 }
 
 func stubSetupRunEffects(t *testing.T, saveErr, taskErr error) (*[]string, **config.Config) {

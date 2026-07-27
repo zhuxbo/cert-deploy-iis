@@ -95,12 +95,8 @@ type ValidationWebRootResolver interface {
 type APIClient interface {
 	// GetCertByOrderID 按订单 ID 获取证书
 	GetCertByOrderID(ctx context.Context, orderID int) (*api.CertData, error)
-	// ListCertsByDomain 按域名列出证书
-	ListCertsByDomain(ctx context.Context, domain string) ([]api.CertData, error)
-	// ListCertsByQuery 批量查询证书
+	// ListCertsByQuery 批量按订单 ID 查询证书
 	ListCertsByQuery(ctx context.Context, query string) ([]api.CertData, error)
-	// ListAllCerts 分页查询全部证书
-	ListAllCerts(ctx context.Context) ([]api.CertData, error)
 	// SubmitCSR 提交 CSR
 	SubmitCSR(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error)
 	// Callback 发送部署回调
@@ -121,10 +117,12 @@ type OrderStore interface {
 	LoadPendingPrivateKey(certName string) (string, error)
 	// SavePendingPrivateKey 保存待确认私钥
 	SavePendingPrivateKey(certName, keyPEM string) error
-	// SavePendingCSR 保存与待确认私钥配对、可安全重放的 CSR
+	// SavePendingCSR 保存与待确认私钥配对、供 query-first 归属判断的 CSR
 	SavePendingCSR(certName, csrPEM string) error
-	// LoadPendingCSR 加载可安全重放的 CSR
+	// LoadPendingCSR 加载 pending CSR（不用于重放 POST）
 	LoadPendingCSR(certName string) (string, error)
+	// RemovePendingArtifacts 清理在途私钥与 CSR
+	RemovePendingArtifacts(certName string) error
 	// PromotePendingPrivateKey 将本次已成功部署的待确认私钥转正
 	PromotePendingPrivateKey(certName string, orderID int, deployedKey string) error
 	// SaveCertificate 保存证书

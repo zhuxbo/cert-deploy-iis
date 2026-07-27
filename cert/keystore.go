@@ -186,7 +186,7 @@ func (s *OrderStore) HasPendingPrivateKey(certName string) bool {
 	return err == nil
 }
 
-// SavePendingCSR 保存可安全重放的原始 CSR，避免不确定请求结果后生成新密钥覆盖 pending key。
+// SavePendingCSR 保存原始 CSR，供不确定结果后的 query-first 归属判断。
 func (s *OrderStore) SavePendingCSR(certName, csrPEM string) error {
 	if len(csrPEM) > MaxCSRSize {
 		return fmt.Errorf("CSR 大小 %d 超过上限 %d 字节", len(csrPEM), MaxCSRSize)
@@ -218,6 +218,16 @@ func (s *OrderStore) LoadPendingCSR(certName string) (string, error) {
 		return "", errors.New("pending CSR 文件可能已损坏")
 	}
 	return string(data), nil
+}
+
+// RemovePendingArtifacts 清理指定证书的在途私钥与 CSR。
+// 目录由 GetPendingKeyPath 校验并派生，不接受调用方路径。
+func (s *OrderStore) RemovePendingArtifacts(certName string) error {
+	keyPath, err := s.GetPendingKeyPath(certName)
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(filepath.Dir(keyPath))
 }
 
 // PromotePendingPrivateKey 在部署成功后将本次实际使用的 pending 私钥转正。

@@ -14,13 +14,17 @@ URL 安全校验的生产入口使用系统 DNS 解析并拒绝任一私网、�
 
 ## 接口
 
-### 按域名查询证书
+### 按订单 ID 查询证书
 
 ```
-GET /api/deploy/cert?domain=example.com
+GET /api/deploy?order=123
+GET /api/deploy?order=123,456
 ```
 
-**响应** (分页格式):
+`order` 必填，只接受订单 ID；批量最多 100 个。接口不分页，客户端单次取完即止。
+空参数、域名、混合 ID/域名都按 `error_code=invalid_order` 拒绝。
+
+**响应**:
 
 ```json
 {
@@ -32,6 +36,7 @@ GET /api/deploy/cert?domain=example.com
         "order_id": 123,
         "domains": "example.com,www.example.com",
         "status": "active",
+        "csr": "-----BEGIN CERTIFICATE REQUEST-----...",
         "certificate": "-----BEGIN CERTIFICATE-----...",
         "private_key": "-----BEGIN PRIVATE KEY-----...",
         "ca_certificate": "-----BEGIN CERTIFICATE-----...",
@@ -39,37 +44,31 @@ GET /api/deploy/cert?domain=example.com
         "issued_at": "2025-01-01"
       }
     ],
-    "currentPage": 1,
-    "pageSize": 20,
-    "total": 1
+    "renew_before_days": 14
   }
 }
 ```
 
-**域名匹配规则**:
-- 精确匹配 `common_name` 或 `alternative_names`
-- 通配符匹配：`api.example.com` 匹配 `*.example.com`
-
-### 按订单 ID 查询证书
-
-```
-GET /api/deploy/cert?order_id=123
-```
-
-返回格式同上。
+批量查询部分命中时只返回命中的订单；单 ID 未命中返回
+`error_code=order_not_found`。`field=certificate/private_key` 的 URL 拉取模式只供第三方工具，
+sslctlw 不使用。
 
 ### 提交 CSR（本机提交模式）
 
 CSR 只需要 CommonName（主域名），不需要 SAN。服务端根据订单配置自动添加 SAN。
+每次 POST 前必须先 GET 同一订单，只有本次查询明确返回 `active` 才允许提交；服务端同样
+拒绝对其他状态接收新 CSR。同一签发动作的 CSR 在任何状态下都不可原地修改；active 提交新 CSR
+会创建后继签发动作，不会覆盖当前 active 动作的 CSR。
 
 ```
-POST /api/deploy/csr
+POST /api/deploy
 Content-Type: application/json
 
 {
-  "order_id": 123,        // 重签时使用，新申请时可为 0
-  "domain": "example.com",
-  "csr": "-----BEGIN CERTIFICATE REQUEST-----..."
+  "order_id": 123,        // 必填：已有正整数订单 ID
+  "domains": "example.com",
+  "csr": "-----BEGIN CERTIFICATE REQUEST-----...",
+  "validation_method": "file"
 }
 ```
 
@@ -81,7 +80,8 @@ Content-Type: application/json
   "msg": "success",
   "data": {
     "order_id": 123,
-    "status": "processing"
+    "status": "processing",
+    "csr": "-----BEGIN CERTIFICATE REQUEST-----..."
   }
 }
 ```
@@ -103,7 +103,7 @@ Content-Type: application/json
 {
   "order_id": 123,
   "status": "success",
-  "deployed_at": "2025-01-01 12:00:00"
+  "deployed_at": "2025-01-01T12:00:00Z"
 }
 ```
 
@@ -113,22 +113,19 @@ Content-Type: application/json
 {
   "order_id": 123,
   "status": "failure",
-  "deployed_at": "2025-01-01 12:00:00",
+  "deployed_at": "2025-01-01T12:00:00Z",
   "message": "1/2 绑定失败: www.example.com: netsh 绑定失败"
 }
 ```
 
 ## 证书选择逻辑
 
-从列表中选择最佳证书：
+先过滤出 `status=active` 的候选；没有 active 时立即停止，不部署、不回调、不写配置、不建任务。
+只在 active 子集中选择最佳证书：
 
 ```go
-// 优先级：1. status=active  2. 域名精确匹配  3. 通配符匹配  4. 过期时间最晚
+// 进入排序前已过滤 status=active；优先级：域名精确匹配、通配符匹配、过期时间最晚
 sort.Slice(certs, func(i, j int) bool {
-    // 优先 active 状态
-    if certs[i].Status == "active" && certs[j].Status != "active" {
-        return true
-    }
     // 优先精确匹配（不含通配符）
     // 其次是通配符匹配
     // 按过期时间排序（晚的优先）
@@ -163,20 +160,17 @@ func matchesDomain(pattern, target string) bool {
 client := api.NewClient(baseURL, token)
 ctx := context.Background()
 
-// 查询并选择最佳证书
-cert, err := client.GetCertByDomain(ctx, "example.com")
-
-// 查询证书列表
-certs, err := client.ListCertsByDomain(ctx, "example.com")
-
 // 按订单 ID 查询
 cert, err := client.GetCertByOrderID(ctx, orderID)
 
+// 批量按订单 ID 查询（最多 100 个）
+certs, err := client.ListCertsByQuery(ctx, "123,456")
+
 // 部署回调
-client.Callback(&api.CallbackRequest{
+client.Callback(ctx, &api.CallbackRequest{
     OrderID:    cert.OrderID,
     Status:     "success",
-    DeployedAt: time.Now().Format("2006-01-02 15:04:05"),
+    DeployedAt: time.Now().Format(time.RFC3339),
 })
 ```
 
@@ -193,7 +187,8 @@ Windows 平台以 DPAPI 机器作用域加密的 `encrypted_token` 替代 spec �
       "domain": "example.com",
       "domains": ["example.com", "www.example.com"],
       "order_id": 123,
-      "use_local_key": false,
+      "renew_mode": "pull",
+      "validation_method": "",
       "enabled": true,
       "api": {
         "url": "https://manager.example.com",
@@ -201,9 +196,10 @@ Windows 平台以 DPAPI 机器作用域加密的 `encrypted_token` 替代 spec �
       }
     }
   ],
-  "renew_days_local": 15,
-  "renew_days_fetch": 13,
-  "check_interval": 6
+  "schedule": {
+    "renew_mode": "pull",
+    "renew_before_days": 14
+  }
 }
 ```
 
@@ -212,49 +208,56 @@ Windows 平台以 DPAPI 机器作用域加密的 `encrypted_token` 替代 spec �
 | `domain` | 主域名（common_name） |
 | `domains` | SAN 域名列表 |
 | `order_id` | 订单 ID |
-| `use_local_key` | 本机提交模式（true）或自动签发模式（false） |
+| `renew_mode` | `local` / `pull`；空值继承全局 `schedule.renew_mode` |
+| `validation_method` | local 模式验证方式：`file` / `delegation` |
 | `api.url` | 证书级部署接口地址 |
 | `api.encrypted_token` | 证书级 Token，DPAPI 机器作用域密文（`GetToken()` 解密，禁止直读） |
-| `renew_days_local` | 本机提交：到期前多少天发起续签（默认 15，需 > 服务端 14 天） |
-| `renew_days_fetch` | 自动签发：到期前多少天开始拉取（默认 13，需 < 服务端 14 天） |
-| `check_interval` | 定时检测间隔（小时，默认 6） |
+| `schedule.renew_before_days` | 服务端下发的提前续签天数，默认 14，上限 30 |
 
 ## 部署模式
 
-### 自动签发模式（UseLocalKey = false，默认）
+### Pull 模式（默认）
 
 ```
 查询 OrderID 对应证书
 ├─ 失败 → 跳过（下次重试）
-├─ status != active → 跳过
-├─ 剩余天数 > RenewDays(13) → 跳过，未到续签时间
-└─ 剩余天数 <= RenewDays(13) → 拉取 API 私钥 + 证书 → 部署
+├─ status 属等待/未知类 → 只 GET，等待下轮
+├─ status 属终态/链异常 → 记录 last_order_status，状态变化时告警
+├─ 剩余天数 > renew_before_days → 健康跳过
+└─ 剩余天数 <= renew_before_days → 拉取 API 私钥 + 证书 → 部署
 ```
 
-**设计意图**：到期前 13 天开始拉取新证书。
-
-### 本机提交模式（UseLocalKey = true）
+### Local 模式
 
 ```
-检查 OrderID > 0?
-├─ 是 → 查询订单状态
-│   ├─ processing → 跳过，等待签发
-│   ├─ active → 检查续签时机
-│   │   ├─ 剩余天数 > RenewDays(13) → 跳过，未到续签时间
-│   │   └─ 剩余天数 <= RenewDays(13) → 检查本地私钥
-│   │       ├─ 有私钥且匹配 → 部署证书
-│   │       ├─ 有私钥不匹配 → 删除私钥，生成新 CSR 提交
-│   │       └─ 无私钥但 API 返回私钥 → 使用 API 私钥部署
-│   └─ 查询失败 → 生成新 CSR 提交
-└─ 否 → 生成新 CSR 提交
+检查 OrderID 为正整数
+├─ 否 → 零网络请求，保留既有 pending/元数据，提示重新 setup 选择已有订单
+└─ 是 → 查询订单状态
+    ├─ 等待/未知状态 → 归一 processing，只 GET 等待
+    ├─ active 且存在 pending/CSR metadata
+    │   ├─ 服务端 CSR 与 pending 私钥配对 → 本机提交已收敛，校验证书后部署
+    │   └─ 不配对 → 清理旧 pending/metadata；先尝试 API/正式本地私钥部署当前 active 证书，
+    │       全部不可用时才按门禁建立新的 CSR 尝试并重新计数
+    ├─ active 且无签发在途 → 检查续签时机
+    │   ├─ 剩余天数 > renew_before_days → 健康跳过
+    │   └─ 剩余天数 <= renew_before_days → 生成新 CSR 提交
+    └─ 终态/链异常 → 记录展示状态，停止本轮并继续每日查询自愈
 ```
-
-**设计意图**：到期前 13 天发起续签，确保使用本地私钥。
 
 **尝试上限**：签发尝试（CSR 提交，`issue_retry_count`）与部署尝试
-（`deploy_attempt_count`）分别计数，各自 `>= 10` 时进入 `CAPPED` 并等待人工处理；
-新逻辑意图必须先持久化再执行外部动作，崩溃恢复重放、传输层重试和 `processing`
-查询不重复计数。全部绑定成功后才清零两类计数；部分失败保留部署状态继续收敛。
+（`deploy_attempt_count`）分别计数；`>= 10` 只阻止建立下一次新尝试，已持久化或已被服务端
+接受的第 10 次尝试仍可查询、部署和崩溃恢复。新逻辑意图必须先持久化再执行外部动作；
+query-first 恢复和 `processing` 查询不重复计数。任一绑定成功即接纳新证书和私钥并清零证书级
+签发/部署计数；任一绑定失败时订单级结果仍为 failure，失败绑定使用独立的最多 10 次重试状态，
+不得把整张证书转入 CAPPED。local 新 CSR 必须先原子保存 pending 私钥和 CSR metadata，再递增并
+持久化本次计数，之后才允许 POST；POST 结果不确定时保留这些状态，下轮只 GET，不重放 POST。
+
+纯查询不计数，另由 `no_progress_since` 提供 14 天绝对边界；时间戳损坏、回拨或跨度超过
+60 天时重新锚定。触顶进入 `CAPPED(capped_phase=stalled)` 并清理 pending 私钥、CSR 和验证文件。
+Windows 端以平台字段 `pending_cleanup` 记录“状态已落盘、敏感产物尚待删除”的恢复窗口；
+该标记及停更状态下残留的验证文件记录会在任何 API 请求和终态门禁前优先收敛。
+active 已签发但无可用配对私钥时，不复用旧 CSR 意图：先清理旧 pending/metadata，再按续签窗口、
+安全余量和计数门禁决定是否建立一个新的逻辑尝试；新尝试必须重新计数。
 
 **重要**：重新签发（reissue）不会改变 OrderID，只有续费（renew）才会生成新 OrderID。
 
@@ -281,12 +284,20 @@ Windows 平台以 DPAPI 机器作用域加密的 `encrypted_token` 替代 spec �
 
 ### 分散延迟（deploy --all）
 
-CLI `deploy --all` 传 `scatterDelay=true`，在证书之间插入随机延迟以分散 API 请求压力；
+CLI `deploy --all` 传 `ScatterDelay=true`，在实际发起 API 请求的证书之间插入随机延迟；
 GUI 模式传 `false` 不延迟。区间由启用证书数量 N 决定（`calcSpreadDelay`）：
 
 - 常量：`spreadMin=5`、`spreadMax=120`、`spreadTotalMax=600`（秒）
 - 每证书延迟区间上界 = `clamp(600/N, 5, 120)`
-- 第一张证书不延迟，其后每张在区间内随机延迟
+- 第一张实际发请求的证书不延迟，其后每张在区间内随机延迟；本地门禁或 token 黑名单零请求跳过
+  不占延迟
+
+### 轮内凭据组阻断
+
+`rate_limited`、`token_missing`、`token_invalid`、`token_disabled`、
+`account_disabled`、`ip_not_allowed` 会按 `(url, token)` 阻断本轮后续请求。黑名单只在内存
+活一轮，不落盘；其他 API 地址或 Token 照常运行。轮末只汇总一条 warning，错误文本必须保留
+`error_code`，限流时同时保留 `retry_after`。
 
 ### 运行报告消费
 
@@ -300,12 +311,15 @@ GUI 模式传 `false` 不延迟。区间由启用证书数量 N 决定（`calcSp
 
 ### 部署成功后回填配置
 
-订单内全部绑定成功且 API 返回证书内容非空时，才完成生命周期并回填配置：
+订单内任一绑定成功且 API 返回证书内容非空时，即接纳新证书和私钥、完成证书级生命周期并回填配置；
+失败绑定另行持久化和有限重试，订单级回调仍为 failure：
 
 - `updateCertDomains`：`cert.ExtractDomainsFromPEM` 从证书 PEM 提取 CN+SAN，覆盖
   `Domain`/`Domains`；提取失败保持原值（既有值来自 API 查询写入）。
 - `updateCertSerial`：回填证书序列号到 `Metadata.CertSerial`。
 - 续费导致 `order_id` 变化时同步更新配置中的订单号。
+- 连续两轮全部绑定成功但证书序列号未变时，递增 `unchanged_cert_rounds` 并把第二轮起改判为
+  failure；该计数不随部署成功清零，只在证书身份真正变化时清零。
 
 ### 订单级聚合回调
 
@@ -321,40 +335,29 @@ GUI 模式传 `false` 不延迟。区间由启用证书数量 N 决定（`calcSp
 |------|------|
 | `active` | 有效，可部署 |
 | `processing` | CSR 已提交，等待 CA 签发 |
-| `pending` | 等待提交 |
-| `approving` | `processing` 与 `active` 之间的短暂中间态 |
-| `unpaid` | 未支付 |
+| `pending` / `approving` | 在途等待，归一 processing |
+| `unpaid` / `cancelling` | 可自愈中间态，只 GET，不主动 POST |
+| `failed` / `cancelled` / `revoked` / `expired` | 真终态，状态变化时告警 |
+| `renewed` / `reissued` | 续费链异常，按终态告警 |
+| 未知新增值 | 保守当在途等待，由无进展时限兜底 |
 
-客户端将 `pending` / `processing` / `approving` 统一归一为 `processing` 继续等待
-（deploy-spec §2.4）；`active` 之后的状态均为订单终态，持久化后停止自动动作。
+服务端值只写 `metadata.last_order_status`；`last_issue_state` 只表达有无在途 CSR，不能混入订单终态。
 
 ## 重试机制
 
 ### HTTP 层重试（立即）
 
-```go
-const maxRetries = 3
-
-func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
-    for attempt := 0; attempt <= maxRetries; attempt++ {
-        if attempt > 0 {
-            time.Sleep(time.Duration(attempt) * time.Second) // 1s, 2s, 3s
-        }
-        resp, err := c.HTTPClient.Do(req)
-        if err == nil {
-            return resp, nil
-        }
-    }
-    return nil, fmt.Errorf("请求失败（重试 %d 次）", maxRetries)
-}
-```
-
-- 仅对**网络错误**重试，业务错误不重试
-- 重试间隔递增：1秒、2秒、3秒
+- GET、部署回调和自动重签开关遇**网络错误或 HTTP 5xx**最多重试 3 次，间隔
+  1 秒、2 秒、4 秒；HTTP 200 且 `code != 1` 的业务拒绝不重试
+- 携带非空 `csr` 的提交 POST 是例外：请求一旦可能送达，遇超时、断连、HTTP 5xx、
+  响应读取或解析失败均不做传输层重试。保留当前 pending 私钥、CSR metadata 和本次计数，
+  下一轮先 GET，再用服务端 CSR 公钥与 pending 私钥判断提交归属
+- 服务端按 `order_id` 幂等互斥用于约束并发竞态，不作为客户端立即重放 CSR POST 的理由
 
 ### HTTPS 强制
 
-`api.NewClient` 会检查 BaseURL 是否使用 HTTPS。非 HTTPS 且非 localhost 的 URL 会输出警告日志。生产环境应始终使用 HTTPS 传输 Token 和证书私钥。
+`api.NewClient` 会检查 BaseURL 是否使用 HTTPS并执行 SSRF 校验。非 HTTPS 且非 localhost、
+私网、链路本地、未指定或云元数据地址会在请求前直接拒绝。
 
 ### 响应体大小限制
 
@@ -371,7 +374,10 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 | 失败点 | HTTP 层 | 定时任务层 |
 |--------|---------|-----------|
 | 查询订单失败 | 3次重试 | 下次任务重新查询 |
-| 提交 CSR 失败 | 3次重试 | 下次任务重新提交 |
+| 提交 CSR 传输结果不确定 | 不重试 | 保留 pending 私钥/CSR metadata；下次只查询并比较服务端 CSR，不重放 POST |
+| 提交 CSR 首次确定业务拒绝 | 不重试 | 清理本轮新建 pending，按 error_code 停止本轮 |
 | CSR 等待签发 | - | 下次任务查询状态 |
-| 私钥不匹配 | - | 删除私钥，重新生成 CSR |
+| active 的服务端 CSR 与 pending 不配对 | - | 清理旧 pending/metadata；先尝试 API/正式本地私钥，全部不可用时才按门禁建立新逻辑尝试 |
+| 在途状态的服务端 CSR 与 pending 不配对 | - | 清理本机 pending/metadata，只 GET 跟随服务端当前动作 |
+| active 且已无任何可用配对私钥 | - | 门禁允许时建立一次新签发意图并计数 |
 | 部署失败 | - | 下次任务重新部署 |

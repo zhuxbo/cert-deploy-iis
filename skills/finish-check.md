@@ -63,6 +63,53 @@ Windows 发布/CI 环境：
 go test -count=1 ./...
 ```
 
+### 本机 Windows VM 运行验证
+
+项目根 `.env` 可保存当前开发机专用的 SSH 连接参数；该文件必须保持忽略，不得提交：
+
+```dotenv
+SSLCTLW_WINDOWS_SSH_KEY=/absolute/path/to/private-key
+SSLCTLW_WINDOWS_SSH_USER=Administrator
+SSLCTLW_WINDOWS_SSH_HOST=192.0.2.10
+SSLCTLW_WINDOWS_SSH_PORT=22
+```
+
+从 macOS 向长期使用的 Windows VM 发送当前工作区时，使用独立临时目录，禁止覆盖远端已有项目；
+打包须禁用 macOS 扩展属性，避免 `._*` AppleDouble 文件令治理检查误判：
+
+```bash
+set -a
+. ./.env
+set +a
+
+: "${SSLCTLW_WINDOWS_SSH_KEY:?}"
+: "${SSLCTLW_WINDOWS_SSH_USER:?}"
+: "${SSLCTLW_WINDOWS_SSH_HOST:?}"
+: "${SSLCTLW_WINDOWS_SSH_PORT:?}"
+
+target="${SSLCTLW_WINDOWS_SSH_USER}@${SSLCTLW_WINDOWS_SSH_HOST}"
+snapshot="/tmp/sslctlw-windows-validation.tar.gz"
+remote_dir="C:/Users/${SSLCTLW_WINDOWS_SSH_USER}/sslctlw-validation-$(date +%Y%m%d-%H%M%S)"
+
+COPYFILE_DISABLE=1 tar -czf "$snapshot" --exclude=.git --exclude=.env .
+ssh -i "$SSLCTLW_WINDOWS_SSH_KEY" -p "$SSLCTLW_WINDOWS_SSH_PORT" -o BatchMode=yes "$target" "mkdir $remote_dir"
+scp -i "$SSLCTLW_WINDOWS_SSH_KEY" -P "$SSLCTLW_WINDOWS_SSH_PORT" -o BatchMode=yes "$snapshot" "$target:$remote_dir/source.tar.gz"
+```
+
+在远端校验快照 SHA256 后解压，再执行：
+
+```text
+go test -count=1 ./...
+go vet ./...
+go build -o out\sslctlw-windows-amd64.exe .
+go build -ldflags "-X main.version=check-test" -o out\sslctlw-windows-amd64-versioned.exe .
+"C:\Program Files\Git\bin\bash.exe" build/check-governance.sh
+```
+
+默认测试不启用 `integration` build tag。未经用户明确允许，不得运行会修改 IIS、证书存储、绑定或计划
+任务的实机集成测试。验证结束后只删除本轮创建的精确远端临时目录。Windows VM 运行结果可补充本地
+证据，但合并和发布仍须满足下文同一 commit 的 GitHub `windows-latest` 要求。
+
 非 Windows 环境无法运行本仓依赖 windigo/Windows syscall 的测试；编译每个 Windows 测试包，并明确把运行期验证留给 Windows CI：
 
 ```bash

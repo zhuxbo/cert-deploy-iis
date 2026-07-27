@@ -14,7 +14,7 @@ func TestAPIConnection(t *testing.T) {
 	client := api.NewClient(TestAPIBaseURL, TestToken)
 
 	t.Run("ListCerts", func(t *testing.T) {
-		certs, err := client.ListCertsByDomain(context.Background(), "")
+		certs, err := client.ListCertsByQuery(context.Background(), TestOrderQuery)
 		if err != nil {
 			t.Fatalf("获取证书列表失败: %v", err)
 		}
@@ -34,9 +34,8 @@ func TestAPIConnection(t *testing.T) {
 		}
 	})
 
-	t.Run("GetCertByDomain", func(t *testing.T) {
-		// 先获取列表，找一个有效的域名
-		certs, err := client.ListCertsByDomain(context.Background(), "")
+	t.Run("GetCertByOrderID", func(t *testing.T) {
+		certs, err := client.ListCertsByQuery(context.Background(), TestOrderQuery)
 		if err != nil {
 			t.Fatalf("获取证书列表失败: %v", err)
 		}
@@ -45,22 +44,10 @@ func TestAPIConnection(t *testing.T) {
 			t.Skip("没有可用的证书")
 		}
 
-		// 找一个 active 状态的证书
-		var testDomain string
-		for _, c := range certs {
-			if c.Status == "active" && c.Domain() != "" {
-				testDomain = c.Domain()
-				break
-			}
-		}
-
-		if testDomain == "" {
-			t.Skip("没有 active 状态的证书")
-		}
-
-		cert, err := client.GetCertByDomain(context.Background(), testDomain)
+		testOrderID := certs[0].OrderID
+		cert, err := client.GetCertByOrderID(context.Background(), testOrderID)
 		if err != nil {
-			t.Fatalf("按域名获取证书失败: %v", err)
+			t.Fatalf("按订单 ID 获取证书失败: %v", err)
 		}
 
 		t.Logf("获取到证书: OrderID=%d, Domain=%s", cert.OrderID, cert.Domain())
@@ -76,7 +63,7 @@ func TestAPIConnection(t *testing.T) {
 
 	t.Run("GetCertByOrderID", func(t *testing.T) {
 		// 先获取列表，找一个有效的订单 ID
-		certs, err := client.ListCertsByDomain(context.Background(), "")
+		certs, err := client.ListCertsByQuery(context.Background(), TestOrderQuery)
 		if err != nil {
 			t.Fatalf("获取证书列表失败: %v", err)
 		}
@@ -105,7 +92,7 @@ func TestAPIConnection(t *testing.T) {
 func TestAPIValidation(t *testing.T) {
 	t.Run("EmptyBaseURL", func(t *testing.T) {
 		client := api.NewClient("", TestToken)
-		_, err := client.ListCertsByDomain(context.Background(), "")
+		_, err := client.ListCertsByQuery(context.Background(), "1")
 		if err == nil {
 			t.Error("期望返回错误，但没有")
 		}
@@ -114,7 +101,7 @@ func TestAPIValidation(t *testing.T) {
 
 	t.Run("EmptyToken", func(t *testing.T) {
 		client := api.NewClient(TestAPIBaseURL, "")
-		_, err := client.ListCertsByDomain(context.Background(), "")
+		_, err := client.ListCertsByQuery(context.Background(), "1")
 		if err == nil {
 			t.Error("期望返回错误，但没有")
 		}
@@ -123,7 +110,7 @@ func TestAPIValidation(t *testing.T) {
 
 	t.Run("InvalidToken", func(t *testing.T) {
 		client := api.NewClient(TestAPIBaseURL, "invalid-token")
-		_, err := client.ListCertsByDomain(context.Background(), "")
+		_, err := client.ListCertsByQuery(context.Background(), "1")
 		if err == nil {
 			t.Error("期望返回错误，但没有")
 		}

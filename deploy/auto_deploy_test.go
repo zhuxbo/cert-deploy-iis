@@ -1192,6 +1192,7 @@ func TestHandleLocalKeyMode(t *testing.T) {
 	t.Run("异步签发active忽略新证书续签窗口并使用pending私钥", func(t *testing.T) {
 		d := NewMockDeployer()
 		certPEM, pendingKey := genSelfSignedPair(t, "example.com")
+		pendingCSR := genCSRForTestKey(t, "example.com", pendingKey)
 		mockClient := NewMockClient()
 		mockClient.GetCertByOrderIDFunc = func(ctx context.Context, orderID int) (*api.CertData, error) {
 			return &api.CertData{
@@ -1201,6 +1202,7 @@ func TestHandleLocalKeyMode(t *testing.T) {
 				ExpiresAt:   time.Now().AddDate(1, 0, 0).Format("2006-01-02"),
 				Certificate: certPEM,
 				CACert:      testCACertPEM,
+				CSR:         pendingCSR,
 			}, nil
 		}
 		store := d.Store.(*MockOrderStore)
@@ -1212,7 +1214,11 @@ func TestHandleLocalKeyMode(t *testing.T) {
 			CertName: "example.com-100",
 			OrderID:  100,
 			Domain:   "example.com",
-			Metadata: config.CertMetadata{LastIssueState: "processing"},
+			Metadata: config.CertMetadata{
+				LastIssueState: "processing",
+				LastCSRHash:    mustCSRHash(t, pendingCSR),
+				CSRSubmittedAt: "2026-07-01T00:00:00Z",
+			},
 		}
 		certData, privateKey, reason, err := handleLocalKeyMode(d, mockClient, certCfg, 30)
 		if err != nil {
@@ -1229,9 +1235,12 @@ func TestHandleLocalKeyMode(t *testing.T) {
 		}
 	})
 
-	t.Run("metadata缺失但pending存在时仍恢复异步active", func(t *testing.T) {
+	t.Run("metadata缺失的pending按孤儿清理后建立新尝试", func(t *testing.T) {
 		d := NewMockDeployer()
 		certPEM, pendingKey := genSelfSignedPair(t, "example.com")
+		pendingExists := true
+		removed := 0
+		submitted := 0
 		mockClient := NewMockClient()
 		mockClient.GetCertByOrderIDFunc = func(ctx context.Context, orderID int) (*api.CertData, error) {
 			return &api.CertData{
@@ -1243,18 +1252,31 @@ func TestHandleLocalKeyMode(t *testing.T) {
 				CACert:      testCACertPEM,
 			}, nil
 		}
+		mockClient.SubmitCSRFunc = func(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error) {
+			submitted++
+			return &api.UpdateResponse{Code: 1, Data: api.UpdateResponseData{CertData: api.CertData{
+				OrderID: req.OrderID, Status: config.OrderStatusProcessing,
+			}}}, nil
+		}
 		store := d.Store.(*MockOrderStore)
 		store.HasPrivateKeyFunc = func(orderID int) bool { return false }
-		store.HasPendingPrivateKeyFunc = func(certName string) bool { return true }
+		store.HasPendingPrivateKeyFunc = func(certName string) bool { return pendingExists }
 		store.LoadPendingPrivateKeyFunc = func(certName string) (string, error) { return pendingKey, nil }
+		store.RemovePendingArtifactsFunc = func(string) error {
+			removed++
+			pendingExists = false
+			return nil
+		}
 		certCfg := &config.CertConfig{CertName: "example.com-100", OrderID: 100, Domain: "example.com"}
 
-		certData, privateKey, reason, err := handleLocalKeyMode(d, mockClient, certCfg, 30)
+		certData, privateKey, reason, err := handleLocalKeyMode(d, mockClient, certCfg, 30, func() error { return nil })
 		if err != nil {
 			t.Fatalf("handleLocalKeyMode() error = %v", err)
 		}
-		if certData == nil || privateKey != pendingKey || reason != "" {
-			t.Fatalf("pending 恢复失败: cert=%+v keyMatch=%v reason=%q", certData, privateKey == pendingKey, reason)
+		if certData != nil || privateKey != "" || reason != "CSR 已提交，等待签发" ||
+			removed != 1 || submitted != 1 {
+			t.Fatalf("孤儿恢复失败: cert=%+v key=%q reason=%q removed=%d submitted=%d",
+				certData, privateKey, reason, removed, submitted)
 		}
 	})
 
@@ -1414,7 +1436,7 @@ func TestSubmitNewCSR(t *testing.T) {
 		}
 
 		certCfg := &config.CertConfig{
-			OrderID: 0,
+			OrderID: 100,
 			Domain:  "example.com",
 			Domains: []string{"example.com"},
 		}
@@ -1475,7 +1497,7 @@ func TestSubmitNewCSR(t *testing.T) {
 		}
 
 		certCfg := &config.CertConfig{
-			OrderID: 0,
+			OrderID: 100,
 			Domain:  "example.com",
 			Domains: []string{"example.com"},
 		}
@@ -1491,9 +1513,12 @@ func TestSubmitNewCSR(t *testing.T) {
 		if certCfg.Metadata.LastIssueState != config.IssueStateProcessing {
 			t.Fatalf("请求结果不确定时应保留在途 processing 状态，got %q", certCfg.Metadata.LastIssueState)
 		}
+		if !certCfg.Metadata.ResubmitRequired {
+			t.Fatal("请求结果不确定时应保留幂等恢复标记")
+		}
 	})
 
-	t.Run("已有pending时重放同一CSR且不覆盖私钥", func(t *testing.T) {
+	t.Run("已有已落盘pending时仅等待查询且不覆盖私钥", func(t *testing.T) {
 		d := NewMockDeployer()
 		store := d.Store.(*MockOrderStore)
 		pendingKey, pendingCSR, err := cert.GenerateCSR("example.com")
@@ -1509,26 +1534,27 @@ func TestSubmitNewCSR(t *testing.T) {
 		}
 		mockClient := NewMockClient()
 		mockClient.SubmitCSRFunc = func(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error) {
-			if req.CSR != pendingCSR {
-				t.Fatalf("应重放原 CSR，got %q", req.CSR)
-			}
-			return &api.UpdateResponse{Code: 1, Data: api.UpdateResponseData{CertData: api.CertData{
-				OrderID: 100,
-				Status:  "processing",
-			}}}, nil
+			t.Fatal("已落盘 pending 不得重放 POST")
+			return nil, nil
 		}
-		certCfg := &config.CertConfig{CertName: "example.com-100", OrderID: 100, Domain: "example.com"}
+		certCfg := &config.CertConfig{
+			CertName: "example.com-100", OrderID: 100, Domain: "example.com",
+			Metadata: config.CertMetadata{
+				CSRSubmittedAt: "2026-07-01T00:00:00Z",
+				LastCSRHash:    mustCSRHash(t, pendingCSR),
+			},
+		}
 
 		_, _, reason, err := submitNewCSR(d, mockClient, certCfg)
 		if err != nil {
 			t.Fatalf("submitNewCSR() error = %v", err)
 		}
-		if reason != "CSR 已提交，等待签发" {
-			t.Fatalf("应返回等待签发提示，got %q", reason)
+		if !strings.Contains(reason, "仅查询订单") {
+			t.Fatalf("应返回 query-first 提示，got %q", reason)
 		}
 	})
 
-	t.Run("网络失败后再次调用重放相同CSR和私钥对", func(t *testing.T) {
+	t.Run("网络失败后再次调用只等待查询确认", func(t *testing.T) {
 		d := NewMockDeployer()
 		store := d.Store.(*MockOrderStore)
 		var pending bool
@@ -1550,16 +1576,11 @@ func TestSubmitNewCSR(t *testing.T) {
 		store.LoadPendingPrivateKeyFunc = func(certName string) (string, error) { return storedKey, nil }
 
 		mockClient := NewMockClient()
-		var firstCSR string
 		calls := 0
 		mockClient.SubmitCSRFunc = func(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error) {
 			calls++
 			if calls == 1 {
-				firstCSR = req.CSR
 				return nil, errors.New("connection reset")
-			}
-			if req.CSR != firstCSR {
-				t.Fatalf("重试必须重放同一 CSR")
 			}
 			return &api.UpdateResponse{Code: 1, Data: api.UpdateResponseData{CertData: api.CertData{
 				OrderID: 200,
@@ -1572,38 +1593,34 @@ func TestSubmitNewCSR(t *testing.T) {
 			t.Fatal("首次网络失败应返回错误")
 		}
 		if _, _, reason, err := submitNewCSR(d, mockClient, certCfg); err != nil {
-			t.Fatalf("第二次重放失败: %v", err)
-		} else if reason != "CSR 已提交，等待签发" {
-			t.Fatalf("重放成功提示不正确: %q", reason)
+			t.Fatalf("第二次 query-first 收敛失败: %v", err)
+		} else if !strings.Contains(reason, "仅查询订单") {
+			t.Fatalf("等待查询提示不正确: %q", reason)
 		}
-		if calls != 2 || saveKeyCount != 1 {
-			t.Fatalf("应提交两次但只生成保存一次私钥，calls=%d saveKeyCount=%d", calls, saveKeyCount)
+		if calls != 1 || saveKeyCount != 1 {
+			t.Fatalf("CSR POST 只能发送一次且只保存一次私钥，calls=%d saveKeyCount=%d", calls, saveKeyCount)
 		}
 	})
 
-	t.Run("pending CSR与私钥不匹配时拒绝重放", func(t *testing.T) {
+	t.Run("未落盘pending视为未提交孤儿并清理", func(t *testing.T) {
 		d := NewMockDeployer()
 		store := d.Store.(*MockOrderStore)
-		keyPEM, _, err := cert.GenerateCSR("example.com")
-		if err != nil {
-			t.Fatalf("GenerateCSR(key) error = %v", err)
-		}
-		_, otherCSR, err := cert.GenerateCSR("other.example.com")
-		if err != nil {
-			t.Fatalf("GenerateCSR(csr) error = %v", err)
-		}
+		removed := 0
 		store.HasPendingPrivateKeyFunc = func(certName string) bool { return true }
-		store.LoadPendingCSRFunc = func(certName string) (string, error) { return otherCSR, nil }
-		store.LoadPendingPrivateKeyFunc = func(certName string) (string, error) { return keyPEM, nil }
+		store.RemovePendingArtifactsFunc = func(string) error { removed++; return nil }
 		mockClient := NewMockClient()
 		mockClient.SubmitCSRFunc = func(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error) {
-			t.Fatal("不匹配的 CSR 与私钥不得提交")
-			return nil, nil
+			return &api.UpdateResponse{Code: 1, Data: api.UpdateResponseData{CertData: api.CertData{
+				OrderID: 100, Status: "processing",
+			}}}, nil
 		}
 
 		certCfg := &config.CertConfig{CertName: "example.com-100", OrderID: 100, Domain: "example.com"}
-		if _, _, _, err := submitNewCSR(d, mockClient, certCfg); err == nil || !strings.Contains(err.Error(), "不匹配") {
-			t.Fatalf("应拒绝不匹配的 pending CSR/私钥，got %v", err)
+		if _, _, _, err := submitNewCSR(d, mockClient, certCfg); err != nil {
+			t.Fatalf("清理孤儿后建立新意图失败: %v", err)
+		}
+		if removed != 1 {
+			t.Fatalf("未落盘 pending 应清理一次，got %d", removed)
 		}
 	})
 }

@@ -46,6 +46,25 @@ func genSelfSignedPair(t *testing.T, cn string) (certPEM, keyPEM string) {
 	return certPEM, keyPEM
 }
 
+func genCSRForTestKey(t *testing.T, cn, keyPEM string) string {
+	t.Helper()
+	block, _ := pem.Decode([]byte(keyPEM))
+	if block == nil {
+		t.Fatal("解析测试私钥 PEM 失败")
+	}
+	key, err := x509.ParseECPrivateKey(block.Bytes)
+	if err != nil {
+		t.Fatalf("解析测试 EC 私钥失败: %v", err)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: cn},
+	}, key)
+	if err != nil {
+		t.Fatalf("生成测试 CSR 失败: %v", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
+}
+
 // callbackRecorder 线程安全的回调记录器（sendCallback 为异步 goroutine）
 type callbackRecorder struct {
 	mu   sync.Mutex

@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -220,6 +221,26 @@ func TestVerifyCSRKeyPair(t *testing.T) {
 	badCSR := string(pem.EncodeToMemory(block))
 	if _, err := VerifyCSRKeyPair(badCSR, keyPEM); err == nil {
 		t.Fatal("签名被篡改的 CSR 应被拒绝")
+	}
+}
+
+func TestVerifyCSRIdentityUsesDERHashKeyAndCN(t *testing.T) {
+	keyPEM, csrPEM, err := GenerateCSR("例子.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := CSRDERHash(csrPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 改变 PEM 包裹标签后的空白不应改变 DER 标识。
+	reencoded := strings.Replace(csrPEM, "\n", "\r\n", 1)
+	matched, err := VerifyCSRIdentity(reencoded, keyPEM, hash, "xn--fsqu00a.com")
+	if err != nil || !matched {
+		t.Fatalf("同一 CSR 的 DER、公钥和 CN 应匹配: matched=%v err=%v", matched, err)
+	}
+	if matched, err = VerifyCSRIdentity(csrPEM, keyPEM, hash, "other.example.com"); err != nil || matched {
+		t.Fatalf("CN 不匹配必须拒绝: matched=%v err=%v", matched, err)
 	}
 }
 

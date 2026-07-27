@@ -36,6 +36,8 @@ var migrateRules = []migrateRule{
 	{actionMove, "certificates[]", "expires_at", "metadata.cert_expires_at"},
 	// serial_number → metadata.cert_serial
 	{actionMove, "certificates[]", "serial_number", "metadata.cert_serial"},
+	// 旧平台扩展名 cap_phase → 公共字段 capped_phase
+	{actionRename, "certificates[].metadata", "cap_phase", "capped_phase"},
 }
 
 // customMigrations 自定义迁移函数（声明式规则无法表达的转换）
@@ -167,7 +169,7 @@ func migrateLegacyCapped(raw map[string]interface{}) bool {
 			continue
 		}
 		meta["last_issue_state"] = IssueStateCapped
-		meta["cap_phase"] = CapPhaseLegacy
+		meta["capped_phase"] = CapPhaseLegacy
 		changed = true
 	}
 	return changed

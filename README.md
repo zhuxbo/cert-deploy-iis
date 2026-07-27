@@ -4,7 +4,7 @@
 
 ## 功能
 
-- 一键部署：`sslctlw setup --url <url> --token <token> [--order <ids>]`
+- 一键部署：`sslctlw setup --url <url> --token <token> --order <ids>`
 - 扫描 IIS 站点和绑定信息
 - 自动部署和续签证书
 - 查看已安装的 SSL 证书
@@ -38,7 +38,6 @@ irm https://release.example.com/sslctlw/install.ps1 -OutFile install.ps1
 sslctlw [--debug] <command> [options]
 
 # 一键部署
-sslctlw setup --url <url> --token <token>
 sslctlw setup --url <url> --token <token> --order <id>
 sslctlw setup --url <url> --token <token> --order "123,456"
 
@@ -90,9 +89,8 @@ sslctlw help
 
 | 方法 | 路径 | 功能 |
 |------|------|------|
-| GET | `/api/deploy` | 获取证书列表 |
-| GET | `/api/deploy?query=id1,id2` | 批量查询证书 |
-| GET | `/api/deploy?order_id=123` | 按订单查询 |
+| GET | `/api/deploy?order=123` | 按订单查询 |
+| GET | `/api/deploy?order=123,456` | 批量查询证书（最多 100 个，不分页） |
 | POST | `/api/deploy` | 提交 CSR（本机提交模式） |
 | POST | `/api/deploy/callback` | 部署回调 |
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,17 +19,22 @@ import (
 	"sslctlw/util"
 )
 
-// APIResponse API 通用响应（分页格式）
+// APIResponse API 通用响应（deploy-spec §2.2/§2.3）
 type APIResponse struct {
-	Code int    `json:"code"`
-	Msg  string `json:"msg"`
-	Data struct {
+	Code   int       `json:"code"`
+	Msg    string    `json:"msg"`
+	Errors APIErrors `json:"errors"`
+	Data   struct {
 		Data            []CertData `json:"data"`
-		CurrentPage     int        `json:"page"`
-		PageSize        int        `json:"page_size"`
-		Total           int        `json:"total"`
 		RenewBeforeDays int        `json:"renew_before_days"` // 服务端配置的提前续签天数
 	} `json:"data"`
+}
+
+// APIErrors 是 code != 1 时服务端返回的机器可读分类。
+// 只有 error_code 非空才参与分类；Laravel 参数校验袋等其他 errors 形态保持未分类。
+type APIErrors struct {
+	ErrorCode  string `json:"error_code"`
+	RetryAfter int    `json:"retry_after"`
 }
 
 // APIError API 错误
@@ -37,6 +43,58 @@ type APIError struct {
 	Code       int
 	Message    string
 	RawBody    string
+	ErrorCode  string
+	RetryAfter int
+}
+
+// 服务端下发的 error_code 取值（deploy-spec §2.2）。
+const (
+	ErrorCodeRateLimited                 = "rate_limited"
+	ErrorCodeTokenMissing                = "token_missing"
+	ErrorCodeTokenInvalid                = "token_invalid"
+	ErrorCodeTokenDisabled               = "token_disabled"
+	ErrorCodeAccountDisabled             = "account_disabled"
+	ErrorCodeIPNotAllowed                = "ip_not_allowed"
+	ErrorCodeInvalidOrder                = "invalid_order"
+	ErrorCodeOrderNotFound               = "order_not_found"
+	ErrorCodeCertNotFound                = "cert_not_found"
+	ErrorCodeOrderInProgress             = "order_in_progress"
+	ErrorCodeValidationMethodUnsupported = "validation_method_unsupported"
+	ErrorCodeAutoRenewDisabled           = "auto_renew_disabled"
+	ErrorCodeInsufficientBalance         = "insufficient_balance"
+)
+
+// IsAuthBlockErrorCode 判断是否为同一 (url, token) 整批共通的失败。
+// 必须正面列举；未知新增值保持未分类，不能连带阻断整批。
+func IsAuthBlockErrorCode(code string) bool {
+	switch code {
+	case ErrorCodeRateLimited,
+		ErrorCodeTokenMissing,
+		ErrorCodeTokenInvalid,
+		ErrorCodeTokenDisabled,
+		ErrorCodeAccountDisabled,
+		ErrorCodeIPNotAllowed:
+		return true
+	}
+	return false
+}
+
+// ErrorCodeOf 提取结构化失败分类。
+func ErrorCodeOf(err error) string {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode
+	}
+	return ""
+}
+
+// RetryAfterOf 提取 rate_limited 的保守等待秒数。
+func RetryAfterOf(err error) int {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.RetryAfter
+	}
+	return 0
 }
 
 // FileValidation 文件验证信息
@@ -50,6 +108,7 @@ type CertData struct {
 	OrderID     int             `json:"order_id"`
 	Domains     string          `json:"domains"`        // alternative_names (逗号分隔)
 	Status      string          `json:"status"`         // active, processing, pending, unpaid
+	CSR         string          `json:"csr"`            // 当前签发动作使用的 CSR（local 恢复归属判断）
 	Certificate string          `json:"certificate"`    // 证书内容
 	PrivateKey  string          `json:"private_key"`    // 私钥
 	CACert      string          `json:"ca_certificate"` // 中间证书
@@ -226,12 +285,8 @@ func (c *Client) doWithRetry(ctx context.Context, req *http.Request) (*http.Resp
 	}
 
 	var lastErr error
-
-	// 将 context 添加到请求
 	req = req.WithContext(ctx)
-
 	for attempt := 0; attempt <= MaxRetries; attempt++ {
-		// 检查 context 是否已取消
 		select {
 		case <-ctx.Done():
 			return nil, fmt.Errorf("请求被取消: %w", ctx.Err())
@@ -239,13 +294,11 @@ func (c *Client) doWithRetry(ctx context.Context, req *http.Request) (*http.Resp
 		}
 
 		if attempt > 0 {
-			// 带 context 的休眠
 			select {
 			case <-ctx.Done():
 				return nil, fmt.Errorf("请求被取消: %w", ctx.Err())
 			case <-time.After(time.Duration(1<<uint(attempt-1)) * time.Second):
 			}
-			// 重置 Body（如果有）
 			if req.GetBody != nil {
 				body, err := req.GetBody()
 				if err != nil {
@@ -257,55 +310,77 @@ func (c *Client) doWithRetry(ctx context.Context, req *http.Request) (*http.Resp
 
 		resp, err := c.HTTPClient.Do(req)
 		if err != nil {
-			// 检查是否因为 context 取消
 			if ctx.Err() != nil {
 				return nil, fmt.Errorf("请求被取消: %w", ctx.Err())
 			}
 			lastErr = err
 			continue
 		}
-
-		// 5xx 错误时关闭响应体并重试
 		if resp.StatusCode >= 500 && attempt < MaxRetries {
-			_, _ = io.Copy(io.Discard, resp.Body) // 忽略丢弃数据时的错误
+			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
 			continue
 		}
-
 		return resp, nil
 	}
-
 	return nil, fmt.Errorf("请求失败（重试 %d 次）: %w", MaxRetries, lastErr)
+}
+
+// doWithoutRetry 只发送一次请求。用于不能安全重放的 CSR POST。
+func (c *Client) doWithoutRetry(ctx context.Context, req *http.Request) (*http.Response, error) {
+	if c.insecureURL {
+		if c.insecureReason != "" {
+			return nil, fmt.Errorf("%s: %s", c.insecureReason, c.BaseURL)
+		}
+		return nil, fmt.Errorf("API 地址必须使用 HTTPS（localhost/127.0.0.1 除外）: %s", c.BaseURL)
+	}
+	resp, err := c.HTTPClient.Do(req.WithContext(ctx))
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("请求被取消: %w", ctx.Err())
+		}
+		return nil, fmt.Errorf("请求失败: %w", err)
+	}
+	return resp, nil
 }
 
 // Error 实现 error 接口
 func (e *APIError) Error() string {
-	if e.Message != "" {
-		return e.Message
-	}
-	if e.RawBody != "" {
-		// 截取前 200 字节（UTF-8 安全）
+	message := e.Message
+	if message == "" && e.RawBody != "" {
 		body := e.RawBody
 		if len(body) > 200 {
 			body = util.TruncateString(body, 200) + "..."
 		}
-		return fmt.Sprintf("HTTP %d: %s", e.StatusCode, body)
+		message = fmt.Sprintf("HTTP %d: %s", e.StatusCode, body)
 	}
-	return fmt.Sprintf("HTTP %d", e.StatusCode)
+	if message == "" {
+		message = fmt.Sprintf("HTTP %d", e.StatusCode)
+	}
+	if e.ErrorCode != "" && !strings.Contains(message, e.ErrorCode) {
+		if e.RetryAfter > 0 {
+			return fmt.Sprintf("%s（error_code=%s，约 %d 秒后可重试）", message, e.ErrorCode, e.RetryAfter)
+		}
+		return fmt.Sprintf("%s（error_code=%s）", message, e.ErrorCode)
+	}
+	return message
 }
 
 // handleHTTPError 处理 HTTP 错误响应，提取结构化错误信息
 func handleHTTPError(statusCode int, body []byte) *APIError {
 	var errResp struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
+		Code   int       `json:"code"`
+		Msg    string    `json:"msg"`
+		Errors APIErrors `json:"errors"`
 	}
 	if json.Unmarshal(body, &errResp) == nil && errResp.Msg != "" {
 		return &APIError{
 			StatusCode: statusCode,
 			Code:       errResp.Code,
 			Message:    errResp.Msg,
+			ErrorCode:  errResp.Errors.ErrorCode,
+			RetryAfter: errResp.Errors.RetryAfter,
 		}
 	}
 	return &APIError{
@@ -315,8 +390,7 @@ func handleHTTPError(statusCode int, body []byte) *APIError {
 	}
 }
 
-// checkAPICode 验证 API 响应的 code 字段
-// parseResponse 解析 API 分页响应
+// parseResponse 解析 API 响应。
 func parseResponse(body []byte, statusCode int) (*APIResponse, error) {
 	if len(body) == 0 {
 		return nil, &APIError{
@@ -339,35 +413,12 @@ func parseResponse(body []byte, statusCode int) (*APIResponse, error) {
 			StatusCode: statusCode,
 			Code:       resp.Code,
 			Message:    resp.Msg,
+			ErrorCode:  resp.Errors.ErrorCode,
+			RetryAfter: resp.Errors.RetryAfter,
 		}
 	}
 
 	return &resp, nil
-}
-
-// GetCertByDomain 按域名查询证书，返回最佳匹配（active 且最新）
-func (c *Client) GetCertByDomain(ctx context.Context, domain string) (*CertData, error) {
-	certs, err := c.ListCertsByDomain(ctx, domain)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(certs) == 0 {
-		return nil, fmt.Errorf("未找到匹配的证书")
-	}
-
-	// 选择最佳证书：优先 active 状态，然后按过期时间排序
-	best := selectBestCert(certs, domain)
-	if best == nil {
-		return nil, fmt.Errorf("未找到可用的证书")
-	}
-
-	return best, nil
-}
-
-// ListCertsByDomain 按域名查询证书列表
-func (c *Client) ListCertsByDomain(ctx context.Context, domain string) ([]CertData, error) {
-	return c.queryCerts(ctx, domain)
 }
 
 // selectBestCert 从证书列表中选择最佳证书
@@ -621,6 +672,16 @@ type UpdateResponse struct {
 
 // SubmitCSR 提交 CSR 请求签发/重签证书
 func (c *Client) SubmitCSR(ctx context.Context, req *UpdateRequest) (*UpdateResponse, error) {
+	if req == nil {
+		return nil, &APIError{Code: 0, Message: "提交参数不能为空", ErrorCode: ErrorCodeInvalidOrder}
+	}
+	if req.OrderID <= 0 {
+		return nil, &APIError{
+			Code:      0,
+			Message:   "订单不存在，请先通过 setup 配置已有订单",
+			ErrorCode: ErrorCodeOrderNotFound,
+		}
+	}
 	apiURL := c.BaseURL
 
 	data, err := json.Marshal(req)
@@ -636,7 +697,9 @@ func (c *Client) SubmitCSR(ctx context.Context, req *UpdateRequest) (*UpdateResp
 	httpReq.Header.Set("Authorization", "Bearer "+c.Token)
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.doWithRetry(ctx, httpReq)
+	// CSR POST 的结果一旦可能送达就不能安全重放。超时、断连和 5xx 都交给
+	// 生命周期层转为 query-first 恢复，不使用通用传输重试。
+	resp, err := c.doWithoutRetry(ctx, httpReq)
 	if err != nil {
 		return nil, err
 	}
@@ -657,10 +720,16 @@ func (c *Client) SubmitCSR(ctx context.Context, req *UpdateRequest) (*UpdateResp
 	}
 
 	if updateResp.Code != 1 {
+		var envelope struct {
+			Errors APIErrors `json:"errors"`
+		}
+		_ = json.Unmarshal(body, &envelope)
 		return nil, &APIError{
 			StatusCode: resp.StatusCode,
 			Code:       updateResp.Code,
 			Message:    updateResp.Msg,
+			ErrorCode:  envelope.Errors.ErrorCode,
+			RetryAfter: envelope.Errors.RetryAfter,
 		}
 	}
 
@@ -678,10 +747,10 @@ func (c *Client) queryCerts(ctx context.Context, order string) ([]CertData, erro
 		return nil, fmt.Errorf("部署 Token 未配置")
 	}
 
-	apiURL := c.BaseURL
-	if order != "" {
-		apiURL += "?order=" + url.QueryEscape(order)
+	if err := ValidateOrderQuery(order); err != nil {
+		return nil, err
 	}
+	apiURL := c.BaseURL + "?order=" + url.QueryEscape(order)
 
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
@@ -716,82 +785,44 @@ func (c *Client) queryCerts(ctx context.Context, order string) ([]CertData, erro
 	return apiResp.Data.Data, nil
 }
 
-// ListCertsByQuery 批量查询证书（逗号分隔的 ID/域名）
+// ListCertsByQuery 批量查询证书（逗号分隔的订单 ID，最多 100 个）。
 func (c *Client) ListCertsByQuery(ctx context.Context, query string) ([]CertData, error) {
 	return c.queryCerts(ctx, query)
 }
 
-// ListAllCerts 分页查询全部证书
-func (c *Client) ListAllCerts(ctx context.Context) ([]CertData, error) {
-	if c.BaseURL == "" {
-		return nil, fmt.Errorf("部署接口地址未配置")
+var orderQueryRe = regexp.MustCompile(`^\d+(,\d+)*$`)
+
+// ValidateOrderQuery 校验 JSON 查询模式的 order 参数。
+func ValidateOrderQuery(order string) error {
+	if !orderQueryRe.MatchString(order) {
+		return &APIError{Code: 0, Message: "order 必须为订单 ID 或逗号分隔的订单 ID", ErrorCode: ErrorCodeInvalidOrder}
 	}
-	if c.Token == "" {
-		return nil, fmt.Errorf("部署 Token 未配置")
+	if strings.Count(order, ",")+1 > 100 {
+		return &APIError{Code: 0, Message: "单次最多查询 100 条", ErrorCode: ErrorCodeInvalidOrder}
 	}
-
-	var allCerts []CertData
-	page := 1
-	pageSize := 100
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf("请求被取消: %w", ctx.Err())
-		default:
-		}
-
-		apiURL := fmt.Sprintf("%s?page=%d&page_size=%d", c.BaseURL, page, pageSize)
-
-		req, err := http.NewRequest("GET", apiURL, nil)
-		if err != nil {
-			return nil, fmt.Errorf("创建请求失败: %w", err)
-		}
-
-		req.Header.Set("Authorization", "Bearer "+c.Token)
-		req.Header.Set("Accept", "application/json")
-
-		resp, err := c.doWithRetry(ctx, req)
-		if err != nil {
-			return nil, err
-		}
-
-		body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
-		resp.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("读取响应失败: %w", err)
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			return nil, handleHTTPError(resp.StatusCode, body)
-		}
-
-		apiResp, err := parseResponse(body, resp.StatusCode)
-		if err != nil {
-			return nil, err
-		}
-
-		c.recordRenewBeforeDays(apiResp.Data.RenewBeforeDays)
-
-		allCerts = append(allCerts, apiResp.Data.Data...)
-		totalPages := (apiResp.Data.Total + pageSize - 1) / pageSize
-		if page >= totalPages {
-			break
-		}
-		page++
-	}
-
-	return allCerts, nil
+	return nil
 }
 
 // GetCertByOrderID 按订单 ID 查询证书
 func (c *Client) GetCertByOrderID(ctx context.Context, orderID int) (*CertData, error) {
+	if orderID <= 0 {
+		return nil, &APIError{
+			Code:      0,
+			Message:   "订单 ID 必须为正整数，请重新运行 setup 配置已有订单",
+			ErrorCode: ErrorCodeOrderNotFound,
+		}
+	}
 	certs, err := c.queryCerts(ctx, fmt.Sprintf("%d", orderID))
 	if err != nil {
 		return nil, err
 	}
 	if len(certs) == 0 {
-		return nil, fmt.Errorf("未找到订单 %d", orderID)
+		return nil, &APIError{
+			StatusCode: 200,
+			Code:       0,
+			Message:    fmt.Sprintf("未找到订单 %d", orderID),
+			ErrorCode:  ErrorCodeOrderNotFound,
+		}
 	}
 	return &certs[0], nil
 }
@@ -838,9 +869,10 @@ func (c *Client) ToggleAutoReissue(ctx context.Context, orderID int, autoReissue
 	}
 	if len(body) > 0 {
 		var apiResp struct {
-			Code int    `json:"code"`
-			Msg  string `json:"msg"`
-			Data struct {
+			Code   int       `json:"code"`
+			Msg    string    `json:"msg"`
+			Errors APIErrors `json:"errors"`
+			Data   struct {
 				RenewBeforeDays int `json:"renew_before_days"`
 			} `json:"data"`
 		}
@@ -848,7 +880,13 @@ func (c *Client) ToggleAutoReissue(ctx context.Context, orderID int, autoReissue
 			return fmt.Errorf("解析响应失败: %w", err)
 		}
 		if apiResp.Code != 1 {
-			return &APIError{StatusCode: resp.StatusCode, Code: apiResp.Code, Message: apiResp.Msg}
+			return &APIError{
+				StatusCode: resp.StatusCode,
+				Code:       apiResp.Code,
+				Message:    apiResp.Msg,
+				ErrorCode:  apiResp.Errors.ErrorCode,
+				RetryAfter: apiResp.Errors.RetryAfter,
+			}
 		}
 		c.recordRenewBeforeDays(apiResp.Data.RenewBeforeDays)
 	}
