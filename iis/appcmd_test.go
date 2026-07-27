@@ -1,10 +1,98 @@
 package iis
 
 import (
+	"fmt"
+	"reflect"
 	"testing"
 
 	"sslctlw/util"
 )
+
+func TestResolveValidationWebRoots(t *testing.T) {
+	sites := []SiteInfo{
+		{Name: "Zulu", State: "Started", Bindings: []BindingInfo{{Protocol: "http", Port: 80, Host: "example.com"}}},
+		{Name: "Alpha", State: "Started", Bindings: []BindingInfo{{Protocol: "http", Port: 80, Host: "www.example.com"}}},
+		{Name: "Stopped", State: "Stopped", Bindings: []BindingInfo{{Protocol: "http", Port: 80, Host: "example.com"}}},
+		{Name: "Other", State: "Started", Bindings: []BindingInfo{{Protocol: "http", Port: 80, Host: "other.example"}}},
+	}
+	paths := map[string]string{
+		"Zulu":    `C:\Sites\Shared`,
+		"Alpha":   `c:\sites\shared`,
+		"Stopped": `C:\Sites\Stopped`,
+		"Other":   `C:\Sites\Other`,
+	}
+	getPath := func(name string) (string, error) {
+		path, ok := paths[name]
+		if !ok {
+			return "", fmt.Errorf("missing %s", name)
+		}
+		return path, nil
+	}
+
+	got, err := resolveValidationWebRoots(sites, []string{"example.com", "www.example.com"}, "", getPath)
+	if err != nil {
+		t.Fatalf("resolveValidationWebRoots() error = %v", err)
+	}
+	want := []ValidationWebRoot{{SiteName: "Alpha", PhysicalPath: `c:\sites\shared`}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("自动解析 = %+v, want %+v", got, want)
+	}
+
+	if _, err = resolveValidationWebRoots(sites, []string{"example.com"}, "Stopped", getPath); err == nil {
+		t.Fatal("显式 stopped 站点必须拒绝")
+	}
+	if _, err = resolveValidationWebRoots(sites, []string{"example.com"}, "Other", getPath); err == nil {
+		t.Fatal("显式站点不匹配域名且无 catch-all 时必须拒绝")
+	}
+
+	catchAll := []SiteInfo{
+		{Name: "Fallback", State: "Started", Bindings: []BindingInfo{{Protocol: "http", Port: 80}}},
+	}
+	paths["Fallback"] = `C:\Sites\Fallback`
+	got, err = resolveValidationWebRoots(catchAll, []string{"example.com"}, "", getPath)
+	if err != nil || len(got) != 1 || got[0].SiteName != "Fallback" {
+		t.Fatalf("唯一 catch-all 回退 = %+v, err=%v", got, err)
+	}
+	catchAll = append(catchAll,
+		SiteInfo{Name: "Fallback2", State: "Started", Bindings: []BindingInfo{{Protocol: "http", Port: 80}}})
+	paths["Fallback2"] = `C:\Sites\Fallback2`
+	if _, err = resolveValidationWebRoots(catchAll, []string{"example.com"}, "", getPath); err == nil {
+		t.Fatal("多个 catch-all 必须报歧义")
+	}
+
+	protocolSites := []SiteInfo{
+		{Name: "HTTPSOnly", State: "Started", Bindings: []BindingInfo{{Protocol: "https", Port: 443, Host: "example.com"}}},
+		{Name: "WrongPort", State: "Started", Bindings: []BindingInfo{{Protocol: "http", Port: 8080, Host: "example.com"}}},
+		{Name: "HTTPFallback", State: "Started", Bindings: []BindingInfo{{Protocol: "http", Port: 80}}},
+	}
+	paths["HTTPSOnly"] = `C:\Sites\HTTPSOnly`
+	paths["WrongPort"] = `C:\Sites\WrongPort`
+	paths["HTTPFallback"] = `C:\Sites\HTTPFallback`
+	got, err = resolveValidationWebRoots(protocolSites, []string{"example.com"}, "", getPath)
+	if err != nil || len(got) != 1 || got[0].SiteName != "HTTPFallback" {
+		t.Fatalf("HTTPS-only/非80 HTTP 不得压制 catch-all 回退: roots=%+v err=%v", got, err)
+	}
+	if _, err = resolveValidationWebRoots(protocolSites, []string{"example.com"}, "HTTPSOnly", getPath); err == nil {
+		t.Fatal("显式 HTTPS-only 站点不得用于 HTTP 文件验证")
+	}
+}
+
+func TestValidateIISPhysicalPath(t *testing.T) {
+	good := []string{`C:\inetpub\wwwroot`, `\\server\share\site`}
+	for _, path := range good {
+		if err := validateIISPhysicalPath(path); err != nil {
+			t.Errorf("合法 root %q: %v", path, err)
+		}
+	}
+	bad := []string{
+		`relative\site`, `C:relative`, `\\?\C:\site`, `\\.\C:\site`, `\??\C:\site`,
+	}
+	for _, path := range bad {
+		if err := validateIISPhysicalPath(path); err == nil {
+			t.Errorf("不安全 root %q 应拒绝", path)
+		}
+	}
+}
 
 func TestParseBindings(t *testing.T) {
 	tests := []struct {

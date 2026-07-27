@@ -32,6 +32,7 @@ debug/
 # settings
 sslctlw/
 config.json
+.env
 
 # Build/release config (contains secrets)
 build/build.conf

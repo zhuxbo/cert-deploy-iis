@@ -9,6 +9,7 @@ import (
 	"sslctlw/api"
 	"sslctlw/cert"
 	"sslctlw/config"
+	"sslctlw/iis"
 )
 
 // TestPersistDeployAttempt_FailureStopsAttempt 持久化失败时不得留下虚假在途状态或继续部署。
@@ -26,7 +27,7 @@ func TestPersistDeployAttempt_FailureStopsAttempt(t *testing.T) {
 	}
 }
 
-// TestShouldFinalizeDeployment 部分绑定成功仍是整体失败，不得清零状态或转正 pending key。
+// TestShouldFinalizeDeployment 任一绑定成功即接纳证书；回调仍可按整体结果报 failure。
 func TestShouldFinalizeDeployment(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -35,7 +36,10 @@ func TestShouldFinalizeDeployment(t *testing.T) {
 		want    bool
 	}{
 		{"全部绑定成功", deployReport{report: true, success: true}, true, true},
-		{"部分绑定成功", deployReport{report: true, success: false}, true, false},
+		{"部分绑定成功", deployReport{
+			report: true, success: false,
+			successfulTargets: []config.BindingRetryTarget{{Host: "a.example.com", Port: 443}},
+		}, true, true},
 		{"没有证书内容", deployReport{report: true, success: true}, false, false},
 		{"没有处理绑定", deployReport{}, true, false},
 	}
@@ -45,6 +49,22 @@ func TestShouldFinalizeDeployment(t *testing.T) {
 				t.Fatalf("shouldFinalizeDeployment(%+v, %v) = %v, want %v", tt.report, tt.hasCert, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPendingBindingTargetFilter(t *testing.T) {
+	pending := []config.BindingRetryTarget{
+		{Host: "WWW.Example.com", Port: 443},
+		{Host: "192.0.2.10", Port: 8443, IPBinding: true},
+	}
+	if !isPendingBindingTarget(iis.EndpointKey{Host: "www.example.com", Port: 443}, pending) {
+		t.Fatal("域名端点应忽略大小写匹配失败重试状态")
+	}
+	if !isPendingBindingTarget(iis.EndpointKey{Host: "192.0.2.10", Port: 8443, IPBinding: true}, pending) {
+		t.Fatal("IP 绑定端点应匹配失败重试状态")
+	}
+	if isPendingBindingTarget(iis.EndpointKey{Host: "192.0.2.10", Port: 8443}, pending) {
+		t.Fatal("IP 绑定与 SNI 绑定不得混淆")
 	}
 }
 
@@ -79,7 +99,7 @@ func TestSubmitNewCSR_PersistFailureStopsRequest(t *testing.T) {
 func TestEvaluateAutoActionGate(t *testing.T) {
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 	future := now.AddDate(0, 0, 30).Format("2006-01-02")
-	within := now.Add(6 * time.Hour).Format("2006-01-02") // 当天，不足 24h
+	within := now.Add(6 * time.Hour).Format(time.RFC3339)
 	past := now.AddDate(0, 0, -1).Format("2006-01-02")
 
 	tests := []struct {
@@ -94,7 +114,7 @@ func TestEvaluateAutoActionGate(t *testing.T) {
 		{"已过期状态跳过", config.CertMetadata{LastIssueState: config.IssueStateExpired, CertExpiresAt: future}, true, config.IssueStateExpired},
 		{"到期转 EXPIRED", config.CertMetadata{CertExpiresAt: past}, true, config.IssueStateExpired},
 		{"触顶后到期转 EXPIRED", config.CertMetadata{LastIssueState: config.IssueStateCapped, CapPhase: config.CapPhaseDeploy, CertExpiresAt: past}, true, config.IssueStateExpired},
-		{"不足安全余量跳过", config.CertMetadata{CertExpiresAt: within}, true, ""},
+		{"不足安全余量仍允许查询和部署", config.CertMetadata{CertExpiresAt: within}, false, ""},
 		{"无到期信息放行", config.CertMetadata{}, false, ""},
 	}
 	for _, tt := range tests {
@@ -254,7 +274,7 @@ func TestDeployAttemptCrashReplay(t *testing.T) {
 	}
 }
 
-// TestSubmitNewCSR_IssueCountSeparation 签发计数：新 CSR 递增，重放不递增，触顶转 CAPPED 不报错
+// TestSubmitNewCSR_IssueCountSeparation 签发计数：新 CSR 递增，已有 pending 只查询，触顶转 CAPPED。
 func TestSubmitNewCSR_IssueCountSeparation(t *testing.T) {
 	t.Run("生成新 CSR 递增签发计数", func(t *testing.T) {
 		d := NewMockDeployer()
@@ -272,7 +292,7 @@ func TestSubmitNewCSR_IssueCountSeparation(t *testing.T) {
 		}
 	})
 
-	t.Run("重放 pending CSR 不递增签发计数", func(t *testing.T) {
+	t.Run("已有 pending CSR 只查询且不递增签发计数", func(t *testing.T) {
 		d := NewMockDeployer()
 		store := d.Store.(*MockOrderStore)
 		keyPEM, csrPEM, err := cert.GenerateCSR("example.com")
@@ -287,12 +307,17 @@ func TestSubmitNewCSR_IssueCountSeparation(t *testing.T) {
 			return &api.UpdateResponse{Data: api.UpdateResponseData{CertData: api.CertData{OrderID: 100, Status: "processing"}}}, nil
 		}
 		certCfg := &config.CertConfig{CertName: "example.com-100", OrderID: 100, Domain: "example.com",
-			Metadata: config.CertMetadata{IssueRetryCount: 4}}
+			Metadata: config.CertMetadata{
+				IssueRetryCount:  4,
+				CSRSubmittedAt:   "2026-07-01T00:00:00Z",
+				LastCSRHash:      mustCSRHash(t, csrPEM),
+				ResubmitRequired: true,
+			}}
 		if _, _, _, err := submitNewCSR(d, client, certCfg); err != nil {
 			t.Fatalf("submitNewCSR error = %v", err)
 		}
 		if certCfg.Metadata.IssueRetryCount != 4 {
-			t.Errorf("重放不应递增签发计数, got %d", certCfg.Metadata.IssueRetryCount)
+			t.Errorf("query-first 不应递增签发计数, got %d", certCfg.Metadata.IssueRetryCount)
 		}
 	})
 

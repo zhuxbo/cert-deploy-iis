@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -21,9 +23,7 @@ import (
 	"sslctlw/util"
 )
 
-var (
-	version = "dev"
-)
+var version = "dev"
 
 func main() {
 	// 无参数 → GUI 模式
@@ -136,7 +136,8 @@ func runDeploy(args []string) {
 		// deploy --all: 自动部署所有
 		setupDeployLog()
 		log.Printf("========== 开始自动部署 ==========")
-		if err := deploy.CheckAndDeploy(); err != nil {
+		reportOut := io.MultiWriter(os.Stdout, log.Writer())
+		if err := deployAllWithRunner(deploy.CheckAndDeploy, reportOut); err != nil {
 			log.Printf("部署失败: %v", err)
 			fmt.Fprintf(os.Stderr, "部署失败: %v\n", err)
 			os.Exit(1)
@@ -161,37 +162,80 @@ func deploySingleCert(orderID int) error {
 		return fmt.Errorf("加载配置失败: %v", err)
 	}
 
-	certCfg := cfg.GetCertificateByOrderID(orderID)
-	if certCfg == nil {
-		return fmt.Errorf("未找到订单 %d 的配置", orderID)
-	}
-
-	client, err := deploy.NewClientForCert(certCfg)
-	if err != nil {
-		return err
-	}
-
 	store := cert.NewOrderStore()
 	deployer := deploy.DefaultDeployer(cfg, store)
+	return deploySingleCertWith(cfg, deployer, orderID)
+}
 
-	// 创建单证书配置进行部署
-	singleCfg := &config.Config{
-		Certificates: []config.CertConfig{*certCfg},
-		Schedule:     cfg.Schedule,
-	}
-	_ = client // client 由 AutoDeploy 内部通过 NewClientForCert 创建
-	results := deploy.AutoDeploy(singleCfg, deployer, false)
-	deployer.WaitCallbacks()
+func deploySingleCertWith(cfg *config.Config, deployer *deploy.Deployer, orderID int) error {
+	return deploySingleCertWithRunner(cfg, deployer, orderID, deploy.AutoDeploy, os.Stdout)
+}
 
-	for _, r := range results {
-		if r.Success {
-			fmt.Printf("[成功] %s: %s\n", r.Domain, r.Message)
-		} else {
-			fmt.Printf("[失败] %s: %s\n", r.Domain, r.Message)
+type singleCertRunner func(*config.Config, *deploy.Deployer, deploy.RunOptions) deploy.RunReport
+
+func deploySingleCertWithRunner(cfg *config.Config, deployer *deploy.Deployer, orderID int, run singleCertRunner, out io.Writer) error {
+	matchCount := 0
+	var target *config.CertConfig
+	for i := range cfg.Certificates {
+		if cfg.Certificates[i].OrderID == orderID {
+			matchCount++
+			target = &cfg.Certificates[i]
 		}
 	}
+	if matchCount == 0 {
+		return fmt.Errorf("未找到订单 %d 的配置", orderID)
+	}
+	if matchCount > 1 {
+		return fmt.Errorf("订单 %d 存在 %d 条配置，无法确定单证书部署目标", orderID, matchCount)
+	}
+	if !target.Enabled {
+		return fmt.Errorf("订单 %d 已禁用，无法执行部署", orderID)
+	}
 
-	return nil
+	report := run(cfg, deployer, deploy.RunOptions{OnlyOrderID: orderID})
+	reportErr := writeRunReport(out, report)
+
+	var attentionErrors []error
+	for _, attention := range report.Attention {
+		attentionErrors = append(attentionErrors,
+			fmt.Errorf("订单 %d 需要人工处理: %s", attention.OrderID, attention.Reason))
+	}
+	return errors.Join(reportErr, errors.Join(attentionErrors...))
+}
+
+func deployAllWithRunner(run func() deploy.RunReport, out io.Writer) error {
+	return writeRunReport(out, run())
+}
+
+func writeRunReport(out io.Writer, report deploy.RunReport) error {
+	for _, r := range report.Results {
+		if r.Success {
+			fmt.Fprintf(out, "[成功] %s: %s\n", r.Domain, r.Message)
+		} else {
+			fmt.Fprintf(out, "[失败] %s: %s\n", r.Domain, r.Message)
+		}
+	}
+	for _, warning := range report.Warnings {
+		fmt.Fprintf(out, "[警告] %s\n", warning)
+	}
+	for _, attention := range report.Attention {
+		fmt.Fprintf(out, "[需人工处理] 订单 %d %s: %s\n",
+			attention.OrderID, attention.Domain, attention.Reason)
+	}
+	for _, runErr := range report.Errors {
+		if runErr != nil {
+			fmt.Fprintf(out, "[错误] %v\n", runErr)
+		}
+	}
+	if report.AlreadyRunning {
+		fmt.Fprintln(out, "已有部署正在运行，本次跳过")
+	}
+	if len(report.Results) == 0 && len(report.Errors) == 0 &&
+		len(report.Warnings) == 0 && len(report.Attention) == 0 &&
+		!report.AlreadyRunning {
+		fmt.Fprintln(out, "本次无需部署")
+	}
+	return report.Err()
 }
 
 // runStatus 显示状态
@@ -229,8 +273,12 @@ func runStatus() {
 			hasAPI = "已配置"
 		}
 		tokenHealth := certTokenHealth(&c.API)
-		fmt.Printf("  %-30s 订单:%-8d 过期:%s 状态:%s 模式:%s API:%s Token:%s\n",
-			c.Domain, c.OrderID, c.Metadata.CertExpiresAt, status, mode, hasAPI, tokenHealth)
+		orderStatus := c.Metadata.LastOrderStatus
+		if orderStatus == "" {
+			orderStatus = "-"
+		}
+		fmt.Printf("  %-30s 订单:%-8d 过期:%s 状态:%s 订单状态:%s 模式:%s API:%s Token:%s\n",
+			c.Domain, c.OrderID, c.Metadata.CertExpiresAt, status, orderStatus, mode, hasAPI, tokenHealth)
 	}
 
 	// 计划任务状态
@@ -239,27 +287,46 @@ func runStatus() {
 	if taskName == "" {
 		taskName = config.DefaultTaskName
 	}
-	if !util.IsTaskExists(taskName) {
-		fmt.Printf("计划任务: %s (未创建)\n", taskName)
-		return
-	}
-	fmt.Printf("计划任务: %s (已创建)\n", taskName)
+	_ = writeTaskHealthStatus(os.Stdout, cfg.AutoCheckEnabled, taskName, time.Now(), util.GetTaskHealth)
+}
 
-	// 任务运行健康：上次运行时间/结果，停摆时明确告警
-	health, err := util.GetTaskHealth(taskName)
-	if err != nil {
-		fmt.Printf("  运行状态: 查询失败 (%v)\n", err)
-		return
+func writeTaskHealthStatus(
+	out io.Writer,
+	enabled bool,
+	taskName string,
+	now time.Time,
+	query func(string) (*util.TaskHealth, error),
+) error {
+	if !enabled {
+		fmt.Fprintf(out, "计划任务: %s (不健康)\n", taskName)
+		fmt.Fprintln(out, "  [告警] 自动部署已停止")
+		return nil
 	}
+
+	health, err := query(taskName)
+	if err != nil {
+		fmt.Fprintf(out, "计划任务: %s (不健康)\n", taskName)
+		fmt.Fprintf(out, "  [告警] 任务运行信息查询失败: %v\n", err)
+		return err
+	}
+
+	warnings := util.EvaluateTaskHealth(health, now)
+	state := "健康"
+	if len(warnings) > 0 {
+		state = "不健康"
+	}
+	fmt.Fprintf(out, "计划任务: %s (%s)\n", taskName, state)
+
 	if health.HasRun {
-		fmt.Printf("  上次运行: %s (结果: 0x%X)\n",
+		fmt.Fprintf(out, "  上次运行: %s (结果: 0x%X)\n",
 			health.LastRunTime.Format("2006-01-02 15:04:05"), health.LastTaskResult)
 	} else {
-		fmt.Println("  上次运行: 从未运行")
+		fmt.Fprintln(out, "  上次运行: 从未运行")
 	}
-	for _, w := range util.EvaluateTaskHealth(health, time.Now()) {
-		fmt.Printf("  [告警] %s\n", w)
+	for _, warning := range warnings {
+		fmt.Fprintf(out, "  [告警] %s\n", warning)
 	}
+	return nil
 }
 
 // certTokenHealth 返回证书 API Token 的健康描述
@@ -398,10 +465,9 @@ func printUsage() {
 无参数运行进入 GUI 模式。
 
 一键部署:
-  sslctlw setup --url <url> --token <token>
   sslctlw setup --url <url> --token <token> --order <id>
   sslctlw setup --url <url> --token <token> --order "123,456"
-  sslctlw setup --url <url> --token <token> --key key.pem
+  sslctlw setup --url <url> --token <token> --order <id> --key key.pem
 
 扫描:
   sslctlw scan

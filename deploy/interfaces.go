@@ -2,6 +2,8 @@ package deploy
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 
 	"sslctlw/api"
@@ -9,6 +11,55 @@ import (
 	"sslctlw/config"
 	"sslctlw/iis"
 )
+
+// RunOptions 控制一次自动部署运行的范围与节奏。
+type RunOptions struct {
+	ScatterDelay    bool
+	OnlyOrderID     int
+	MaxCertificates int
+}
+
+// CertAttention 表示需要人工处理、但不应令本次运行报错的证书状态。
+type CertAttention struct {
+	OrderID int
+	Domain  string
+	Reason  string
+}
+
+// RunReport 汇总一次自动部署运行的结构化结果。
+type RunReport struct {
+	Results        []Result
+	Errors         []error
+	Warnings       []string
+	Attention      []CertAttention
+	AlreadyRunning bool
+}
+
+// Err 聚合失败结果与运行级错误；warning、attention 和正常锁占用不属于错误。
+func (r RunReport) Err() error {
+	errs := make([]error, 0, len(r.Results)+len(r.Errors))
+	for _, result := range r.Results {
+		if result.Success {
+			continue
+		}
+		key := result.Message
+		if key == "" {
+			key = "部署失败"
+		}
+		identity := result.Domain
+		if identity == "" {
+			identity = fmt.Sprintf("订单 %d", result.OrderID)
+		}
+		errs = append(errs, fmt.Errorf("%s: %s", identity, key))
+	}
+	for _, err := range r.Errors {
+		if err == nil {
+			continue
+		}
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
 
 // CertConverter 证书转换接口
 type CertConverter interface {
@@ -32,19 +83,20 @@ type IISBinder interface {
 	// BindCertificateByIP 使用 IP 模式绑定证书
 	BindCertificateByIP(ip string, port int, certHash string) error
 	// FindBindingsForDomains 查找域名匹配的绑定
-	FindBindingsForDomains(domains []string) (map[string]*iis.SSLBinding, error)
+	FindBindingsForDomains(domains []string) ([]iis.SSLBinding, error)
+}
+
+// ValidationWebRootResolver 只负责解析文件验证可写入的 IIS 站点根。
+type ValidationWebRootResolver interface {
+	ResolveValidationWebRoots(domains []string, explicitSiteName string) ([]iis.ValidationWebRoot, error)
 }
 
 // APIClient API 客户端接口
 type APIClient interface {
 	// GetCertByOrderID 按订单 ID 获取证书
 	GetCertByOrderID(ctx context.Context, orderID int) (*api.CertData, error)
-	// ListCertsByDomain 按域名列出证书
-	ListCertsByDomain(ctx context.Context, domain string) ([]api.CertData, error)
-	// ListCertsByQuery 批量查询证书
+	// ListCertsByQuery 批量按订单 ID 查询证书
 	ListCertsByQuery(ctx context.Context, query string) ([]api.CertData, error)
-	// ListAllCerts 分页查询全部证书
-	ListAllCerts(ctx context.Context) ([]api.CertData, error)
 	// SubmitCSR 提交 CSR
 	SubmitCSR(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error)
 	// Callback 发送部署回调
@@ -65,10 +117,12 @@ type OrderStore interface {
 	LoadPendingPrivateKey(certName string) (string, error)
 	// SavePendingPrivateKey 保存待确认私钥
 	SavePendingPrivateKey(certName, keyPEM string) error
-	// SavePendingCSR 保存与待确认私钥配对、可安全重放的 CSR
+	// SavePendingCSR 保存与待确认私钥配对、供 query-first 归属判断的 CSR
 	SavePendingCSR(certName, csrPEM string) error
-	// LoadPendingCSR 加载可安全重放的 CSR
+	// LoadPendingCSR 加载 pending CSR（不用于重放 POST）
 	LoadPendingCSR(certName string) (string, error)
+	// RemovePendingArtifacts 清理在途私钥与 CSR
+	RemovePendingArtifacts(certName string) error
 	// PromotePendingPrivateKey 将本次已成功部署的待确认私钥转正
 	PromotePendingPrivateKey(certName string, orderID int, deployedKey string) error
 	// SaveCertificate 保存证书
@@ -83,20 +137,34 @@ type OrderStore interface {
 
 // Deployer 部署器，聚合所有依赖（不含 API Client，每个证书独立创建）
 type Deployer struct {
-	Converter   CertConverter
-	Installer   CertInstaller
-	Binder      IISBinder
-	Store       OrderStore
-	callbackWg  sync.WaitGroup
-	callbackMu  sync.Mutex
-	callbackSeq uint64
-	renewSeq    uint64
-	renewDays   int
+	Converter        CertConverter
+	Installer        CertInstaller
+	Binder           IISBinder
+	Store            OrderStore
+	ValidationRoots  ValidationWebRootResolver
+	ValidationFiles  validationFileStore
+	callbackWg       sync.WaitGroup
+	callbackMu       sync.Mutex
+	callbackSeq      uint64
+	renewSeq         uint64
+	renewDays        int
+	callbackWarnings []string
 }
 
-// WaitCallbacks 等待所有回调 goroutine 完成
-func (d *Deployer) WaitCallbacks() {
+// WaitCallbacks 等待所有回调完成，返回并清空本轮 warning。
+func (d *Deployer) WaitCallbacks() []string {
 	d.callbackWg.Wait()
+	d.callbackMu.Lock()
+	defer d.callbackMu.Unlock()
+	warnings := append([]string(nil), d.callbackWarnings...)
+	d.callbackWarnings = nil
+	return warnings
+}
+
+func (d *Deployer) recordCallbackWarning(warning string) {
+	d.callbackMu.Lock()
+	defer d.callbackMu.Unlock()
+	d.callbackWarnings = append(d.callbackWarnings, warning)
 }
 
 func (d *Deployer) nextCallbackSequence() uint64 {

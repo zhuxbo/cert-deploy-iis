@@ -34,12 +34,22 @@ const (
 	MaxIssueRetries = 10
 	// MaxDeployAttempts 部署尝试上限，`>= MaxDeployAttempts` 触顶（deploy-spec §3.2）
 	MaxDeployAttempts = 10
+	// MaxNoProgressDays 纯查询无进展时限（deploy-spec §3.2）
+	MaxNoProgressDays = 14
+	// ClockSanityMaxDays 无进展时间差可信度上限，超过时重新锚定
+	ClockSanityMaxDays = 60
+	// MaxBlockReportCount 环境阻断 failure 回调上限（deploy-spec §2.8）
+	MaxBlockReportCount = 10
+	// CertUnchangedRounds 连续返回同一张证书的容忍轮数（deploy-spec §3.8）
+	CertUnchangedRounds = 2
 )
 
 // 签发/生命周期状态常量（metadata.last_issue_state，deploy-spec §1.5）
 const (
 	// IssueStateProcessing 等待签发（服务端 pending 统一归一为此状态）
 	IssueStateProcessing = "processing"
+	// IssueStateActive 秒签后待部署
+	IssueStateActive = "active"
 	// IssueStateCapped 触顶静默：签发或部署计数达上限，等待人工处理
 	IssueStateCapped = "CAPPED"
 	// IssueStateExpired 证书已过期，静默终止
@@ -48,11 +58,28 @@ const (
 	IssueStatePolicyBlocked = "policy_blocked_needs_setup"
 )
 
-// 触顶阶段常量（metadata.cap_phase）
+// 触顶阶段常量（metadata.capped_phase）
 const (
-	CapPhaseIssue  = "issue"  // 签发计数触顶
-	CapPhaseDeploy = "deploy" // 部署计数触顶
-	CapPhaseLegacy = "legacy" // 旧版本混合计数升级即触顶
+	CapPhaseIssue   = "issue"   // 签发计数触顶
+	CapPhaseDeploy  = "deploy"  // 部署计数触顶
+	CapPhaseStalled = "stalled" // 纯查询无进展触顶
+	CapPhaseLegacy  = "legacy"  // 旧版本混合计数升级即触顶
+)
+
+// 服务端订单状态只用于展示和显式分类，不参与 last_issue_state 门禁。
+const (
+	OrderStatusActive     = "active"
+	OrderStatusPending    = "pending"
+	OrderStatusProcessing = "processing"
+	OrderStatusApproving  = "approving"
+	OrderStatusUnpaid     = "unpaid"
+	OrderStatusCancelling = "cancelling"
+	OrderStatusFailed     = "failed"
+	OrderStatusCancelled  = "cancelled"
+	OrderStatusRevoked    = "revoked"
+	OrderStatusExpired    = "expired"
+	OrderStatusRenewed    = "renewed"
+	OrderStatusReissued   = "reissued"
 )
 
 // BindRule 绑定规则
@@ -60,6 +87,13 @@ type BindRule struct {
 	Domain   string `json:"domain"`    // 要绑定的域名
 	Port     int    `json:"port"`      // 端口，默认 443
 	SiteName string `json:"site_name"` // IIS 站点名称（可选，空则自动匹配）
+}
+
+// BindingRetryTarget 是 IIS 部分绑定失败后的最小恢复目标。
+type BindingRetryTarget struct {
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+	IPBinding bool   `json:"ip_binding,omitempty"`
 }
 
 // CertAPIConfig 证书级 API 配置
@@ -96,19 +130,36 @@ func (c *CertAPIConfig) SetToken(token string) error {
 
 // CertMetadata 证书元数据（spec 1.5）
 type CertMetadata struct {
-	LastDeployAt       string `json:"last_deploy_at,omitempty"`       // 最后部署时间
-	CertExpiresAt      string `json:"cert_expires_at,omitempty"`      // 证书过期时间
-	CertSerial         string `json:"cert_serial,omitempty"`          // 证书序列号
-	CSRSubmittedAt     string `json:"csr_submitted_at,omitempty"`     // CSR 提交时间（仅 local 模式）
-	LastCSRHash        string `json:"last_csr_hash,omitempty"`        // 上次 CSR 的 SHA256 哈希
-	LastIssueState     string `json:"last_issue_state,omitempty"`     // 签发/生命周期状态（见 IssueState* 常量）
-	IssueRetryCount    int    `json:"issue_retry_count,omitempty"`    // 签发尝试计数（CSR 提交），>= MaxIssueRetries 触顶
-	DeployAttemptCount int    `json:"deploy_attempt_count,omitempty"` // 部署尝试计数，>= MaxDeployAttempts 触顶；与签发计数分离
+	LastDeployAt          string               `json:"last_deploy_at,omitempty"`           // 最后部署时间
+	CertExpiresAt         string               `json:"cert_expires_at,omitempty"`          // 证书过期时间
+	CertSerial            string               `json:"cert_serial,omitempty"`              // 证书序列号
+	CSRSubmittedAt        string               `json:"csr_submitted_at,omitempty"`         // CSR 提交时间（仅 local 模式）
+	LastCSRHash           string               `json:"last_csr_hash,omitempty"`            // 上次 CSR 的 SHA256 哈希
+	LastIssueState        string               `json:"last_issue_state,omitempty"`         // 签发/生命周期状态（见 IssueState* 常量）
+	IssueRetryCount       int                  `json:"issue_retry_count,omitempty"`        // 签发尝试计数（CSR 提交），>= MaxIssueRetries 触顶
+	DeployAttemptCount    int                  `json:"deploy_attempt_count,omitempty"`     // 部署尝试计数，>= MaxDeployAttempts 触顶；与签发计数分离
+	NoProgressSince       string               `json:"no_progress_since,omitempty"`        // 首次纯查询无进展时间（RFC3339）
+	BlockReportCount      int                  `json:"block_report_count,omitempty"`       // 环境阻断上报累计次数
+	LastDeployBlockReason string               `json:"last_deploy_block_reason,omitempty"` // 最近一次取得上报资格的环境阻断原因
+	LastOrderStatus       string               `json:"last_order_status,omitempty"`        // 服务端订单状态（仅展示）
+	UnchangedCertRounds   int                  `json:"unchanged_cert_rounds,omitempty"`    // 连续返回同一张证书的轮数
+	FailedBindings        []BindingRetryTarget `json:"failed_bindings,omitempty"`          // 已接纳证书后仍需重试的 IIS 端点
+	BindingRetryCount     int                  `json:"binding_retry_count,omitempty"`      // 失败绑定独立重试轮数
 	// 平台内部字段（不参与跨仓协议）
-	CapPhase        string `json:"cap_phase,omitempty"`         // 触顶阶段（CapPhase* 常量），仅 last_issue_state=CAPPED 时有效
-	DeployStartedAt string `json:"deploy_started_at,omitempty"` // 部署意图落盘标记：非空表示一次部署尝试在途，用于崩溃恢复重放判定不重复计数
+	CapPhase         string `json:"capped_phase,omitempty"`      // 触顶阶段（CapPhase* 常量），仅 last_issue_state=CAPPED 时有效
+	DeployStartedAt  string `json:"deploy_started_at,omitempty"` // 部署意图落盘标记：非空表示一次部署尝试在途，用于崩溃恢复重放判定不重复计数
+	PendingCleanup   bool   `json:"pending_cleanup,omitempty"`   // 明确拒绝后的 pending 产物待清理；清理完成前不得重放
+	ResubmitRequired bool   `json:"resubmit_required,omitempty"` // local CSR 提交恢复标记；服务端确定接收后清除
 	// 平台扩展（IIS）
-	Thumbprint string `json:"thumbprint,omitempty"` // 证书指纹
+	Thumbprint      string                 `json:"thumbprint,omitempty"`       // 证书指纹
+	ValidationFiles []ValidationFileRecord `json:"validation_files,omitempty"` // 客户端实际创建并拥有的验证文件
+}
+
+// ValidationFileRecord 记录客户端拥有的验证文件；旧配置缺少该字段时自然为空。
+type ValidationFileRecord struct {
+	SiteName     string `json:"site_name"`
+	RelativePath string `json:"relative_path"`
+	SHA256       string `json:"sha256"`
 }
 
 // IsCapped 是否已触顶静默
@@ -122,6 +173,7 @@ func (m *CertMetadata) IsPolicyBlocked() bool { return m.LastIssueState == Issue
 
 // MarkCapped 标记触顶静默并记录触顶阶段；已处于 CAPPED 时保持首个阶段不变
 func (m *CertMetadata) MarkCapped(phase string) {
+	m.ResubmitRequired = false
 	if m.LastIssueState == IssueStateCapped {
 		if m.CapPhase == "" {
 			m.CapPhase = phase
@@ -135,7 +187,7 @@ func (m *CertMetadata) MarkCapped(phase string) {
 // CertConfig 证书配置（以证书为维度，spec 1.3）
 type CertConfig struct {
 	CertName         string        `json:"cert_name"`                   // 证书名称（如 example.com-12345）
-	OrderID          int           `json:"order_id"`                    // 证书订单 ID
+	OrderID          int           `json:"order_id"`                    // 既有正整数证书订单 ID
 	Enabled          bool          `json:"enabled"`                     // 是否启用自动部署
 	Domain           string        `json:"domain"`                      // 主域名（IIS 显示用，平台扩展）
 	Domains          []string      `json:"domains"`                     // 证书包含的所有域名
@@ -165,11 +217,12 @@ type Schedule struct {
 
 // Config 应用配置
 type Config struct {
-	Certificates     []CertConfig `json:"certificates"`       // 证书配置
-	Schedule         Schedule     `json:"schedule"`           // 续签调度配置
-	LastCheck        string       `json:"last_check"`         // 上次检查时间
-	AutoCheckEnabled bool         `json:"auto_check_enabled"` // 是否启用自动部署（任务计划）
-	TaskName         string       `json:"task_name"`          // 任务计划名称
+	Certificates     []CertConfig `json:"certificates"`                  // 证书配置
+	Schedule         Schedule     `json:"schedule"`                      // 续签调度配置
+	LastCheck        string       `json:"last_check"`                    // 上次检查时间
+	AutoCheckEnabled bool         `json:"auto_check_enabled"`            // 是否启用自动部署（任务计划）
+	TaskName         string       `json:"task_name"`                     // 任务计划名称
+	NextBatchOrderID int          `json:"next_batch_order_id,omitempty"` // 下一自动批次起点；零值从头
 	// 升级配置
 	UpgradeEnabled   bool   `json:"upgrade_enabled"`    // 启用自动检查更新，默认 true
 	UpgradeChannel   string `json:"upgrade_channel"`    // 版本通道: main | dev，默认 main

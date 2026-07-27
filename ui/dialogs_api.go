@@ -45,7 +45,7 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 	// 提示文字
 	ui.NewStatic(dlg,
 		ui.OptsStatic().
-			Text("格式: sslctlw setup --url <地址> --token <令牌> [--order <订单ID>]").
+			Text("格式: sslctlw setup --url <地址> --token <令牌> --order <订单ID>").
 			Position(ui.Dpi(20, 128)),
 	)
 
@@ -86,7 +86,7 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 
 	// 初始化
 	dlg.On().WmCreate(func(_ ui.WmCreate) int {
-		txtDetail.SetText("请粘贴部署命令后点击\"执行\"。\r\n\r\n示例:\r\nsslctlw setup --url https://deploy.example.com/api --token abc123\r\nsslctlw setup --url https://deploy.example.com/api --token abc123 --order 12345")
+		txtDetail.SetText("请粘贴部署命令后点击\"执行\"。\r\n\r\n示例:\r\nsslctlw setup --url https://deploy.example.com/api --token abc123 --order 12345")
 		return 0
 	})
 

@@ -245,6 +245,11 @@ app.mainWnd.On().WmSize(func(p ui.WmSize) {
 })
 ```
 
+主窗口创建和 `WmSize` 重排必须使用同一套 DPI 口径。`ClientAreaSize` 是实际像素，
+所有边距、按钮尺寸、面板高度和固定偏移必须先用 `ui.DpiX` / `ui.DpiY` 换算，
+再参与布局计算；不得把逻辑像素常量直接传给 `SetWindowPos`。布局计算应保持为
+可测试的纯函数，并覆盖 100%、125%、150% 缩放。
+
 ## 防 UI 卡死（关键）
 
 **原则**: `UiThread` 回调中**只能**更新 UI，**禁止**执行任何耗时操作。
@@ -333,7 +338,7 @@ btn.Hwnd().EnableWindow(true)   // 启用
 - `cert.ListCertificates()` / `cert.GetCertByThumbprint()`
 - `iis.ScanSites()` / `iis.ListSSLBindings()`
 - `config.Load()` / `config.Save()`
-- `api.Client.GetCertByDomain()`
+- `api.Client.GetCertByOrderID()` / `ListCertsByQuery()`
 - 任何 `exec.Command()` 调用
 
 **解决**: 将这些调用移到 `go func() { ... }` 中，在 `UiThread` 之前执行。

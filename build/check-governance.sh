@@ -25,6 +25,14 @@ require_literal() {
     }
 }
 
+forbid_literal() {
+    local path="$1" value="$2"
+    if grep -Fq -- "$value" "$path"; then
+        echo "$path 包含已废弃契约: $value" >&2
+        exit 1
+    fi
+}
+
 cat >"$TMP_DIR/CLAUDE.md" <<'EOF'
 # 项目智能体规则
 
@@ -165,6 +173,21 @@ for contract in \
 done
 
 require_literal README.md 'GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=1.0.0" -o dist/sslctlw.exe .'
+require_literal README.md '| GET | `/api/deploy?order=123` | 按订单查询 |'
+require_literal README.md '| GET | `/api/deploy?order=123,456` | 批量查询证书（最多 100 个，不分页） |'
+forbid_literal README.md '| GET | `/api/deploy` |'
+require_literal skills/api.md '"order_id": 123'
+require_literal skills/api.md '已有正整数订单 ID'
+require_literal skills/api.md '携带非空 `csr` 的提交 POST 是例外'
+require_literal skills/api.md 'time.Now().Format(time.RFC3339)'
+require_literal deploy-spec.md '`order_id` 必须是正整数'
+require_literal deploy-spec.md '传输层不得自动重试，也不得直接重放 POST'
+forbid_literal README.md '/api/deploy?query='
+forbid_literal README.md '/api/deploy?order_id='
+forbid_literal skills/api.md '新申请时可为 0'
+forbid_literal skills/api.md '`order_id=0`'
+forbid_literal skills/api.md 'resubmit_required'
+forbid_literal deploy-spec.md '`order_id=0`'
 
 hash_file() {
     if command -v sha256sum >/dev/null 2>&1; then

@@ -9,6 +9,60 @@ import (
 	"testing"
 )
 
+func TestValidationFileRecordsJSONRoundTripAndZeroValue(t *testing.T) {
+	var zero CertMetadata
+	data, err := json.Marshal(zero)
+	if err != nil {
+		t.Fatalf("Marshal(zero) error = %v", err)
+	}
+	if strings.Contains(string(data), "validation_files") {
+		t.Fatalf("零值不应写出 validation_files: %s", data)
+	}
+
+	want := []ValidationFileRecord{{
+		SiteName:     "Default Web Site",
+		RelativePath: filepath.Join(".well-known", "acme-challenge", "token"),
+		SHA256:       "0123456789abcdef",
+	}}
+	meta := CertMetadata{ValidationFiles: want}
+	data, err = json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var got CertMetadata
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if len(got.ValidationFiles) != 1 || got.ValidationFiles[0] != want[0] {
+		t.Fatalf("round-trip = %+v, want %+v", got.ValidationFiles, want)
+	}
+}
+
+func TestNextBatchOrderIDJSONRoundTripAndZeroValue(t *testing.T) {
+	data, err := json.Marshal(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var zero Config
+	if err := json.Unmarshal(data, &zero); err != nil {
+		t.Fatal(err)
+	}
+	if zero.NextBatchOrderID != 0 {
+		t.Fatalf("旧配置零值 cursor = %d", zero.NextBatchOrderID)
+	}
+	data, err = json.Marshal(Config{NextBatchOrderID: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Config
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.NextBatchOrderID != 42 {
+		t.Fatalf("round-trip cursor = %d", got.NextBatchOrderID)
+	}
+}
+
 func TestValidateValidationMethod(t *testing.T) {
 	tests := []struct {
 		name     string

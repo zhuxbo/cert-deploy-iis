@@ -30,16 +30,16 @@ const (
 )
 
 var (
-	user32                = syscall.NewLazyDLL("user32.dll")
-	gdi32                 = syscall.NewLazyDLL("gdi32.dll")
-	procCreateWindowExW   = user32.NewProc("CreateWindowExW")
-	procInvalidateRect    = user32.NewProc("InvalidateRect")
-	procFillRect          = user32.NewProc("FillRect")
-	procCreateSolidBrush  = gdi32.NewProc("CreateSolidBrush")
-	procDeleteObject      = gdi32.NewProc("DeleteObject")
-	procPolygon           = gdi32.NewProc("Polygon")
-	procSelectObject      = gdi32.NewProc("SelectObject")
-	procGetStockObject    = gdi32.NewProc("GetStockObject")
+	user32               = syscall.NewLazyDLL("user32.dll")
+	gdi32                = syscall.NewLazyDLL("gdi32.dll")
+	procCreateWindowExW  = user32.NewProc("CreateWindowExW")
+	procInvalidateRect   = user32.NewProc("InvalidateRect")
+	procFillRect         = user32.NewProc("FillRect")
+	procCreateSolidBrush = gdi32.NewProc("CreateSolidBrush")
+	procDeleteObject     = gdi32.NewProc("DeleteObject")
+	procPolygon          = gdi32.NewProc("Polygon")
+	procSelectObject     = gdi32.NewProc("SelectObject")
+	procGetStockObject   = gdi32.NewProc("GetStockObject")
 )
 
 type point struct {
@@ -47,7 +47,7 @@ type point struct {
 }
 
 // NewStatusIndicator 创建状态指示器
-func NewStatusIndicator(parent win.HWND, x, y, ctrlID int) *StatusIndicator {
+func NewStatusIndicator(parent win.HWND, x, y, width, height, ctrlID int) *StatusIndicator {
 	si := &StatusIndicator{
 		parent: parent,
 		state:  IndicatorStopped,
@@ -65,8 +65,8 @@ func NewStatusIndicator(parent win.HWND, x, y, ctrlID int) *StatusIndicator {
 		style,
 		uintptr(x),
 		uintptr(y),
-		uintptr(indicatorWidth),
-		uintptr(indicatorHeight),
+		uintptr(width),
+		uintptr(height),
 		uintptr(parent),
 		uintptr(ctrlID),
 		0,
@@ -98,9 +98,9 @@ func (si *StatusIndicator) GetState() IndicatorState {
 	return si.state
 }
 
-// SetPosition 设置位置
-func (si *StatusIndicator) SetPosition(x, y int) {
-	si.hwnd.SetWindowPos(0, x, y, indicatorWidth, indicatorHeight, co.SWP_NOZORDER)
+// SetBounds 设置位置和大小
+func (si *StatusIndicator) SetBounds(x, y, width, height int) {
+	_ = si.hwnd.SetWindowPos(0, x, y, width, height, co.SWP_NOZORDER)
 }
 
 // invalidate 使控件无效，触发重绘

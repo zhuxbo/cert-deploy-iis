@@ -103,6 +103,28 @@ sign_file() {
     log_success "签名完成: $exe"
 }
 
+# resolve_windows_powershell 经 %WINDIR% 直接定位系统 Windows PowerShell。
+# 与 release.sh 的 windows_powershell 同策略：不依赖 PATH，避开应用别名与 PowerShell 7 的行为差异。
+# 仅在 %WINDIR% 下找不到时才回退 PATH 查找。
+resolve_windows_powershell() {
+    local win_path native_path candidate
+    if command -v cygpath >/dev/null 2>&1; then
+        win_path="${WINDIR:-C:\\Windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+        native_path="$(cygpath -u "$win_path")"
+        if [ -x "$native_path" ]; then
+            printf '%s' "$native_path"
+            return 0
+        fi
+    fi
+    for candidate in powershell.exe powershell; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ========================================
 # 验证签名
 # ========================================
@@ -114,14 +136,10 @@ verify_file() {
     log_info "验证签名: $exe"
     MSYS_NO_PATHCONV=1 "$signtool_path" verify /pa /all "$win_exe"
     local powershell_path actual_thumbprint expected_thumbprint
-    if command -v powershell.exe &>/dev/null; then
-        powershell_path="powershell.exe"
-    elif command -v powershell &>/dev/null; then
-        powershell_path="powershell"
-    else
+    powershell_path="$(resolve_windows_powershell)" || {
         log_error "找不到 Windows PowerShell，无法核对签名证书指纹"
         exit 1
-    fi
+    }
     actual_thumbprint=$(SSLCTLW_VERIFY_EXE="$win_exe" MSYS_NO_PATHCONV=1 "$powershell_path" \
         -NoProfile -NonInteractive -Command \
         '$s = Get-AuthenticodeSignature -LiteralPath $env:SSLCTLW_VERIFY_EXE; if ($s.Status -ne "Valid" -or $null -eq $s.SignerCertificate) { exit 1 }; $s.SignerCertificate.Thumbprint') || {

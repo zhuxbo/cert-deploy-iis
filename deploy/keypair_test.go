@@ -46,6 +46,25 @@ func genSelfSignedPair(t *testing.T, cn string) (certPEM, keyPEM string) {
 	return certPEM, keyPEM
 }
 
+func genCSRForTestKey(t *testing.T, cn, keyPEM string) string {
+	t.Helper()
+	block, _ := pem.Decode([]byte(keyPEM))
+	if block == nil {
+		t.Fatal("解析测试私钥 PEM 失败")
+	}
+	key, err := x509.ParseECPrivateKey(block.Bytes)
+	if err != nil {
+		t.Fatalf("解析测试 EC 私钥失败: %v", err)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: cn},
+	}, key)
+	if err != nil {
+		t.Fatalf("生成测试 CSR 失败: %v", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
+}
+
 // callbackRecorder 线程安全的回调记录器（sendCallback 为异步 goroutine）
 type callbackRecorder struct {
 	mu   sync.Mutex
@@ -131,7 +150,7 @@ func TestDeployCertWithRules_KeyPairMismatch(t *testing.T) {
 	}
 	certCfg := makeTestCertConfig(101, "a.example.com", true)
 
-	results, rep := deployCertWithRules(d, client, certData, wrongKey, certCfg, nil, nil)
+	results, rep := deployCertWithRules(d, client, certData, wrongKey, certCfg, 0, nil, nil)
 	d.WaitCallbacks()
 
 	if converterCalled {
@@ -171,7 +190,7 @@ func TestDeployCertAutoMode_KeyPairMismatch(t *testing.T) {
 			return "/tmp/test.pfx", nil
 		}},
 		Installer: &MockCertInstaller{},
-		Binder: &MockIISBinder{FindBindingsForDomainsFunc: func(domains []string) (map[string]*iis.SSLBinding, error) {
+		Binder: &MockIISBinder{FindBindingsForDomainsFunc: func(domains []string) ([]iis.SSLBinding, error) {
 			findCalled = true
 			return nil, nil
 		}},
@@ -247,7 +266,7 @@ func TestDeployCertWithRules_ValidPair_Proceeds(t *testing.T) {
 	}
 	certCfg := makeTestCertConfig(103, "ok.example.com", true)
 
-	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, nil, nil)
+	results, rep := deployCertWithRules(d, client, certData, keyPEM, certCfg, 0, nil, nil)
 	d.WaitCallbacks()
 
 	if !converterCalled {

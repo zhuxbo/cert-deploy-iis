@@ -11,6 +11,7 @@ import (
 var (
 	TestAPIBaseURL = getEnvOrDefault("TEST_API_BASE_URL", "https://manager.test.pzo.cn/api/deploy")
 	TestToken      = os.Getenv("TEST_API_TOKEN") // 必须通过环境变量设置
+	TestOrderQuery = os.Getenv("TEST_ORDER_QUERY")
 )
 
 // getEnvOrDefault 获取环境变量，如果不存在则返回默认值
@@ -26,9 +27,9 @@ func TestMain(m *testing.M) {
 	localOnly := os.Getenv("TEST_LOCAL_ONLY") != ""
 
 	// 检查必要的环境变量（本地测试模式跳过）
-	if TestToken == "" && !localOnly {
-		println("错误: 必须设置 TEST_API_TOKEN 环境变量")
-		println("用法: set TEST_API_TOKEN=your_token && go test -tags=integration ./integration/...")
+	if (TestToken == "" || TestOrderQuery == "") && !localOnly {
+		println("错误: 必须设置 TEST_API_TOKEN 与 TEST_ORDER_QUERY 环境变量")
+		println("用法: set TEST_API_TOKEN=your_token && set TEST_ORDER_QUERY=123,456 && go test -tags=integration ./integration/...")
 		println("")
 		println("如果只运行本地测试（不需要 API），请设置:")
 		println("  set TEST_LOCAL_ONLY=1 && go test -tags=integration ./integration/... -run \"TestIISLocal|TestUpgradeLocal\" -v")

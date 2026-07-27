@@ -12,6 +12,7 @@ import (
 
 	"sslctlw/cert"
 	"sslctlw/config"
+	"sslctlw/deploy"
 	"sslctlw/iis"
 	"sslctlw/upgrade"
 	"sslctlw/util"
@@ -96,9 +97,12 @@ type AppWindow struct {
 	lblTaskStatus   *ui.Static
 	txtTaskLog      *ui.Edit
 	statusIndicator *StatusIndicator // 状态指示器
+	taskHealthQuery func(string) (*util.TaskHealth, error)
+	now             func() time.Time
+	checkTimeout    func() <-chan time.Time
 
-	logBuffer  *LogBuffer      // 日志缓存组件
-	toolbarBtns *ButtonGroup   // 新增: 工具栏按钮组
+	logBuffer   *LogBuffer   // 日志缓存组件
+	toolbarBtns *ButtonGroup // 新增: 工具栏按钮组
 }
 
 // getCerts 安全获取证书列表副本
@@ -145,9 +149,14 @@ func RunApp() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	app := &AppWindow{
-		bgTask:    NewBackgroundTask(),
-		ctx:       ctx,
-		cancelCtx: cancel,
+		bgTask:          NewBackgroundTask(),
+		ctx:             ctx,
+		cancelCtx:       cancel,
+		taskHealthQuery: util.GetTaskHealth,
+		now:             time.Now,
+		checkTimeout: func() <-chan time.Time {
+			return time.After(10 * time.Minute)
+		},
 	}
 
 	// 创建主窗口
@@ -289,7 +298,12 @@ func RunApp() {
 		app.statusBar.Parts.AddResizable("就绪", 1)
 
 		// 创建状态指示器
-		app.statusIndicator = NewStatusIndicator(app.mainWnd.Hwnd(), 300, 465, 1001)
+		app.statusIndicator = NewStatusIndicator(
+			app.mainWnd.Hwnd(),
+			ui.DpiX(300), ui.DpiY(465),
+			ui.DpiX(indicatorWidth), ui.DpiY(indicatorHeight),
+			1001,
+		)
 
 		// 延迟初始化
 		go func() {
@@ -299,42 +313,7 @@ func RunApp() {
 			case <-time.After(100 * time.Millisecond):
 			}
 
-			// 异步检查任务计划状态
-			go func() {
-				// 检查 context 是否已取消
-				select {
-				case <-app.ctx.Done():
-					return
-				default:
-				}
-
-				cfg, _ := config.Load()
-				taskName := util.DefaultTaskName
-				if cfg != nil && cfg.TaskName != "" {
-					taskName = cfg.TaskName
-				}
-				taskExists := util.IsTaskExists(taskName)
-
-				// 再次检查 context
-				select {
-				case <-app.ctx.Done():
-					return
-				default:
-				}
-
-				app.mainWnd.UiThread(func() {
-					if taskExists {
-						app.btnAutoCheck.SetText("停止自动部署")
-						app.statusIndicator.SetState(IndicatorRunning)
-						app.lblTaskStatus.Hwnd().SetWindowText("状态: 任务计划运行中")
-						app.appendTaskLog("检测到任务计划已启用")
-					} else {
-						app.btnAutoCheck.SetText("启动自动部署")
-						app.statusIndicator.SetState(IndicatorStopped)
-						app.lblTaskStatus.Hwnd().SetWindowText("状态: 未启动")
-					}
-				})
-			}()
+			app.refreshAutoCheckStatus()
 
 			// 检查 context
 			select {
@@ -344,7 +323,7 @@ func RunApp() {
 			}
 
 			// 加载数据
-			app.mainWnd.UiThread(func() {
+			app.uiThreadIfActive(func() {
 				app.setButtonsEnabled(false)
 				app.setStatus("正在加载...")
 			})
@@ -371,29 +350,26 @@ func RunApp() {
 			return
 		}
 		cx, cy := int(p.ClientAreaSize().Cx), int(p.ClientAreaSize().Cy)
+		layout := calculateMainLayout(cx, cy, currentMainLayoutMetrics())
 
-		// 调整站点列表大小
-		toolbarHeight := MarginMedium + ButtonHeight + MarginMedium
-		listHeight := cy - toolbarHeight - StatusBarHeight - TaskPanelHeight
-		if listHeight < ListMinHeight {
-			listHeight = ListMinHeight
-		}
-		app.siteList.Hwnd().SetWindowPos(0, MarginMedium, toolbarHeight, cx-MarginLarge, listHeight, co.SWP_NOZORDER)
-
-		// 调整后台任务面板位置
-		taskPanelY := toolbarHeight + listHeight + MarginSmall
-		app.lblTaskSection.Hwnd().SetWindowPos(0, MarginMedium, taskPanelY, 200, 20, co.SWP_NOZORDER)
-		app.btnAutoCheck.Hwnd().SetWindowPos(0, MarginMedium, taskPanelY+25, ButtonWidthLarge, ButtonHeight, co.SWP_NOZORDER)
-		app.btnCheckNow.Hwnd().SetWindowPos(0, MarginMedium+ButtonWidthLarge+MarginMedium, taskPanelY+25, ButtonWidthMedium, ButtonHeight, co.SWP_NOZORDER)
-		app.btnConfig.Hwnd().SetWindowPos(0, MarginMedium+ButtonWidthLarge+ButtonWidthMedium+MarginLarge, taskPanelY+25, ButtonWidthMedium, ButtonHeight, co.SWP_NOZORDER)
+		_ = app.siteList.Hwnd().SetWindowPos(0, layout.siteList.x, layout.siteList.y, layout.siteList.width, layout.siteList.height, co.SWP_NOZORDER)
+		_ = app.lblTaskSection.Hwnd().SetWindowPos(0, layout.taskSection.x, layout.taskSection.y, layout.taskSection.width, layout.taskSection.height, co.SWP_NOZORDER)
+		_ = app.btnAutoCheck.Hwnd().SetWindowPos(0, layout.autoButton.x, layout.autoButton.y, layout.autoButton.width, layout.autoButton.height, co.SWP_NOZORDER)
+		_ = app.btnCheckNow.Hwnd().SetWindowPos(0, layout.checkButton.x, layout.checkButton.y, layout.checkButton.width, layout.checkButton.height, co.SWP_NOZORDER)
+		_ = app.btnConfig.Hwnd().SetWindowPos(0, layout.configButton.x, layout.configButton.y, layout.configButton.width, layout.configButton.height, co.SWP_NOZORDER)
 
 		// 状态指示器位置
 		if app.statusIndicator != nil {
-			app.statusIndicator.SetPosition(300, taskPanelY+ButtonHeight)
+			app.statusIndicator.SetBounds(
+				layout.statusIndicator.x,
+				layout.statusIndicator.y,
+				layout.statusIndicator.width,
+				layout.statusIndicator.height,
+			)
 		}
 
-		app.lblTaskStatus.Hwnd().SetWindowPos(0, 330, taskPanelY+30, cx-350, 20, co.SWP_NOZORDER)
-		app.txtTaskLog.Hwnd().SetWindowPos(0, MarginMedium, taskPanelY+60, cx-MarginLarge, cy-taskPanelY-60-StatusBarHeight-MarginSmall, co.SWP_NOZORDER)
+		_ = app.lblTaskStatus.Hwnd().SetWindowPos(0, layout.statusLabel.x, layout.statusLabel.y, layout.statusLabel.width, layout.statusLabel.height, co.SWP_NOZORDER)
+		_ = app.txtTaskLog.Hwnd().SetWindowPos(0, layout.taskLog.x, layout.taskLog.y, layout.taskLog.width, layout.taskLog.height, co.SWP_NOZORDER)
 	})
 
 	// 按钮事件
@@ -447,7 +423,7 @@ func RunApp() {
 		app.withPausedTaskUpdate(func() {
 			ShowCertManagerDialog(app.mainWnd, func() {
 				go func() {
-					app.mainWnd.UiThread(func() {
+					app.uiThreadIfActive(func() {
 						app.appendTaskLog("配置已更新")
 					})
 				}()
@@ -457,9 +433,7 @@ func RunApp() {
 
 	// 设置后台任务更新回调
 	app.bgTask.SetOnUpdate(func() {
-		app.mainWnd.UiThread(func() {
-			app.updateTaskStatus()
-		})
+		app.uiThreadIfActive(app.updateTaskStatus)
 	})
 
 	// 窗口关闭时清理资源
@@ -475,6 +449,22 @@ func RunApp() {
 	app.mainWnd.RunAsMain()
 }
 
+func (app *AppWindow) uiThreadIfActive(fn func()) {
+	select {
+	case <-app.ctx.Done():
+		return
+	default:
+	}
+	app.mainWnd.UiThread(func() {
+		select {
+		case <-app.ctx.Done():
+			return
+		default:
+			fn()
+		}
+	})
+}
+
 // toggleAutoCheck 切换自动部署状态（使用 Windows 任务计划）
 func (app *AppWindow) toggleAutoCheck() {
 	app.btnAutoCheck.Hwnd().EnableWindow(false)
@@ -487,19 +477,30 @@ func (app *AppWindow) toggleAutoCheck() {
 		default:
 		}
 
-		cfg, _ := config.Load()
+		cfg, loadErr := config.Load()
+		if loadErr != nil {
+			app.uiThreadIfActive(func() {
+				app.btnAutoCheck.Hwnd().EnableWindow(true)
+				app.appendTaskLog(fmt.Sprintf("加载配置失败: %v", loadErr))
+			})
+			return
+		}
 		taskName := util.DefaultTaskName
 		if cfg != nil && cfg.TaskName != "" {
 			taskName = cfg.TaskName
 		}
 
-		taskExists := util.IsTaskExists(taskName)
-
-		if taskExists {
+		// 切换方向以用户持久化意图为准，避免计划任务查询失败被误判为“不存在”后覆盖外部状态。
+		if cfg != nil && cfg.AutoCheckEnabled {
 			// 停止：删除任务计划
 			err := util.DeleteTask(taskName)
+			var saveErr error
+			if err == nil && cfg != nil {
+				cfg.AutoCheckEnabled = false
+				saveErr = cfg.Save()
+			}
 
-			app.mainWnd.UiThread(func() {
+			app.uiThreadIfActive(func() {
 				app.btnAutoCheck.Hwnd().EnableWindow(true)
 
 				if err != nil {
@@ -508,11 +509,13 @@ func (app *AppWindow) toggleAutoCheck() {
 					return
 				}
 
-				if cfg != nil {
-					cfg.AutoCheckEnabled = false
-					if err := cfg.Save(); err != nil {
-						app.appendTaskLog(fmt.Sprintf("警告: 保存配置失败: %v", err))
-					}
+				if saveErr != nil {
+					app.btnAutoCheck.SetText("停止自动部署")
+					app.statusIndicator.SetState(IndicatorStopped)
+					app.lblTaskStatus.Hwnd().SetWindowText("状态: 任务计划不健康")
+					app.appendTaskLog(fmt.Sprintf("任务计划已删除，但保存停用状态失败: %v", saveErr))
+					app.appendTaskLog("配置与任务计划状态可能不一致，请人工处理")
+					return
 				}
 
 				app.btnAutoCheck.SetText("启动自动部署")
@@ -523,7 +526,7 @@ func (app *AppWindow) toggleAutoCheck() {
 		} else {
 			// 启动：创建任务计划
 			if cfg == nil || len(cfg.Certificates) == 0 {
-				app.mainWnd.UiThread(func() {
+				app.uiThreadIfActive(func() {
 					app.btnAutoCheck.Hwnd().EnableWindow(true)
 					app.appendTaskLog("请先配置证书后再启动自动部署")
 				})
@@ -531,8 +534,13 @@ func (app *AppWindow) toggleAutoCheck() {
 			}
 
 			err := util.CreateTask(taskName)
+			var saveErr error
+			if err == nil {
+				cfg.AutoCheckEnabled = true
+				saveErr = cfg.Save()
+			}
 
-			app.mainWnd.UiThread(func() {
+			app.uiThreadIfActive(func() {
 				app.btnAutoCheck.Hwnd().EnableWindow(true)
 
 				if err != nil {
@@ -541,9 +549,13 @@ func (app *AppWindow) toggleAutoCheck() {
 					return
 				}
 
-				cfg.AutoCheckEnabled = true
-				if err := cfg.Save(); err != nil {
-					app.appendTaskLog(fmt.Sprintf("警告: 保存配置失败: %v", err))
+				if saveErr != nil {
+					app.btnAutoCheck.SetText("启动自动部署")
+					app.statusIndicator.SetState(IndicatorStopped)
+					app.lblTaskStatus.Hwnd().SetWindowText("状态: 任务计划不健康")
+					app.appendTaskLog(fmt.Sprintf("任务计划已创建，但保存启用状态失败: %v", saveErr))
+					app.appendTaskLog("配置与任务计划状态可能不一致，请人工处理")
+					return
 				}
 
 				app.btnAutoCheck.SetText("停止自动部署")
@@ -559,24 +571,60 @@ func (app *AppWindow) toggleAutoCheck() {
 // refreshAutoCheckStatus 刷新自动部署按钮和状态指示器
 func (app *AppWindow) refreshAutoCheckStatus() {
 	go func() {
-		cfg, _ := config.Load()
+		select {
+		case <-app.ctx.Done():
+			return
+		default:
+		}
+
+		cfg, loadErr := config.Load()
+		if loadErr != nil {
+			select {
+			case <-app.ctx.Done():
+				return
+			default:
+			}
+			app.uiThreadIfActive(func() {
+				app.statusIndicator.SetState(IndicatorStopped)
+				app.lblTaskStatus.Hwnd().SetWindowText("状态: 任务计划不健康")
+				app.appendTaskLog(fmt.Sprintf("加载配置失败: %v", loadErr))
+			})
+			return
+		}
 		taskName := util.DefaultTaskName
 		if cfg != nil && cfg.TaskName != "" {
 			taskName = cfg.TaskName
 		}
-		taskExists := util.IsTaskExists(taskName)
+		query := app.taskHealthQuery
+		if query == nil {
+			query = util.GetTaskHealth
+		}
+		now := time.Now()
+		if app.now != nil {
+			now = app.now()
+		}
+		enabled := cfg != nil && cfg.AutoCheckEnabled
+		healthy, message := queryTaskHealthPresentation(enabled, taskName, now, query)
 
-		app.mainWnd.UiThread(func() {
-			if taskExists {
+		select {
+		case <-app.ctx.Done():
+			return
+		default:
+		}
+		app.uiThreadIfActive(func() {
+			if enabled {
 				app.btnAutoCheck.SetText("停止自动部署")
-				app.statusIndicator.SetState(IndicatorRunning)
-				app.lblTaskStatus.Hwnd().SetWindowText("状态: 任务计划运行中 (每天一次)")
-				app.appendTaskLog("一键部署完成，自动部署已启动")
 			} else {
 				app.btnAutoCheck.SetText("启动自动部署")
-				app.statusIndicator.SetState(IndicatorStopped)
-				app.lblTaskStatus.Hwnd().SetWindowText("状态: 未启动")
 			}
+			if healthy {
+				app.statusIndicator.SetState(IndicatorRunning)
+				app.lblTaskStatus.Hwnd().SetWindowText("状态: " + message)
+			} else {
+				app.statusIndicator.SetState(IndicatorStopped)
+				app.lblTaskStatus.Hwnd().SetWindowText("状态: " + message)
+			}
+			app.appendTaskLog(message)
 		})
 	}()
 }
@@ -589,7 +637,7 @@ func (app *AppWindow) runCheckNow() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("runCheckNow panic: %v", r)
-				app.mainWnd.UiThread(func() {
+				app.uiThreadIfActive(func() {
 					app.btnCheckNow.Hwnd().EnableWindow(true)
 					app.appendTaskLog(fmt.Sprintf("检测异常: %v", r))
 				})
@@ -603,43 +651,51 @@ func (app *AppWindow) runCheckNow() {
 		default:
 		}
 
-		cfg, _ := config.Load()
+		cfg, loadErr := config.Load()
+		if loadErr != nil {
+			app.uiThreadIfActive(func() {
+				app.btnCheckNow.Hwnd().EnableWindow(true)
+				app.appendTaskLog(fmt.Sprintf("加载配置失败: %v", loadErr))
+			})
+			return
+		}
 
 		if cfg == nil || len(cfg.Certificates) == 0 {
-			app.mainWnd.UiThread(func() {
+			app.uiThreadIfActive(func() {
 				app.btnCheckNow.Hwnd().EnableWindow(true)
 				app.appendTaskLog("请先配置证书后再执行检测")
 			})
 			return
 		}
 
-		app.mainWnd.UiThread(func() {
+		app.uiThreadIfActive(func() {
 			app.appendTaskLog("开始手动检测...")
 		})
 
 		// 使用带超时的通道，防止 RunOnceSync 永久阻塞
 		done := make(chan struct{})
 		go func() {
+			defer close(done)
 			app.bgTask.RunOnceSync()
-			close(done)
 		}()
 
-		select {
-		case <-done:
-			// 正常完成
-		case <-time.After(10 * time.Minute):
-			app.mainWnd.UiThread(func() {
-				app.appendTaskLog("检测超时（10分钟），请检查网络或 IIS 状态")
+		timeout := app.checkTimeout
+		if timeout == nil {
+			timeout = func() <-chan time.Time { return time.After(10 * time.Minute) }
+		}
+		completed := observeWorker(done, timeout(), app.ctx.Done(), func() {
+			app.uiThreadIfActive(func() {
+				app.appendTaskLog("观察超时（10分钟），后台仍可能运行；将在任务结束后恢复按钮")
 			})
-		case <-app.ctx.Done():
+		})
+		if !completed || app.ctx.Err() != nil {
 			return
 		}
 
-		app.doLoadDataAsync(func() {
-			app.mainWnd.UiThread(func() {
-				app.btnCheckNow.Hwnd().EnableWindow(true)
-			})
+		app.uiThreadIfActive(func() {
+			app.btnCheckNow.Hwnd().EnableWindow(true)
 		})
+		app.doLoadDataAsync(nil)
 	}()
 }
 
@@ -665,17 +721,36 @@ func (app *AppWindow) updateTaskStatus() {
 
 	app.lblTaskStatus.Hwnd().SetWindowText(statusText)
 
+	report := app.bgTask.GetReport()
 	if status == TaskStatusRunning {
 		app.appendTaskLog(message)
+		if report.AlreadyRunning {
+			app.appendRunReportDetails(report)
+		}
 	} else if status == TaskStatusSuccess || status == TaskStatusFailed {
 		app.appendTaskLog(message)
-		results := app.bgTask.GetResults()
-		for _, r := range results {
-			if r.Success {
-				app.appendTaskLog(fmt.Sprintf("  ✓ %s: %s", r.Domain, r.Message))
-			} else {
-				app.appendTaskLog(fmt.Sprintf("  ✗ %s: %s", r.Domain, r.Message))
-			}
+		app.appendRunReportDetails(report)
+	}
+}
+
+func (app *AppWindow) appendRunReportDetails(report deploy.RunReport) {
+	for _, result := range report.Results {
+		if result.Success {
+			app.appendTaskLog(fmt.Sprintf("  ✓ %s: %s", result.Domain, result.Message))
+		} else {
+			app.appendTaskLog(fmt.Sprintf("  ✗ %s: %s", result.Domain, result.Message))
+		}
+	}
+	for _, warning := range report.Warnings {
+		app.appendTaskLog("  ⚠ " + warning)
+	}
+	for _, attention := range report.Attention {
+		app.appendTaskLog(fmt.Sprintf("  需人工处理: 订单 %d %s (%s)",
+			attention.OrderID, attention.Domain, attention.Reason))
+	}
+	for _, runErr := range report.Errors {
+		if runErr != nil {
+			app.appendTaskLog("  错误: " + runErr.Error())
 		}
 	}
 }
@@ -887,9 +962,7 @@ func (app *AppWindow) onBindCert() {
 func (app *AppWindow) withPausedTaskUpdate(fn func()) {
 	app.bgTask.SetOnUpdate(nil)
 	defer app.bgTask.SetOnUpdate(func() {
-		app.mainWnd.UiThread(func() {
-			app.updateTaskStatus()
-		})
+		app.uiThreadIfActive(app.updateTaskStatus)
 	})
 	fn()
 }

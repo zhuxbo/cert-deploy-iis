@@ -24,7 +24,7 @@ func TestSSLBinding(t *testing.T) {
 	client := api.NewClient(TestAPIBaseURL, TestToken)
 
 	// 获取一个有效的证书
-	certs, err := client.ListCertsByDomain(context.Background(), "")
+	certs, err := client.ListCertsByQuery(context.Background(), TestOrderQuery)
 	if err != nil {
 		t.Fatalf("获取证书列表失败: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestFindBindingsIgnoresIPBinding(t *testing.T) {
 	client := api.NewClient(TestAPIBaseURL, TestToken)
 
 	// 获取一个通配符证书
-	certs, err := client.ListCertsByDomain(context.Background(), "")
+	certs, err := client.ListCertsByQuery(context.Background(), TestOrderQuery)
 	if err != nil {
 		t.Fatalf("获取证书列表失败: %v", err)
 	}

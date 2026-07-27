@@ -223,6 +223,12 @@ defer util.CleanupTempFile(pfxPath)
 result, err := cert.InstallPFX(pfxPath, password)
 ```
 
+### 计划任务兼容性
+
+自动部署任务使用系统 `schtasks.exe /create` 参数创建每日 SYSTEM 任务，不手写任务 XML。
+保留 `/ru SYSTEM`、`/rl HIGHEST` 和 `/f`，并用纯函数测试完整参数及含空格的程序路径。
+Windows Server 2016 是兼容验证重点，不得为增加高级任务属性重新引入未经各支持版本验证的 XML。
+
 ## 并发模式
 
 后台任务使用 goroutine + channel：

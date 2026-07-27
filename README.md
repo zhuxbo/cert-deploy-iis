@@ -4,7 +4,7 @@
 
 ## 功能
 
-- 一键部署：`sslctlw setup --url <url> --token <token> [--order <ids>]`
+- 一键部署：`sslctlw setup --url <url> --token <token> --order <ids>`
 - 扫描 IIS 站点和绑定信息
 - 自动部署和续签证书
 - 查看已安装的 SSL 证书
@@ -38,7 +38,6 @@ irm https://release.example.com/sslctlw/install.ps1 -OutFile install.ps1
 sslctlw [--debug] <command> [options]
 
 # 一键部署
-sslctlw setup --url <url> --token <token>
 sslctlw setup --url <url> --token <token> --order <id>
 sslctlw setup --url <url> --token <token> --order "123,456"
 
@@ -76,7 +75,11 @@ sslctlw help
 
 ### 自动部署
 
-计划任务调用 `sslctlw deploy --all` 实现自动续签。`setup` 命令会自动创建计划任务（XML 定义，启用错过补偿：关机错过计划时间后开机补跑）。`status` 命令显示任务上次运行时间与结果，停摆时告警。
+计划任务调用 `sslctlw deploy --all` 实现自动续签。`setup` 命令通过 Windows 自带的 `schtasks` 参数创建每日 SYSTEM 任务，兼容 Windows Server 2012+（包括 Server 2016）。CLI 与 GUI 会完整展示自动部署报告中的部署结果、运行错误、警告、人工处理事项和“已有部署正在运行”状态，不会把“结果为空但有错误”误报为无需更新。
+
+`status` 命令与 GUI 会综合计划任务查询结果、上次运行时间和退出结果判断健康状态；查询失败、从未运行、超过 25 小时未运行或上次结果非零都会明确显示为不健康。GUI 手动检查的 10 分钟限制仅是观察超时：部署工作不会因此被中止，按钮会在实际后台工作结束后恢复。
+
+续签替换 IIS 证书时会保留原绑定的 AppID，以及已由 Windows HTTP API 确认的客户端证书协商、CTL 和吊销检查参数；结构化查询不可用而降级捕获时会记录无法完整保真的警告。
 
 ## API 接口
 
@@ -86,9 +89,8 @@ sslctlw help
 
 | 方法 | 路径 | 功能 |
 |------|------|------|
-| GET | `/api/deploy` | 获取证书列表 |
-| GET | `/api/deploy?query=id1,id2` | 批量查询证书 |
-| GET | `/api/deploy?order_id=123` | 按订单查询 |
+| GET | `/api/deploy?order=123` | 按订单查询 |
+| GET | `/api/deploy?order=123,456` | 批量查询证书（最多 100 个，不分页） |
 | POST | `/api/deploy` | 提交 CSR（本机提交模式） |
 | POST | `/api/deploy/callback` | 部署回调 |
 
@@ -102,7 +104,9 @@ API 配置在证书级别，每个证书可以有不同的 API 地址和 Token�
 - Windows 环境 (使用 windigo GUI 库)
 
 Windows 开发环境须保留仓库 `.gitattributes` 的 LF 规则；Shell 脚本及治理薄入口依赖该规则进行确定性字节比较。
-Git Bash 中的发布脚本通过 `%WINDIR%` 直接定位系统 `powershell.exe` 执行 Access DACL 校验，避免 PATH、应用别名与 PowerShell 7 文件 ACL API 差异。
+GUI 的动态布局尺寸统一按系统 DPI 换算，支持服务器本机及远程桌面的 100%、125%、150% 显示缩放。
+URL/SSRF 单元测试使用可控 DNS 解析结果，避免开发机、沙箱或 CI 的 DNS 策略影响测试结论。
+Git Bash 中的发布脚本通过 `%WINDIR%` 直接定位系统 `powershell.exe` 执行 Access DACL 校验与签名证书指纹核对，避免 PATH、应用别名与 PowerShell 7 文件 ACL API 差异。
 Python 解释器会在实际通过 3.9+ 版本探测后才被采用，Windows Store/WSL 等不可执行应用别名会被忽略。
 发布子流程复用当前 Git Bash 的绝对路径，不通过 PATH 解析 Windows 的 `bash.exe`/WSL 应用别名。
 

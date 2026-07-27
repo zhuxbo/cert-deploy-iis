@@ -1,17 +1,37 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"sslctlw/util"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type callbackReadErrorBody struct{}
+
+func (callbackReadErrorBody) Read([]byte) (int, error) {
+	return 0, errors.New("响应读取失败")
+}
+
+func (callbackReadErrorBody) Close() error {
+	return nil
+}
 
 func TestNewClient(t *testing.T) {
 	client := NewClient("https://api.example.com/", "test-token")
@@ -30,6 +50,15 @@ func TestNewClient(t *testing.T) {
 }
 
 func TestIsAllowedAPIURL(t *testing.T) {
+	lookupIP := func(hostname string) ([]net.IP, error) {
+		switch hostname {
+		case "private.example.test":
+			return []net.IP{net.ParseIP("10.0.0.8")}, nil
+		default:
+			return []net.IP{net.ParseIP("203.0.113.10")}, nil
+		}
+	}
+
 	tests := []struct {
 		name      string
 		baseURL   string
@@ -43,13 +72,14 @@ func TestIsAllowedAPIURL(t *testing.T) {
 		{"HTTP 子域名绕过", "http://localhost.evil.com", false},
 		{"HTTP 用户信息绕过", "http://127.0.0.1@evil.com", false},
 		{"HTTP 非本地", "http://example.com", false},
+		{"HTTPS DNS 解析到私网", "https://private.example.test", false},
 		{"非 HTTPS 协议", "ftp://example.com", false},
 		{"缺少协议", "api.example.com", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			allowed, reason := IsAllowedAPIURL(tt.baseURL)
+			allowed, reason := isAllowedAPIURL(tt.baseURL, lookupIP)
 			if allowed != tt.wantAllow {
 				t.Errorf("IsAllowedAPIURL(%q) = %v, want %v (reason: %s)", tt.baseURL, allowed, tt.wantAllow, reason)
 			}
@@ -320,7 +350,7 @@ func TestParseAPIResponse(t *testing.T) {
 	}
 }
 
-func TestListCertsByDomain_Validation(t *testing.T) {
+func TestListCertsByQuery_Validation(t *testing.T) {
 	// 测试配置验证
 	tests := []struct {
 		name    string
@@ -335,15 +365,15 @@ func TestListCertsByDomain_Validation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := NewClient(tt.baseURL, tt.token)
-			_, err := client.ListCertsByDomain(context.Background(), "example.com")
+			_, err := client.ListCertsByQuery(context.Background(), "123")
 			if (err != nil) != tt.wantErr {
-				t.Errorf("ListCertsByDomain() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("ListCertsByQuery() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
-func TestListCertsByDomain_MockServer(t *testing.T) {
+func TestListCertsByQuery_MockServer(t *testing.T) {
 	// 创建 mock 服务器
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 验证请求头
@@ -382,13 +412,13 @@ func TestListCertsByDomain_MockServer(t *testing.T) {
 
 	// 测试成功请求
 	client := NewClient(server.URL, "test-token")
-	certs, err := client.ListCertsByDomain(context.Background(), "example.com")
+	certs, err := client.ListCertsByQuery(context.Background(), "123")
 	if err != nil {
-		t.Fatalf("ListCertsByDomain() error = %v", err)
+		t.Fatalf("ListCertsByQuery() error = %v", err)
 	}
 
 	if len(certs) != 1 {
-		t.Errorf("ListCertsByDomain() 返回 %d 个证书, want 1", len(certs))
+		t.Errorf("ListCertsByQuery() 返回 %d 个证书, want 1", len(certs))
 	}
 
 	if certs[0].OrderID != 123 {
@@ -397,7 +427,7 @@ func TestListCertsByDomain_MockServer(t *testing.T) {
 
 	// 测试未授权
 	badClient := NewClient(server.URL, "wrong-token")
-	_, err = badClient.ListCertsByDomain(context.Background(), "example.com")
+	_, err = badClient.ListCertsByQuery(context.Background(), "123")
 	if err == nil {
 		t.Error("使用错误 token 应该返回错误")
 	}
@@ -459,41 +489,313 @@ func TestGetCertByOrderID_MockServer(t *testing.T) {
 	}
 }
 
-func TestCallback_MockServer(t *testing.T) {
-	var receivedReq *CallbackRequest
+func TestCallback_RejectsInvalidBusinessResponsesWithoutRecordingRenewDays(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "code为0", body: `{"code":0,"msg":"拒绝回调","data":{"renew_before_days":22}}`},
+		{name: "空响应", body: ""},
+		{name: "非法JSON", body: `{"code":1`},
+	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/callback" {
-			w.WriteHeader(http.StatusNotFound)
-			return
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			client := NewClient(server.URL+"/api/deploy", "test-token")
+			client.LastRenewBeforeDays = 14
+			err := client.Callback(context.Background(), &CallbackRequest{
+				OrderID:    123,
+				Status:     "success",
+				DeployedAt: "2026-07-26T12:00:00+08:00",
+			})
+			if err == nil {
+				t.Fatal("Callback() 应拒绝未被 manager 接受的响应")
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("Callback() error 类型 = %T, want *APIError", err)
+			}
+			if client.LastRenewBeforeDays != 14 {
+				t.Fatalf("LastRenewBeforeDays = %d, want 14", client.LastRenewBeforeDays)
+			}
+		})
+	}
+
+	t.Run("响应读取错误", func(t *testing.T) {
+		client := NewClient("http://localhost/api/deploy", "test-token")
+		client.LastRenewBeforeDays = 14
+		client.HTTPClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       callbackReadErrorBody{},
+				Request:    req,
+			}, nil
+		})
+
+		err := client.Callback(context.Background(), &CallbackRequest{
+			OrderID:    123,
+			Status:     "success",
+			DeployedAt: "2026-07-26T12:00:00+08:00",
+		})
+		if err == nil {
+			t.Fatal("Callback() 应返回响应读取错误")
 		}
-
-		var req CallbackRequest
-		json.NewDecoder(r.Body).Decode(&req)
-		receivedReq = &req
-
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "test-token")
-
-	err := client.Callback(context.Background(), &CallbackRequest{
-		OrderID:    123,
-		Status:     "success",
-		DeployedAt: "2024-01-01 00:00:00",
+		if !strings.Contains(err.Error(), "读取") {
+			t.Fatalf("Callback() error = %v, want 包含读取失败上下文", err)
+		}
+		if client.LastRenewBeforeDays != 14 {
+			t.Fatalf("LastRenewBeforeDays = %d, want 14", client.LastRenewBeforeDays)
+		}
 	})
+}
 
-	if err != nil {
-		t.Fatalf("Callback() error = %v", err)
+func TestCallback_AcceptsCodeOneAndRecordsOnlyValidRenewDays(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "缺少data仍成功", body: `{"code":1,"msg":"success"}`, want: 14},
+		{name: "recorded不作为成功前提", body: `{"code":1,"msg":"success","data":{"recorded":false}}`, want: 14},
+		{name: "缺少renew_before_days", body: `{"code":1,"msg":"success","data":{}}`, want: 14},
+		{name: "renew_before_days为0", body: `{"code":1,"msg":"success","data":{"renew_before_days":0}}`, want: 14},
+		{name: "renew_before_days超限", body: `{"code":1,"msg":"success","data":{"renew_before_days":31}}`, want: 14},
+		{name: "合法renew_before_days", body: `{"code":1,"msg":"success","data":{"renew_before_days":22}}`, want: 22},
 	}
 
-	if receivedReq == nil {
-		t.Fatal("服务器未收到请求")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			client := NewClient(server.URL+"/api/deploy", "test-token")
+			client.LastRenewBeforeDays = 14
+			if err := client.Callback(context.Background(), &CallbackRequest{
+				OrderID:    123,
+				Status:     "success",
+				DeployedAt: "2026-07-26T12:00:00+08:00",
+			}); err != nil {
+				t.Fatalf("Callback() error = %v", err)
+			}
+			if client.LastRenewBeforeDays != tt.want {
+				t.Fatalf("LastRenewBeforeDays = %d, want %d", client.LastRenewBeforeDays, tt.want)
+			}
+		})
+	}
+}
+
+func TestCallback_SendsOnlyManagerContractFields(t *testing.T) {
+	tests := []struct {
+		name        string
+		req         CallbackRequest
+		wantMessage bool
+	}{
+		{
+			name: "success不发送message",
+			req: CallbackRequest{
+				OrderID:    101,
+				Status:     "success",
+				DeployedAt: "2026-07-26T12:00:00+08:00",
+				Message:    "调用方误传的失败原因",
+			},
+		},
+		{
+			name: "failure在最终出口脱敏并截断",
+			req: CallbackRequest{
+				OrderID:    102,
+				Status:     "failure",
+				DeployedAt: "2026-07-26T12:01:00+08:00",
+				Message:    "绑定失败 Authorization: Bearer sk-live-secret\n" + strings.Repeat("错", 300),
+			},
+			wantMessage: true,
+		},
 	}
 
-	if receivedReq.OrderID != 123 {
-		t.Errorf("receivedReq.OrderID = %d, want 123", receivedReq.OrderID)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost {
+					t.Errorf("method = %s, want POST", r.Method)
+				}
+				if r.URL.Path != "/api/deploy/callback" {
+					t.Errorf("path = %s, want /api/deploy/callback", r.URL.Path)
+				}
+				if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+					t.Errorf("Authorization = %q, want Bearer test-token", got)
+				}
+				if got := r.Header.Get("Content-Type"); got != "application/json" {
+					t.Errorf("Content-Type = %q, want application/json", got)
+				}
+
+				var payload map[string]json.RawMessage
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Fatalf("解析 callback JSON: %v", err)
+				}
+				wantKeys := map[string]bool{
+					"order_id":    true,
+					"status":      true,
+					"deployed_at": true,
+				}
+				if tt.wantMessage {
+					wantKeys["message"] = true
+				}
+				if len(payload) != len(wantKeys) {
+					t.Errorf("字段数 = %d, want %d；payload = %s", len(payload), len(wantKeys), payload)
+				}
+				for key := range payload {
+					if !wantKeys[key] {
+						t.Errorf("出现非白名单字段 %q", key)
+					}
+				}
+				var orderID int
+				if err := json.Unmarshal(payload["order_id"], &orderID); err != nil {
+					t.Fatalf("解析 order_id: %v", err)
+				}
+				if orderID != tt.req.OrderID {
+					t.Errorf("order_id = %d, want %d", orderID, tt.req.OrderID)
+				}
+				var status string
+				if err := json.Unmarshal(payload["status"], &status); err != nil {
+					t.Fatalf("解析 status: %v", err)
+				}
+				if status != tt.req.Status {
+					t.Errorf("status = %q, want %q", status, tt.req.Status)
+				}
+
+				var deployedAt string
+				if err := json.Unmarshal(payload["deployed_at"], &deployedAt); err != nil {
+					t.Fatalf("解析 deployed_at: %v", err)
+				}
+				if _, err := time.Parse(time.RFC3339, deployedAt); err != nil {
+					t.Errorf("deployed_at = %q，不可按 RFC3339 解析: %v", deployedAt, err)
+				}
+
+				if tt.wantMessage {
+					var message string
+					if err := json.Unmarshal(payload["message"], &message); err != nil {
+						t.Fatalf("解析 message: %v", err)
+					}
+					if strings.Contains(message, "sk-live-secret") {
+						t.Errorf("message 泄漏 Bearer 凭据: %q", message)
+					}
+					if strings.ContainsAny(message, "\r\n") {
+						t.Errorf("message 未折叠换行: %q", message)
+					}
+					if got := len([]rune(message)); got > CallbackMessageMaxRunes {
+						t.Errorf("message rune 数 = %d, want <= %d", got, CallbackMessageMaxRunes)
+					}
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"code":1,"msg":"success"}`))
+			}))
+			defer server.Close()
+
+			client := NewClient(server.URL+"/api/deploy/", "test-token")
+			originalReq := tt.req
+			if err := client.Callback(context.Background(), &tt.req); err != nil {
+				t.Fatalf("Callback() error = %v", err)
+			}
+			if !reflect.DeepEqual(tt.req, originalReq) {
+				t.Fatalf("Callback() 修改了调用方请求：got %+v, want %+v", tt.req, originalReq)
+			}
+		})
+	}
+}
+
+func TestCallback_RetriesWithIdenticalPayload(t *testing.T) {
+	tests := []struct {
+		name      string
+		firstResp func(*http.Request) (*http.Response, error)
+	}{
+		{
+			name: "5xx",
+			firstResp: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("temporary")),
+					Request:    req,
+				}, nil
+			},
+		},
+		{
+			name: "网络错误",
+			firstResp: func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("temporary network error")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var payloads [][]byte
+			attempt := 0
+			client := NewClient("http://localhost/api/deploy", "test-token")
+			client.HTTPClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatalf("读取第 %d 次请求体: %v", attempt+1, err)
+				}
+				payloads = append(payloads, append([]byte(nil), body...))
+				attempt++
+				if attempt == 1 {
+					return tt.firstResp(req)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"code":1,"msg":"success"}`)),
+					Request:    req,
+				}, nil
+			})
+
+			err := client.Callback(context.Background(), &CallbackRequest{
+				OrderID:    123,
+				Status:     "failure",
+				DeployedAt: "2026-07-26T12:00:00+08:00",
+				Message:    "绑定失败",
+			})
+			if err != nil {
+				t.Fatalf("Callback() error = %v", err)
+			}
+			if len(payloads) != 2 {
+				t.Fatalf("请求次数 = %d, want 2", len(payloads))
+			}
+			if !bytes.Equal(payloads[0], payloads[1]) {
+				t.Fatalf("重试载荷不一致:\n首次 %s\n重试 %s", payloads[0], payloads[1])
+			}
+
+			var payload map[string]json.RawMessage
+			if err := json.Unmarshal(payloads[0], &payload); err != nil {
+				t.Fatalf("解析 callback JSON: %v", err)
+			}
+			wantKeys := map[string]bool{
+				"order_id":    true,
+				"status":      true,
+				"deployed_at": true,
+				"message":     true,
+			}
+			if len(payload) != len(wantKeys) {
+				t.Fatalf("字段数 = %d, want 4；payload = %s", len(payload), payloads[0])
+			}
+			for key := range payload {
+				if !wantKeys[key] {
+					t.Errorf("重试载荷出现非白名单字段 %q", key)
+				}
+			}
+		})
 	}
 }
 
@@ -517,10 +819,10 @@ func TestDoWithRetry_Success(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain(context.Background(), "example.com")
+	_, err := client.ListCertsByQuery(context.Background(), "123")
 
 	if err != nil {
-		t.Fatalf("ListCertsByDomain() error = %v", err)
+		t.Fatalf("ListCertsByQuery() error = %v", err)
 	}
 	if callCount != 1 {
 		t.Errorf("请求次数 = %d, want 1", callCount)
@@ -551,10 +853,10 @@ func TestDoWithRetry_5xxRetry(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain(context.Background(), "example.com")
+	_, err := client.ListCertsByQuery(context.Background(), "123")
 
 	if err != nil {
-		t.Fatalf("ListCertsByDomain() error = %v", err)
+		t.Fatalf("ListCertsByQuery() error = %v", err)
 	}
 	if callCount != 3 {
 		t.Errorf("请求次数 = %d, want 3", callCount)
@@ -589,6 +891,7 @@ func TestSubmitCSR_MockServer(t *testing.T) {
 
 	client := NewClient(server.URL, "test-token")
 	resp, err := client.SubmitCSR(context.Background(), &UpdateRequest{
+		OrderID: 123,
 		Domains: "example.com",
 		CSR:     "-----BEGIN CERTIFICATE REQUEST-----\ntest\n-----END CERTIFICATE REQUEST-----",
 	})
@@ -606,7 +909,9 @@ func TestSubmitCSR_MockServer(t *testing.T) {
 
 // TestSubmitCSR_APIError 测试 CSR 提交 API 错误
 func TestSubmitCSR_APIError(t *testing.T) {
+	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 0,
@@ -617,6 +922,7 @@ func TestSubmitCSR_APIError(t *testing.T) {
 
 	client := NewClient(server.URL, "test-token")
 	_, err := client.SubmitCSR(context.Background(), &UpdateRequest{
+		OrderID: 123,
 		Domains: "invalid",
 		CSR:     "test",
 	})
@@ -624,10 +930,16 @@ func TestSubmitCSR_APIError(t *testing.T) {
 	if err == nil {
 		t.Error("SubmitCSR() 应该返回错误")
 	}
+	if callCount != 1 {
+		t.Fatalf("请求次数 = %d, want 1", callCount)
+	}
+	if !strings.Contains(err.Error(), "域名格式错误") {
+		t.Fatalf("错误 = %v, want 服务端业务错误", err)
+	}
 }
 
-// TestGetCertByDomain_MockServer 测试获取最佳证书
-func TestGetCertByDomain_MockServer(t *testing.T) {
+// TestDomainQueryRejected 测试客户端在发请求前拒绝已移除的域名查询形态。
+func TestDomainQueryRejected(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -662,20 +974,13 @@ func TestGetCertByDomain_MockServer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-token")
-	cert, err := client.GetCertByDomain(context.Background(), "example.com")
-
-	if err != nil {
-		t.Fatalf("GetCertByDomain() error = %v", err)
-	}
-	// 应该返回 OrderID=300（active 且过期最晚）
-	if cert.OrderID != 300 {
-		t.Errorf("OrderID = %d, want 300", cert.OrderID)
+	err := ValidateOrderQuery("example.com")
+	if apiCode := ErrorCodeOf(err); apiCode != ErrorCodeInvalidOrder {
+		t.Fatalf("域名查询应在本地按 invalid_order 拒绝，got err=%v code=%q", err, apiCode)
 	}
 }
 
-// TestGetCertByDomain_NoActiveCert 测试没有 active 证书
-func TestGetCertByDomain_NoActiveCert(t *testing.T) {
+func TestDomainQueryRejectedRegardlessOfServerData(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -698,16 +1003,15 @@ func TestGetCertByDomain_NoActiveCert(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-token")
-	_, err := client.GetCertByDomain(context.Background(), "example.com")
+	err := ValidateOrderQuery("example.com")
 
 	if err == nil {
-		t.Error("GetCertByDomain() 应该返回错误（没有 active 证书）")
+		t.Error("域名查询必须按 invalid_order 拒绝")
 	}
 }
 
-// TestListCertsByDomain_HTTPError 测试 HTTP 错误
-func TestListCertsByDomain_HTTPError(t *testing.T) {
+// TestListCertsByQuery_HTTPError 测试 HTTP 错误
+func TestListCertsByQuery_HTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -718,15 +1022,15 @@ func TestListCertsByDomain_HTTPError(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain(context.Background(), "example.com")
+	_, err := client.ListCertsByQuery(context.Background(), "123")
 
 	if err == nil {
-		t.Error("ListCertsByDomain() 应该返回错误")
+		t.Error("ListCertsByQuery() 应该返回错误")
 	}
 }
 
-// TestListCertsByDomain_JSONParseError 测试 JSON 解析失败
-func TestListCertsByDomain_JSONParseError(t *testing.T) {
+// TestListCertsByQuery_JSONParseError 测试 JSON 解析失败
+func TestListCertsByQuery_JSONParseError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("not json"))
@@ -734,15 +1038,15 @@ func TestListCertsByDomain_JSONParseError(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain(context.Background(), "example.com")
+	_, err := client.ListCertsByQuery(context.Background(), "123")
 
 	if err == nil {
-		t.Error("ListCertsByDomain() 应该返回 JSON 解析错误")
+		t.Error("ListCertsByQuery() 应该返回 JSON 解析错误")
 	}
 }
 
-// TestListCertsByDomain_CodeNotOne 测试 code != 1
-func TestListCertsByDomain_CodeNotOne(t *testing.T) {
+// TestListCertsByQuery_CodeNotOne 测试 code != 1
+func TestListCertsByQuery_CodeNotOne(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -753,10 +1057,10 @@ func TestListCertsByDomain_CodeNotOne(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain(context.Background(), "example.com")
+	_, err := client.ListCertsByQuery(context.Background(), "123")
 
 	if err == nil {
-		t.Error("ListCertsByDomain() 应该返回错误（code != 1）")
+		t.Error("ListCertsByQuery() 应该返回错误（code != 1）")
 	}
 }
 
@@ -813,25 +1117,6 @@ func TestUpdateRequest_Fields(t *testing.T) {
 	}
 	if req.ValidationMethod != "file" {
 		t.Errorf("ValidationMethod = %q", req.ValidationMethod)
-	}
-}
-
-// TestCallbackRequest_Fields 测试 CallbackRequest 所有字段
-func TestCallbackRequest_Fields(t *testing.T) {
-	req := &CallbackRequest{
-		OrderID:    123,
-		Status:     "success",
-		DeployedAt: "2024-01-01 00:00:00",
-	}
-
-	if req.OrderID != 123 {
-		t.Errorf("OrderID = %d", req.OrderID)
-	}
-	if req.Status != "success" {
-		t.Errorf("Status = %q", req.Status)
-	}
-	if req.DeployedAt != "2024-01-01 00:00:00" {
-		t.Errorf("DeployedAt = %q", req.DeployedAt)
 	}
 }
 
@@ -972,7 +1257,7 @@ func TestDoWithRetry_5xxAllFail(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.ListCertsByDomain(context.Background(), "example.com")
+	_, err := client.ListCertsByQuery(context.Background(), "123")
 	if err == nil {
 		t.Error("应该在所有重试失败后返回错误")
 	}
@@ -1151,50 +1436,10 @@ func TestClientRejectsRenewBeforeDaysAboveCap(t *testing.T) {
 
 	client := NewClient(server.URL, "token")
 	client.LastRenewBeforeDays = 14
-	if _, err := client.ListAllCerts(context.Background()); err != nil {
-		t.Fatalf("ListAllCerts() error = %v", err)
+	if _, err := client.ListCertsByQuery(context.Background(), "123"); err != nil {
+		t.Fatalf("ListCertsByQuery() error = %v", err)
 	}
 	if client.LastRenewBeforeDays != 14 {
 		t.Fatalf("超限值不应覆盖本地候选值，got %d", client.LastRenewBeforeDays)
-	}
-}
-
-// TestCallback_MessageOnlyOnFailure 验证 Callback 仅在 failure 携带 message，success 清空
-func TestCallback_MessageOnlyOnFailure(t *testing.T) {
-	var received []CallbackRequest
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req CallbackRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		received = append(received, req)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "test-token")
-
-	// success 即使传入 message 也应被清空
-	if err := client.Callback(context.Background(), &CallbackRequest{
-		OrderID: 1, Status: "success", Message: "不应上报的内容",
-	}); err != nil {
-		t.Fatalf("success Callback error = %v", err)
-	}
-	// failure 携带并脱敏 message
-	if err := client.Callback(context.Background(), &CallbackRequest{
-		OrderID: 2, Status: "failure", Message: "安装失败 Bearer sk-secret-xyz",
-	}); err != nil {
-		t.Fatalf("failure Callback error = %v", err)
-	}
-
-	if len(received) != 2 {
-		t.Fatalf("收到回调数 = %d, want 2", len(received))
-	}
-	if received[0].Message != "" {
-		t.Errorf("success 回调 message 应为空，实际 = %q", received[0].Message)
-	}
-	if !strings.Contains(received[1].Message, "安装失败") {
-		t.Errorf("failure 回调应携带原因，实际 = %q", received[1].Message)
-	}
-	if strings.Contains(received[1].Message, "sk-secret-xyz") {
-		t.Errorf("failure 回调 message 未脱敏: %q", received[1].Message)
 	}
 }

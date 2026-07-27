@@ -51,7 +51,7 @@ func TestMakeCertConfig_IPDerivation(t *testing.T) {
 
 	t.Run("IPv4 证书派生 local/file/规则", func(t *testing.T) {
 		certData := api.CertData{OrderID: 100, Domains: "1.2.3.4"} // Certificate 空 → 回退 GetDomainList
-		cfg := makeCertConfig(certData, opts, "SERIAL")
+		cfg := mustMakeCertConfig(t, certData, opts, "SERIAL")
 		if cfg.RenewMode != "local" {
 			t.Errorf("RenewMode = %q, want local", cfg.RenewMode)
 		}
@@ -68,7 +68,7 @@ func TestMakeCertConfig_IPDerivation(t *testing.T) {
 
 	t.Run("多 IP SAN 各生成绑定规则", func(t *testing.T) {
 		certData := api.CertData{OrderID: 101, Domains: "1.2.3.4,2001:db8::1"}
-		cfg := makeCertConfig(certData, opts, "")
+		cfg := mustMakeCertConfig(t, certData, opts, "")
 		if len(cfg.BindRules) != 2 {
 			t.Fatalf("应为每个 IP 生成规则, got %+v", cfg.BindRules)
 		}
@@ -76,7 +76,7 @@ func TestMakeCertConfig_IPDerivation(t *testing.T) {
 
 	t.Run("混合 DNS 和 IP SAN 保留全部绑定规则", func(t *testing.T) {
 		certData := api.CertData{OrderID: 103, Domains: "example.com,1.2.3.4,www.example.com"}
-		cfg := makeCertConfig(certData, opts, "")
+		cfg := mustMakeCertConfig(t, certData, opts, "")
 		if cfg.AutoBindMode {
 			t.Fatal("含 IP SAN 的证书应使用显式绑定规则")
 		}
@@ -92,7 +92,7 @@ func TestMakeCertConfig_IPDerivation(t *testing.T) {
 
 	t.Run("域名证书保持自动绑定不派生 local", func(t *testing.T) {
 		certData := api.CertData{OrderID: 102, Domains: "example.com,www.example.com"}
-		cfg := makeCertConfig(certData, opts, "")
+		cfg := mustMakeCertConfig(t, certData, opts, "")
 		if cfg.RenewMode != "" {
 			t.Errorf("域名证书 RenewMode 应为空（继承全局）, got %q", cfg.RenewMode)
 		}

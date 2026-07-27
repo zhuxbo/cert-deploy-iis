@@ -5,7 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"os/exec"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +18,20 @@ import (
 
 // bindVerifyRetryDelay verify 步瞬时未命中后的重查间隔（测试可置 0 加速）
 var bindVerifyRetryDelay = 200 * time.Millisecond
+
+// netsh 执行与 httpapi 查询入口（包级变量，供测试注入；生产值为真实实现）
+var (
+	// netshQuery 只读查询（stdout）
+	netshQuery = func(args ...string) (string, error) {
+		return util.RunCmd(util.ResolveSystem32Exe("netsh.exe"), args...)
+	}
+	// netshExec 变更类命令（stdout+stderr，失败信息需要回显）
+	netshExec = func(args ...string) (string, error) {
+		return util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), args...)
+	}
+	// queryFullBindingFn httpapi 结构化查询入口
+	queryFullBindingFn = queryFullBinding
+)
 
 // 默认 AppID (用于标识应用程序)
 const defaultAppID = "{00000000-0000-0000-0000-000000000000}"
@@ -100,8 +118,8 @@ func sslParamNetshArgs(b *capturedBinding) []string {
 }
 
 // buildRebindArgs 构造 netsh http add sslcert 参数串（纯函数）。
-// 始终包含 keyParam=keyValue / certhash / appid / certstorename（最小三字段回绑）；
-// full=true 时附加从结构化查询解码的高级参数，最大化回绑保真度。
+// 始终包含 keyParam=keyValue / certhash / appid / certstorename（最小三字段）；
+// full=true 时附加从结构化查询解码的高级参数，供成功替换和失败回绑复用。
 func buildRebindArgs(keyParam, keyValue string, b *capturedBinding) []string {
 	args := []string{
 		fmt.Sprintf("%s=%s", keyParam, keyValue),
@@ -147,16 +165,35 @@ func parseBindingByValue(output string) *capturedBinding {
 	return b
 }
 
-// queryBindingByNetsh 经 netsh 查询单条 SSL 绑定。
-// netsh 非零退出既可能是不存在也可能是查询故障，因此一律返回 error，不伪装成“不存在”。
+// netshCompleted 判断 netsh 是否真正执行完毕（而非根本没跑起来）。
+// 精确查询下“执行完毕 + 非零退出”意味着该键无绑定；进程无法创建（PATH 损坏、
+// ResolveSystem32Exe 未解析到绝对路径）则状态未知，不得据此执行破坏性操作。
+// 残余不确定：命令超时被强制终止在 Windows 上同样表现为已退出，会被归入“不存在”；
+// netsh show 属只读快查，超时概率远低于进程创建失败，故取此判定。
+func netshCompleted(err error) bool {
+	var exitErr *exec.ExitError
+	// ProcessState 为空说明进程从未进入退出状态，Exited() 会解引用空指针
+	if !errors.As(err, &exitErr) || exitErr.ProcessState == nil {
+		return false
+	}
+	return exitErr.Exited()
+}
+
+// queryBindingByNetsh 经 netsh 查询单条 SSL 绑定，返回三态：
+// (binding, nil) 确认存在；(nil, nil) 确认不存在（netsh 执行完毕且精确查询无结果）；
+// (nil, err) 状态未知（netsh 无法执行或输出异常），调用方不得据此做破坏性操作。
 func queryBindingByNetsh(keyParam, keyValue string) (*capturedBinding, error) {
-	output, err := util.RunCmd(util.ResolveSystem32Exe("netsh.exe"), "http", "show", "sslcert",
+	output, err := netshQuery("http", "show", "sslcert",
 		fmt.Sprintf("%s=%s", keyParam, keyValue))
 	if err != nil {
+		if netshCompleted(err) {
+			return nil, nil // netsh 已执行并以非零退出：该键无绑定
+		}
 		return nil, fmt.Errorf("netsh 查询失败: %w", err)
 	}
 	binding := parseBindingByValue(output)
 	if binding == nil {
+		// 退出码 0 却解析不出证书哈希属异常输出，宁可判未知也不误判为不存在
 		return nil, errors.New("netsh 查询成功但输出无法解析")
 	}
 	return binding, nil
@@ -165,7 +202,7 @@ func queryBindingByNetsh(keyParam, keyValue string) (*capturedBinding, error) {
 // queryBindingByKey 查询单条 SSL 绑定（keyParam: "hostnameport" 或 "ipport"）。
 // 优先使用 httpapi 精确区分“不存在”和“查询失败”；结构化查询不可用时降级 netsh。
 func queryBindingByKey(keyParam, keyValue string) (*capturedBinding, error) {
-	binding, structuredErr := queryFullBinding(keyParam, keyValue)
+	binding, structuredErr := queryFullBindingFn(keyParam, keyValue)
 	if structuredErr == nil {
 		return binding, nil
 	}
@@ -176,33 +213,36 @@ func queryBindingByKey(keyParam, keyValue string) (*capturedBinding, error) {
 	return nil, fmt.Errorf("结构化查询失败: %v; %w", structuredErr, netshErr)
 }
 
-// captureBinding 捕获旧绑定完整参数供回绑：
-// 优先经 httpapi HttpQueryServiceConfiguration 结构化查询（locale 无关，含 flags/吊销/SSL CTL 等高级参数），
-// 结构化查询失败（API 不可用/结构解析异常）降级为 netsh show 最小三字段捕获；明确不存在则返回 nil。
-func captureBinding(keyParam, keyValue string) *capturedBinding {
-	if full, err := queryFullBinding(keyParam, keyValue); err == nil {
-		return full
-	}
-	binding, _ := queryBindingByNetsh(keyParam, keyValue)
-	return binding
-}
-
 // bindAndVerify 通用绑定流程：捕获旧绑定 → 删除 → 添加 → 验证 → 失败回绑
 // 成败判定以操作后 show sslcert 查到的 certhash 为准（locale 无关，不依赖输出关键词）；
 // 新绑定未生效时用捕获的旧绑定回绑恢复，避免绑定丢失导致站点下线且自动模式永不自愈
 func bindAndVerify(keyParam, keyValue, certHash string, unbind func() error) error {
-	// 1. 删除前捕获旧绑定完整参数（供添加失败时回绑），优先结构化查询含高级 SSL 参数
-	oldBinding := captureBinding(keyParam, keyValue)
+	// 1. 删除前捕获旧绑定完整参数（供添加失败时回绑），优先结构化查询含高级 SSL 参数。
+	//    状态无法确认时必须在删除前中止：先删再发现没有快照可回绑，会让站点 HTTPS 下线且无法恢复。
+	oldBinding, captureErr := queryBindingByKey(keyParam, keyValue)
+	if captureErr != nil {
+		return fmt.Errorf("无法确认 %s=%s 的现有绑定状态，已中止绑定以避免删除后无法恢复: %w",
+			keyParam, keyValue, captureErr)
+	}
 
 	// 2. 删除已有绑定（绑定可能本就不存在，错误忽略）
+	newBinding := &capturedBinding{CertHash: certHash}
+	if oldBinding != nil {
+		// 复制快照而不改写旧绑定；添加失败时仍需用旧哈希执行回绑。
+		*newBinding = *oldBinding
+		newBinding.CertHash = certHash
+		newBinding.CertStoreName = "MY" // 新证书固定安装到 LocalMachine\My
+		if !oldBinding.full {
+			log.Printf("警告: %s=%s 仅通过 netsh 捕获到最小绑定信息，本次替换的高级 SSL 参数无法保真",
+				keyParam, keyValue)
+		}
+	}
 	_ = unbind()
 
-	// 3. 添加新绑定
-	addOutput, addErr := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), "http", "add", "sslcert",
-		fmt.Sprintf("%s=%s", keyParam, keyValue),
-		fmt.Sprintf("certhash=%s", certHash),
-		fmt.Sprintf("appid=%s", defaultAppID),
-		"certstorename=MY")
+	// 3. 添加新绑定：完整捕获时保留 AppID 与已确认的高级 SSL 参数；
+	//    降级捕获时保留已确认的 AppID，不伪造未知高级参数。
+	addArgs := append([]string{"http", "add", "sslcert"}, buildRebindArgs(keyParam, keyValue, newBinding)...)
+	addOutput, addErr := netshExec(addArgs...)
 
 	// 4. 操作后验证目标绑定；明确区分目标已生效、不存在、异常占用与查询失败。
 	current, queryErr := queryBindingWithRetry(
@@ -238,7 +278,7 @@ func bindAndVerify(keyParam, keyValue, certHash string, unbind func() error) err
 // 参数串由 buildRebindArgs 生成：完整捕获时还原全部高级 SSL 参数，最小捕获时保持三字段回绑。
 func rebindOldBinding(keyParam, keyValue string, current, old *capturedBinding) error {
 	deleteCurrent := func() error {
-		output, err := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), "http", "delete", "sslcert",
+		output, err := netshExec("http", "delete", "sslcert",
 			fmt.Sprintf("%s=%s", keyParam, keyValue))
 		if err != nil {
 			return fmt.Errorf("命令错误=%v, 输出: %s", err, strings.TrimSpace(output))
@@ -247,7 +287,7 @@ func rebindOldBinding(keyParam, keyValue string, current, old *capturedBinding) 
 	}
 	addOld := func() error {
 		args := append([]string{"http", "add", "sslcert"}, buildRebindArgs(keyParam, keyValue, old)...)
-		output, err := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), args...)
+		output, err := netshExec(args...)
 		if err != nil {
 			return fmt.Errorf("命令错误=%v, 输出: %s", err, strings.TrimSpace(output))
 		}
@@ -345,7 +385,7 @@ func UnbindCertificate(hostname string, port int) error {
 	}
 
 	hostnamePort := fmt.Sprintf("%s:%d", hostname, port)
-	output, err := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), "http", "delete", "sslcert",
+	output, err := netshExec("http", "delete", "sslcert",
 		fmt.Sprintf("hostnameport=%s", hostnamePort))
 
 	if err != nil {
@@ -373,7 +413,7 @@ func UnbindCertificateByIP(ip string, port int) error {
 	}
 
 	ipPort := formatIPPortKey(ip, port)
-	output, err := util.RunCmdCombined(util.ResolveSystem32Exe("netsh.exe"), "http", "delete", "sslcert",
+	output, err := netshExec("http", "delete", "sslcert",
 		fmt.Sprintf("ipport=%s", ipPort))
 
 	if err != nil {
@@ -385,7 +425,7 @@ func UnbindCertificateByIP(ip string, port int) error {
 
 // ListSSLBindings 列出所有 SSL 证书绑定
 func ListSSLBindings() ([]SSLBinding, error) {
-	output, err := util.RunCmd(util.ResolveSystem32Exe("netsh.exe"), "http", "show", "sslcert")
+	output, err := netshQuery("http", "show", "sslcert")
 	if err != nil {
 		return nil, fmt.Errorf("获取 SSL 绑定列表失败: %v", err)
 	}
@@ -507,38 +547,92 @@ func GetBindingForIP(ip string, port int) (*SSLBinding, error) {
 	return nil, nil // 未找到
 }
 
-// findBindingsFromList 从绑定列表中查找匹配指定域名的 SNI 绑定（纯函数，便于测试）
-func findBindingsFromList(bindings []SSLBinding, domains []string) map[string]*SSLBinding {
-	result := make(map[string]*SSLBinding)
-	for i, b := range bindings {
+// ParseBindingEndpoint 严格解析 netsh 返回的绑定端点；坏端口不得回退默认值。
+func ParseBindingEndpoint(binding SSLBinding) (EndpointKey, error) {
+	host, portText, err := net.SplitHostPort(strings.TrimSpace(binding.HostnamePort))
+	if err != nil {
+		return EndpointKey{}, fmt.Errorf("解析绑定端点 %q 失败: %w", binding.HostnamePort, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return EndpointKey{}, fmt.Errorf("绑定端点 %q 的端口无效", binding.HostnamePort)
+	}
+	return NormalizeEndpoint(binding.IsIPBinding, host, port)
+}
+
+func sameBindingAtEndpoint(a, b SSLBinding) bool {
+	equalField := func(left, right string) bool {
+		return strings.EqualFold(strings.TrimSpace(left), strings.TrimSpace(right))
+	}
+	return equalField(a.CertHash, b.CertHash) &&
+		equalField(a.AppID, b.AppID) &&
+		equalField(a.CertStoreName, b.CertStoreName) &&
+		equalField(a.SslCtlStoreName, b.SslCtlStoreName) &&
+		a.IsIPBinding == b.IsIPBinding
+}
+
+// findBindingsFromList 从绑定列表中查找匹配指定域名的 SNI 绑定（纯函数，便于测试）。
+func findBindingsFromList(bindings []SSLBinding, domains []string) ([]SSLBinding, error) {
+	byEndpoint := make(map[EndpointKey]SSLBinding)
+	for _, b := range bindings {
 		if b.IsIPBinding {
 			continue
 		}
-
-		host := ParseHostFromBinding(b.HostnamePort)
-		if host == "" {
+		rawEndpoint := strings.TrimSpace(b.HostnamePort)
+		rawHost, _, splitErr := net.SplitHostPort(rawEndpoint)
+		if rawEndpoint == "" || (splitErr == nil && strings.TrimSpace(rawHost) == "") {
 			continue
 		}
+
+		key, err := ParseBindingEndpoint(b)
+		if err != nil {
+			return nil, err
+		}
 		for _, certDomain := range domains {
-			if util.MatchDomain(host, certDomain) {
-				result[host] = &bindings[i]
+			if util.MatchDomain(key.Host, certDomain) {
+				if previous, exists := byEndpoint[key]; exists {
+					if !sameBindingAtEndpoint(previous, b) {
+						return nil, fmt.Errorf("IIS SSL 绑定端点 %s:%d 存在歧义", key.Host, key.Port)
+					}
+					break
+				}
+				byEndpoint[key] = b
 				break
 			}
 		}
 	}
-	return result
+
+	keys := make([]EndpointKey, 0, len(byEndpoint))
+	for key := range byEndpoint {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].IPBinding != keys[j].IPBinding {
+			return !keys[i].IPBinding
+		}
+		if keys[i].Host != keys[j].Host {
+			return keys[i].Host < keys[j].Host
+		}
+		return keys[i].Port < keys[j].Port
+	})
+
+	result := make([]SSLBinding, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, byEndpoint[key])
+	}
+	return result, nil
 }
 
 // FindBindingsForDomains 查找与指定域名匹配的 SNI 绑定
-// 返回: 绑定域名 -> SSLBinding 映射
+// 返回稳定排序的完整绑定端点切片。
 // 注意: 只匹配 SNI 绑定（Hostname:port），忽略 IP 绑定（空主机名）
 // IP 绑定用于通配符泛匹配或 IP 证书，需用户手工管理
-func FindBindingsForDomains(domains []string) (map[string]*SSLBinding, error) {
+func FindBindingsForDomains(domains []string) ([]SSLBinding, error) {
 	bindings, err := ListSSLBindings()
 	if err != nil {
 		return nil, err
 	}
-	return findBindingsFromList(bindings, domains), nil
+	return findBindingsFromList(bindings, domains)
 }
 
 // ParseHostFromBinding 从 "host:port" 提取主机名。

@@ -92,6 +92,16 @@ type SSLBinding struct {
 }
 ```
 
+## 自动部署任务健康
+
+CLI `status` 与 GUI 统一通过 `GetTaskHealth` 查询任务计划，并用 `EvaluateTaskHealth`
+判断健康状态。持久化配置已停止自动部署时直接显示不健康；任务信息查询失败（包括任务
+不存在等无法取得健康信息的情况）、从未运行、超过 25 小时未运行或上次结果非零时也统一
+显示为不健康，不得把查询失败降级为“未创建”或静默忽略。
+
+GUI 的“立即检查”以 10 分钟作为观察超时，而不是工作取消期限。观察超时后部署 worker
+继续运行；只有 worker 实际结束后才恢复按钮，数据刷新不参与按钮恢复时机。
+
 ## 证书存储
 
 | 位置 | 用途 |
@@ -108,7 +118,7 @@ Get-ChildItem Cert:\LocalMachine\My
 
 ### netsh 绑定验证
 
-`BindCertificate` 和 `BindCertificateByIP` 在替换前捕获旧绑定完整参数，执行后通过 httpapi 结构化查询验证实际状态，结构化查询不可用时才降级 `netsh show`：
+`BindCertificate` 和 `BindCertificateByIP` 在替换前捕获旧绑定完整参数。成功替换与失败回绑复用同一参数构造逻辑，保留捕获到的 AppID，以及高置信度解码的客户端证书协商、CTL 和吊销检查参数；结构化查询不可用而降级 `netsh show` 时只保留已确认的最小字段，并记录高级 SSL 参数无法保真的警告。执行后通过 httpapi 结构化查询验证实际状态，结构化查询不可用时才降级 `netsh show`：
 
 - 目标证书已生效：成功。
 - 明确不存在：直接用旧快照恢复。

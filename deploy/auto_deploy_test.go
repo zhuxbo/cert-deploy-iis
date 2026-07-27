@@ -2,7 +2,10 @@ package deploy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +17,65 @@ import (
 	"sslctlw/config"
 	"sslctlw/iis"
 )
+
+type testAutoDeployLock struct {
+	closed bool
+}
+
+func (l *testAutoDeployLock) Close() error {
+	l.closed = true
+	return nil
+}
+
+func successfulAutoDeployDependencies(save func(*config.Config) error) autoDeployDependencies {
+	if save == nil {
+		save = func(*config.Config) error { return nil }
+	}
+	return autoDeployDependencies{
+		openLock: func(string) (autoDeployLock, error) { return &testAutoDeployLock{}, nil },
+		tryLock:  func(autoDeployLock) (bool, error) { return true, nil },
+		removeLock: func(string) error {
+			return nil
+		},
+		saveConfig: save,
+	}
+}
+
+func runReportCertConfig(t *testing.T, certData api.CertData, callbackCode int, calls *atomic.Int32) config.CertConfig {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/callback") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": callbackCode, "msg": "callback response"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 1,
+			"msg":  "ok",
+			"data": map[string]any{
+				"data":        []api.CertData{certData},
+				"currentPage": 1,
+				"pageSize":    20,
+				"total":       1,
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	certAPI := config.CertAPIConfig{URL: server.URL}
+	if err := certAPI.SetToken("test-token"); err != nil {
+		t.Fatalf("SetToken() error = %v", err)
+	}
+	return config.CertConfig{
+		OrderID:   certData.OrderID,
+		Domain:    certData.Domain(),
+		Domains:   []string{certData.Domain()},
+		Enabled:   true,
+		BindRules: []config.BindRule{{Domain: certData.Domain(), Port: 443}},
+		API:       certAPI,
+	}
+}
 
 // testCertAPI 返回测试用的 CertAPIConfig（使用明文存储，避免 DPAPI 依赖）
 func testCertAPI() config.CertAPIConfig {
@@ -30,7 +92,7 @@ func TestAutoDeploy_NoCertificates(t *testing.T) {
 	}
 
 	d := NewMockDeployer()
-	results := AutoDeploy(cfg, d, false)
+	results := AutoDeploy(cfg, d, RunOptions{}).Results
 
 	if len(results) != 0 {
 		t.Errorf("没有配置证书时应该返回空结果，得到 %d 个结果", len(results))
@@ -46,7 +108,7 @@ func TestAutoDeploy_NoAPIConfig(t *testing.T) {
 	}
 
 	d := NewMockDeployer()
-	results := AutoDeploy(cfg, d, false)
+	results := AutoDeploy(cfg, d, RunOptions{}).Results
 
 	// 无 API 配置应该返回失败结果
 	if len(results) != 1 {
@@ -66,10 +128,104 @@ func TestAutoDeploy_DisabledCertificate(t *testing.T) {
 	}
 
 	d := NewMockDeployer()
-	results := AutoDeploy(cfg, d, false)
+	results := AutoDeploy(cfg, d, RunOptions{}).Results
 
 	if len(results) != 0 {
 		t.Errorf("禁用的证书应该被跳过，得到 %d 个结果", len(results))
+	}
+}
+
+func TestRunAutoDeploy_OnlyOrderIDProcessesOnlyMatchingConfig(t *testing.T) {
+	cfg := &config.Config{
+		Certificates: []config.CertConfig{
+			{OrderID: 101, Domain: "a.example.com", Enabled: true},
+			{OrderID: 202, Domain: "b.example.com", Enabled: true},
+		},
+	}
+
+	report := runAutoDeploy(
+		cfg,
+		NewMockDeployer(),
+		RunOptions{OnlyOrderID: 202},
+		successfulAutoDeployDependencies(nil),
+	)
+
+	if len(report.Results) != 1 {
+		t.Fatalf("仅应处理目标配置, got %+v", report.Results)
+	}
+	if got := report.Results[0].OrderID; got != 202 {
+		t.Fatalf("处理了错误订单 %d, want 202", got)
+	}
+}
+
+func TestRunAutoDeploy_CallbackUsesAPIOrderIDAfterRenewal(t *testing.T) {
+	const configuredOrderID = 101
+	const actualOrderID = 202
+
+	certPEM, keyPEM := genSelfSignedPair(t, "a.example.com")
+	callbackOrderID := 0
+	callbackCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/callback") {
+			var req api.CallbackRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("解析 callback 请求失败: %v", err)
+			}
+			callbackOrderID = req.OrderID
+			callbackCount++
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 1, "msg": "ok"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 1,
+			"msg":  "ok",
+			"data": map[string]any{
+				"data": []api.CertData{{
+					OrderID:     actualOrderID,
+					Domains:     "a.example.com",
+					Status:      "active",
+					ExpiresAt:   time.Now().AddDate(0, 0, 5).Format("2006-01-02"),
+					Certificate: certPEM,
+					PrivateKey:  keyPEM,
+					CACert:      testCACertPEM,
+				}},
+				"currentPage": 1,
+				"pageSize":    20,
+				"total":       1,
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	certAPI := config.CertAPIConfig{URL: server.URL}
+	if err := certAPI.SetToken("test-token"); err != nil {
+		t.Fatalf("SetToken() error = %v", err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Certificates = []config.CertConfig{{
+		OrderID:   configuredOrderID,
+		Domain:    "a.example.com",
+		Domains:   []string{"a.example.com"},
+		Enabled:   true,
+		BindRules: []config.BindRule{{Domain: "a.example.com", Port: 443}},
+		API:       certAPI,
+	}}
+
+	report := runAutoDeploy(
+		cfg,
+		NewMockDeployer(),
+		RunOptions{OnlyOrderID: configuredOrderID},
+		successfulAutoDeployDependencies(nil),
+	)
+	if err := report.Err(); err != nil {
+		t.Fatalf("runAutoDeploy() error = %v", err)
+	}
+	if callbackOrderID != actualOrderID {
+		t.Fatalf("callback order_id = %d, want API 实际订单 %d", callbackOrderID, actualOrderID)
+	}
+	if callbackCount != 1 {
+		t.Fatalf("callback 次数 = %d, want 1", callbackCount)
 	}
 }
 
@@ -399,9 +555,9 @@ func TestMockIISBinder(t *testing.T) {
 
 	t.Run("查找绑定", func(t *testing.T) {
 		binder := &MockIISBinder{
-			FindBindingsForDomainsFunc: func(domains []string) (map[string]*iis.SSLBinding, error) {
-				return map[string]*iis.SSLBinding{
-					"www.example.com": {HostnamePort: "www.example.com:443", CertHash: "OLD123"},
+			FindBindingsForDomainsFunc: func(domains []string) ([]iis.SSLBinding, error) {
+				return []iis.SSLBinding{
+					{HostnamePort: "www.example.com:443", CertHash: "OLD123"},
 				}, nil
 			},
 		}
@@ -574,10 +730,10 @@ func TestDeployCertWithRules(t *testing.T) {
 
 		certData := makeTestCertData(t, 100, "example.com", "active", "2025-12-31")
 		certCfg := makeTestCertConfig(100, "example.com", true)
-		conflicts := map[string][]int{}
+		conflicts := map[iis.EndpointKey][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
+		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, 0, conflicts, allCerts)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -613,10 +769,10 @@ func TestDeployCertWithRules(t *testing.T) {
 				{Domain: "www.example.com", Port: 443},
 			},
 		}
-		conflicts := map[string][]int{}
+		conflicts := map[iis.EndpointKey][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
+		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, 0, conflicts, allCerts)
 
 		if len(results) != 2 {
 			t.Fatalf("期望 2 个结果（每个 BindRule 域名一个），得到 %d 个", len(results))
@@ -642,10 +798,10 @@ func TestDeployCertWithRules(t *testing.T) {
 
 		certData := makeTestCertData(t, 100, "example.com", "active", "2025-12-31")
 		certCfg := makeTestCertConfig(100, "example.com", true)
-		conflicts := map[string][]int{}
+		conflicts := map[iis.EndpointKey][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
+		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, 0, conflicts, allCerts)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -681,10 +837,10 @@ func TestDeployCertWithRules(t *testing.T) {
 				{Domain: "ok.example.com", Port: 443},
 			},
 		}
-		conflicts := map[string][]int{}
+		conflicts := map[iis.EndpointKey][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
+		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, 0, conflicts, allCerts)
 
 		if len(results) != 2 {
 			t.Fatalf("期望 2 个结果，得到 %d 个", len(results))
@@ -730,11 +886,11 @@ func TestDeployCertWithRules(t *testing.T) {
 		}
 		allCerts := []config.CertConfig{certCfg, certCfg2}
 		// shared.com 冲突：索引 0 和 1
-		conflicts := map[string][]int{
-			"shared.com": {0, 1},
+		conflicts := map[iis.EndpointKey][]int{
+			{Host: "shared.com", Port: 443}: {0, 1},
 		}
 
-		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, conflicts, allCerts)
+		results, _ := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, certCfg, 0, conflicts, allCerts)
 
 		// shared.com 应该被跳过（certCfg2 的 ExpiresAt 更晚，OrderID=200 优先）
 		// 只有 unique.com 会被处理
@@ -757,9 +913,9 @@ func TestDeployCertWithRules(t *testing.T) {
 func TestDeployCertAutoMode(t *testing.T) {
 	t.Run("成功路径", func(t *testing.T) {
 		d := NewMockDeployer()
-		d.Binder.(*MockIISBinder).FindBindingsForDomainsFunc = func(domains []string) (map[string]*iis.SSLBinding, error) {
-			return map[string]*iis.SSLBinding{
-				"example.com": {HostnamePort: "example.com:443", CertHash: "OLD_HASH"},
+		d.Binder.(*MockIISBinder).FindBindingsForDomainsFunc = func(domains []string) ([]iis.SSLBinding, error) {
+			return []iis.SSLBinding{
+				{HostnamePort: "example.com:443", CertHash: "OLD_HASH"},
 			}, nil
 		}
 
@@ -787,8 +943,8 @@ func TestDeployCertAutoMode(t *testing.T) {
 
 	t.Run("无匹配绑定", func(t *testing.T) {
 		d := NewMockDeployer()
-		d.Binder.(*MockIISBinder).FindBindingsForDomainsFunc = func(domains []string) (map[string]*iis.SSLBinding, error) {
-			return map[string]*iis.SSLBinding{}, nil
+		d.Binder.(*MockIISBinder).FindBindingsForDomainsFunc = func(domains []string) ([]iis.SSLBinding, error) {
+			return nil, nil
 		}
 
 		certData := makeTestCertData(t, 100, "example.com", "active", "2025-12-31")
@@ -815,9 +971,9 @@ func TestDeployCertAutoMode(t *testing.T) {
 
 	t.Run("安装成功绑定失败", func(t *testing.T) {
 		d := NewMockDeployer()
-		d.Binder.(*MockIISBinder).FindBindingsForDomainsFunc = func(domains []string) (map[string]*iis.SSLBinding, error) {
-			return map[string]*iis.SSLBinding{
-				"example.com": {HostnamePort: "example.com:443", CertHash: "OLD_HASH"},
+		d.Binder.(*MockIISBinder).FindBindingsForDomainsFunc = func(domains []string) ([]iis.SSLBinding, error) {
+			return []iis.SSLBinding{
+				{HostnamePort: "example.com:443", CertHash: "OLD_HASH"},
 			}, nil
 		}
 		d.Binder.(*MockIISBinder).BindCertificateFunc = func(hostname string, port int, certHash string) error {
@@ -849,6 +1005,151 @@ func TestDeployCertAutoMode(t *testing.T) {
 			t.Error("安装成功后指纹不应为空")
 		}
 	})
+}
+
+func TestDeployCertWithRules_PreflightBeforeCertificateInstallation(t *testing.T) {
+	certData := makeTestCertData(t, 701, "www.example.com", "active", "2099-12-31")
+
+	tests := []struct {
+		name      string
+		certCfg   config.CertConfig
+		allCerts  []config.CertConfig
+		conflicts map[iis.EndpointKey][]int
+	}{
+		{
+			name:     "空规则",
+			certCfg:  config.CertConfig{OrderID: 701, Domain: "www.example.com", Enabled: true},
+			allCerts: nil,
+		},
+		{
+			name: "全部冲突",
+			certCfg: config.CertConfig{
+				OrderID: 701,
+				Domain:  "www.example.com",
+				Enabled: true,
+				BindRules: []config.BindRule{
+					{Domain: "www.example.com", Port: 443},
+				},
+			},
+			allCerts: []config.CertConfig{
+				{
+					OrderID: 701, Enabled: true, Metadata: config.CertMetadata{CertExpiresAt: "2025-01-01"},
+					BindRules: []config.BindRule{{Domain: "www.example.com", Port: 443}},
+				},
+				{
+					OrderID: 702, Enabled: true, Metadata: config.CertMetadata{CertExpiresAt: "2099-01-01"},
+					BindRules: []config.BindRule{{Domain: "WWW.EXAMPLE.COM", Port: 0}},
+				},
+			},
+			conflicts: map[iis.EndpointKey][]int{{Host: "www.example.com", Port: 443}: {0, 1}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			converted := false
+			installed := false
+			d := NewMockDeployer()
+			d.Converter = &MockCertConverter{PEMToPFXFunc: func(certPEM, keyPEM, intermediatePEM, password string) (string, error) {
+				converted = true
+				return "unused.pfx", nil
+			}}
+			d.Installer = &MockCertInstaller{InstallPFXFunc: func(pfxPath, password string) (*cert.InstallResult, error) {
+				installed = true
+				return &cert.InstallResult{Success: true, Thumbprint: "ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234"}, nil
+			}}
+
+			_, rep := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, tt.certCfg, 0, tt.conflicts, tt.allCerts)
+			if converted || installed {
+				t.Fatalf("目标预检失败仍转换/安装: converted=%v installed=%v", converted, installed)
+			}
+			if tt.name == "全部冲突" && rep.report {
+				t.Fatalf("全部冲突不得产生 callback 报告: %+v", rep)
+			}
+		})
+	}
+}
+
+func TestDeployCertWithRules_DuplicateOrderIDUsesWinningIndex(t *testing.T) {
+	certData := makeTestCertData(t, 801, "shared.example.com", "active", "2099-12-31")
+	loser := config.CertConfig{
+		OrderID: 801,
+		Domain:  "loser.example.com",
+		Enabled: true,
+		Metadata: config.CertMetadata{
+			CertExpiresAt: "2025-01-01",
+		},
+		BindRules: []config.BindRule{{Domain: "shared.example.com", Port: 443}},
+	}
+	winner := config.CertConfig{
+		OrderID: 801,
+		Domain:  "winner.example.com",
+		Enabled: true,
+		Metadata: config.CertMetadata{
+			CertExpiresAt: "2099-01-01",
+		},
+		BindRules: []config.BindRule{{Domain: "SHARED.EXAMPLE.COM", Port: 0}},
+	}
+	allCerts := []config.CertConfig{loser, winner}
+	conflicts := checkDomainConflicts(allCerts)
+
+	converted := false
+	d := NewMockDeployer()
+	d.Converter = &MockCertConverter{PEMToPFXFunc: func(certPEM, keyPEM, intermediatePEM, password string) (string, error) {
+		converted = true
+		return "unused.pfx", nil
+	}}
+
+	results, rep := deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, loser, 0, conflicts, allCerts)
+	if converted || len(results) != 0 || rep.report {
+		t.Fatalf("重复 OrderID 的非选优索引不应执行: converted=%v results=%+v report=%+v", converted, results, rep)
+	}
+
+	results, rep = deployCertWithRules(d, NewMockClient(), certData, certData.PrivateKey, winner, 1, conflicts, allCerts)
+	if !converted || len(results) != 1 || !results[0].Success || !rep.report || !rep.success {
+		t.Fatalf("重复 OrderID 只能由选优索引执行: converted=%v results=%+v report=%+v", converted, results, rep)
+	}
+}
+
+func TestDeployCertAutoMode_DiscoversTargetsBeforeCertificateInstallation(t *testing.T) {
+	certData, keyPEM, certCfg := autoModeCertData(t, 703, "www.example.com")
+
+	tests := []struct {
+		name string
+		find func([]string) ([]iis.SSLBinding, error)
+	}{
+		{name: "发现失败", find: func([]string) ([]iis.SSLBinding, error) {
+			return nil, errors.New("netsh 查询失败")
+		}},
+		{name: "零目标", find: func([]string) ([]iis.SSLBinding, error) {
+			return nil, nil
+		}},
+		{name: "坏端口", find: func([]string) ([]iis.SSLBinding, error) {
+			return []iis.SSLBinding{{HostnamePort: "www.example.com:not-a-port"}}, nil
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			converted := false
+			installed := false
+			d := NewMockDeployer()
+			d.Binder.(*MockIISBinder).FindBindingsForDomainsFunc = tt.find
+			d.Converter = &MockCertConverter{PEMToPFXFunc: func(certPEM, keyPEM, intermediatePEM, password string) (string, error) {
+				converted = true
+				return "unused.pfx", nil
+			}}
+			d.Installer = &MockCertInstaller{InstallPFXFunc: func(pfxPath, password string) (*cert.InstallResult, error) {
+				installed = true
+				return &cert.InstallResult{Success: true, Thumbprint: "ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234"}, nil
+			}}
+
+			_, _ = deployCertAutoMode(d, NewMockClient(), certData, keyPEM, certCfg)
+			if converted || installed {
+				t.Fatalf("发现阶段无可执行目标仍转换/安装: converted=%v installed=%v", converted, installed)
+			}
+		})
+	}
 }
 
 // =============================================================================
@@ -891,6 +1192,7 @@ func TestHandleLocalKeyMode(t *testing.T) {
 	t.Run("异步签发active忽略新证书续签窗口并使用pending私钥", func(t *testing.T) {
 		d := NewMockDeployer()
 		certPEM, pendingKey := genSelfSignedPair(t, "example.com")
+		pendingCSR := genCSRForTestKey(t, "example.com", pendingKey)
 		mockClient := NewMockClient()
 		mockClient.GetCertByOrderIDFunc = func(ctx context.Context, orderID int) (*api.CertData, error) {
 			return &api.CertData{
@@ -900,6 +1202,7 @@ func TestHandleLocalKeyMode(t *testing.T) {
 				ExpiresAt:   time.Now().AddDate(1, 0, 0).Format("2006-01-02"),
 				Certificate: certPEM,
 				CACert:      testCACertPEM,
+				CSR:         pendingCSR,
 			}, nil
 		}
 		store := d.Store.(*MockOrderStore)
@@ -911,7 +1214,11 @@ func TestHandleLocalKeyMode(t *testing.T) {
 			CertName: "example.com-100",
 			OrderID:  100,
 			Domain:   "example.com",
-			Metadata: config.CertMetadata{LastIssueState: "processing"},
+			Metadata: config.CertMetadata{
+				LastIssueState: "processing",
+				LastCSRHash:    mustCSRHash(t, pendingCSR),
+				CSRSubmittedAt: "2026-07-01T00:00:00Z",
+			},
 		}
 		certData, privateKey, reason, err := handleLocalKeyMode(d, mockClient, certCfg, 30)
 		if err != nil {
@@ -928,9 +1235,12 @@ func TestHandleLocalKeyMode(t *testing.T) {
 		}
 	})
 
-	t.Run("metadata缺失但pending存在时仍恢复异步active", func(t *testing.T) {
+	t.Run("metadata缺失的pending按孤儿清理后建立新尝试", func(t *testing.T) {
 		d := NewMockDeployer()
 		certPEM, pendingKey := genSelfSignedPair(t, "example.com")
+		pendingExists := true
+		removed := 0
+		submitted := 0
 		mockClient := NewMockClient()
 		mockClient.GetCertByOrderIDFunc = func(ctx context.Context, orderID int) (*api.CertData, error) {
 			return &api.CertData{
@@ -942,18 +1252,31 @@ func TestHandleLocalKeyMode(t *testing.T) {
 				CACert:      testCACertPEM,
 			}, nil
 		}
+		mockClient.SubmitCSRFunc = func(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error) {
+			submitted++
+			return &api.UpdateResponse{Code: 1, Data: api.UpdateResponseData{CertData: api.CertData{
+				OrderID: req.OrderID, Status: config.OrderStatusProcessing,
+			}}}, nil
+		}
 		store := d.Store.(*MockOrderStore)
 		store.HasPrivateKeyFunc = func(orderID int) bool { return false }
-		store.HasPendingPrivateKeyFunc = func(certName string) bool { return true }
+		store.HasPendingPrivateKeyFunc = func(certName string) bool { return pendingExists }
 		store.LoadPendingPrivateKeyFunc = func(certName string) (string, error) { return pendingKey, nil }
+		store.RemovePendingArtifactsFunc = func(string) error {
+			removed++
+			pendingExists = false
+			return nil
+		}
 		certCfg := &config.CertConfig{CertName: "example.com-100", OrderID: 100, Domain: "example.com"}
 
-		certData, privateKey, reason, err := handleLocalKeyMode(d, mockClient, certCfg, 30)
+		certData, privateKey, reason, err := handleLocalKeyMode(d, mockClient, certCfg, 30, func() error { return nil })
 		if err != nil {
 			t.Fatalf("handleLocalKeyMode() error = %v", err)
 		}
-		if certData == nil || privateKey != pendingKey || reason != "" {
-			t.Fatalf("pending 恢复失败: cert=%+v keyMatch=%v reason=%q", certData, privateKey == pendingKey, reason)
+		if certData != nil || privateKey != "" || reason != "CSR 已提交，等待签发" ||
+			removed != 1 || submitted != 1 {
+			t.Fatalf("孤儿恢复失败: cert=%+v key=%q reason=%q removed=%d submitted=%d",
+				certData, privateKey, reason, removed, submitted)
 		}
 	})
 
@@ -1113,7 +1436,7 @@ func TestSubmitNewCSR(t *testing.T) {
 		}
 
 		certCfg := &config.CertConfig{
-			OrderID: 0,
+			OrderID: 100,
 			Domain:  "example.com",
 			Domains: []string{"example.com"},
 		}
@@ -1174,7 +1497,7 @@ func TestSubmitNewCSR(t *testing.T) {
 		}
 
 		certCfg := &config.CertConfig{
-			OrderID: 0,
+			OrderID: 100,
 			Domain:  "example.com",
 			Domains: []string{"example.com"},
 		}
@@ -1190,9 +1513,12 @@ func TestSubmitNewCSR(t *testing.T) {
 		if certCfg.Metadata.LastIssueState != config.IssueStateProcessing {
 			t.Fatalf("请求结果不确定时应保留在途 processing 状态，got %q", certCfg.Metadata.LastIssueState)
 		}
+		if !certCfg.Metadata.ResubmitRequired {
+			t.Fatal("请求结果不确定时应保留幂等恢复标记")
+		}
 	})
 
-	t.Run("已有pending时重放同一CSR且不覆盖私钥", func(t *testing.T) {
+	t.Run("已有已落盘pending时仅等待查询且不覆盖私钥", func(t *testing.T) {
 		d := NewMockDeployer()
 		store := d.Store.(*MockOrderStore)
 		pendingKey, pendingCSR, err := cert.GenerateCSR("example.com")
@@ -1208,26 +1534,27 @@ func TestSubmitNewCSR(t *testing.T) {
 		}
 		mockClient := NewMockClient()
 		mockClient.SubmitCSRFunc = func(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error) {
-			if req.CSR != pendingCSR {
-				t.Fatalf("应重放原 CSR，got %q", req.CSR)
-			}
-			return &api.UpdateResponse{Code: 1, Data: api.UpdateResponseData{CertData: api.CertData{
-				OrderID: 100,
-				Status:  "processing",
-			}}}, nil
+			t.Fatal("已落盘 pending 不得重放 POST")
+			return nil, nil
 		}
-		certCfg := &config.CertConfig{CertName: "example.com-100", OrderID: 100, Domain: "example.com"}
+		certCfg := &config.CertConfig{
+			CertName: "example.com-100", OrderID: 100, Domain: "example.com",
+			Metadata: config.CertMetadata{
+				CSRSubmittedAt: "2026-07-01T00:00:00Z",
+				LastCSRHash:    mustCSRHash(t, pendingCSR),
+			},
+		}
 
 		_, _, reason, err := submitNewCSR(d, mockClient, certCfg)
 		if err != nil {
 			t.Fatalf("submitNewCSR() error = %v", err)
 		}
-		if reason != "CSR 已提交，等待签发" {
-			t.Fatalf("应返回等待签发提示，got %q", reason)
+		if !strings.Contains(reason, "仅查询订单") {
+			t.Fatalf("应返回 query-first 提示，got %q", reason)
 		}
 	})
 
-	t.Run("网络失败后再次调用重放相同CSR和私钥对", func(t *testing.T) {
+	t.Run("网络失败后再次调用只等待查询确认", func(t *testing.T) {
 		d := NewMockDeployer()
 		store := d.Store.(*MockOrderStore)
 		var pending bool
@@ -1249,16 +1576,11 @@ func TestSubmitNewCSR(t *testing.T) {
 		store.LoadPendingPrivateKeyFunc = func(certName string) (string, error) { return storedKey, nil }
 
 		mockClient := NewMockClient()
-		var firstCSR string
 		calls := 0
 		mockClient.SubmitCSRFunc = func(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error) {
 			calls++
 			if calls == 1 {
-				firstCSR = req.CSR
 				return nil, errors.New("connection reset")
-			}
-			if req.CSR != firstCSR {
-				t.Fatalf("重试必须重放同一 CSR")
 			}
 			return &api.UpdateResponse{Code: 1, Data: api.UpdateResponseData{CertData: api.CertData{
 				OrderID: 200,
@@ -1271,38 +1593,34 @@ func TestSubmitNewCSR(t *testing.T) {
 			t.Fatal("首次网络失败应返回错误")
 		}
 		if _, _, reason, err := submitNewCSR(d, mockClient, certCfg); err != nil {
-			t.Fatalf("第二次重放失败: %v", err)
-		} else if reason != "CSR 已提交，等待签发" {
-			t.Fatalf("重放成功提示不正确: %q", reason)
+			t.Fatalf("第二次 query-first 收敛失败: %v", err)
+		} else if !strings.Contains(reason, "仅查询订单") {
+			t.Fatalf("等待查询提示不正确: %q", reason)
 		}
-		if calls != 2 || saveKeyCount != 1 {
-			t.Fatalf("应提交两次但只生成保存一次私钥，calls=%d saveKeyCount=%d", calls, saveKeyCount)
+		if calls != 1 || saveKeyCount != 1 {
+			t.Fatalf("CSR POST 只能发送一次且只保存一次私钥，calls=%d saveKeyCount=%d", calls, saveKeyCount)
 		}
 	})
 
-	t.Run("pending CSR与私钥不匹配时拒绝重放", func(t *testing.T) {
+	t.Run("未落盘pending视为未提交孤儿并清理", func(t *testing.T) {
 		d := NewMockDeployer()
 		store := d.Store.(*MockOrderStore)
-		keyPEM, _, err := cert.GenerateCSR("example.com")
-		if err != nil {
-			t.Fatalf("GenerateCSR(key) error = %v", err)
-		}
-		_, otherCSR, err := cert.GenerateCSR("other.example.com")
-		if err != nil {
-			t.Fatalf("GenerateCSR(csr) error = %v", err)
-		}
+		removed := 0
 		store.HasPendingPrivateKeyFunc = func(certName string) bool { return true }
-		store.LoadPendingCSRFunc = func(certName string) (string, error) { return otherCSR, nil }
-		store.LoadPendingPrivateKeyFunc = func(certName string) (string, error) { return keyPEM, nil }
+		store.RemovePendingArtifactsFunc = func(string) error { removed++; return nil }
 		mockClient := NewMockClient()
 		mockClient.SubmitCSRFunc = func(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error) {
-			t.Fatal("不匹配的 CSR 与私钥不得提交")
-			return nil, nil
+			return &api.UpdateResponse{Code: 1, Data: api.UpdateResponseData{CertData: api.CertData{
+				OrderID: 100, Status: "processing",
+			}}}, nil
 		}
 
 		certCfg := &config.CertConfig{CertName: "example.com-100", OrderID: 100, Domain: "example.com"}
-		if _, _, _, err := submitNewCSR(d, mockClient, certCfg); err == nil || !strings.Contains(err.Error(), "不匹配") {
-			t.Fatalf("应拒绝不匹配的 pending CSR/私钥，got %v", err)
+		if _, _, _, err := submitNewCSR(d, mockClient, certCfg); err != nil {
+			t.Fatalf("清理孤儿后建立新意图失败: %v", err)
+		}
+		if removed != 1 {
+			t.Fatalf("未落盘 pending 应清理一次，got %d", removed)
 		}
 	})
 }
@@ -1381,7 +1699,7 @@ func TestAutoDeploy_Integration_NoAPI(t *testing.T) {
 			},
 		}
 
-		results := AutoDeploy(cfg, d, false)
+		results := AutoDeploy(cfg, d, RunOptions{}).Results
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -1422,7 +1740,7 @@ func TestAutoDeploy_Integration_NoAPI(t *testing.T) {
 			},
 		}
 
-		results := AutoDeploy(cfg, d, false)
+		results := AutoDeploy(cfg, d, RunOptions{}).Results
 
 		if len(results) != 2 {
 			t.Fatalf("期望 2 个结果，得到 %d 个", len(results))
@@ -1435,100 +1753,265 @@ func TestAutoDeploy_Integration_NoAPI(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// handleFileValidation 测试
-// =============================================================================
+func TestRunReportErr_AggregatesIndependentFailuresWithoutTextDeduplication(t *testing.T) {
+	shared := errors.New("disk full")
+	report := RunReport{
+		Results: []Result{
+			{OrderID: 101, Domain: "bad.example.com", Success: false, Message: shared.Error()},
+			{OrderID: 104, Domain: "other.example.com", Success: false, Message: shared.Error()},
+			{OrderID: 102, Domain: "ok.example.com", Success: true, Message: "deployed"},
+		},
+		Errors:         []error{shared, errors.New("final save failed")},
+		Warnings:       []string{"callback rejected"},
+		Attention:      []CertAttention{{OrderID: 103, Domain: "manual.example.com", Reason: "CAPPED"}},
+		AlreadyRunning: true,
+	}
 
-func TestHandleFileValidation(t *testing.T) {
-	t.Run("验证信息不完整-nil", func(t *testing.T) {
-		err := handleFileValidation("example.com", nil)
-		if err == nil {
-			t.Error("file 为 nil 时期望返回错误")
-		}
-		if !strings.Contains(err.Error(), "验证文件信息不完整") {
-			t.Errorf("期望错误包含 '验证文件信息不完整'，得到 %s", err.Error())
-		}
-	})
+	err := report.Err()
+	if err == nil {
+		t.Fatal("失败 Result 与运行级错误必须通过 Err 暴露")
+	}
+	got := err.Error()
+	if strings.Count(got, shared.Error()) != 3 {
+		t.Fatalf("不同证书和运行级错误即使文本相同也必须全部保留: %q", got)
+	}
+	if !errors.Is(err, shared) {
+		t.Fatalf("聚合后必须保留运行级错误链: %v", err)
+	}
+	if !strings.Contains(got, "final save failed") {
+		t.Fatalf("运行级错误未聚合: %q", got)
+	}
+	if strings.Contains(got, "callback rejected") || strings.Contains(got, "CAPPED") {
+		t.Fatalf("warning/attention 不得进入 Err: %q", got)
+	}
+}
 
-	t.Run("验证信息不完整-空路径", func(t *testing.T) {
-		err := handleFileValidation("example.com", &api.FileValidation{
-			Path:    "",
-			Content: "some content",
+func TestRunReportErr_NonErrorStatesAreNil(t *testing.T) {
+	report := RunReport{
+		Warnings:       []string{"callback rejected"},
+		Attention:      []CertAttention{{OrderID: 103, Domain: "manual.example.com", Reason: "EXPIRED"}},
+		AlreadyRunning: true,
+	}
+	if err := report.Err(); err != nil {
+		t.Fatalf("正常锁占用、warning 与 attention 都不是运行错误: %v", err)
+	}
+}
+
+func TestRunAutoDeploy_LockFailuresStopBeforeExternalCalls(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*autoDeployDependencies)
+		wantText  string
+	}{
+		{
+			name: "open error",
+			configure: func(deps *autoDeployDependencies) {
+				deps.openLock = func(string) (autoDeployLock, error) {
+					return nil, errors.New("open denied")
+				}
+			},
+			wantText: "open denied",
+		},
+		{
+			name: "lock error",
+			configure: func(deps *autoDeployDependencies) {
+				deps.tryLock = func(autoDeployLock) (bool, error) {
+					return false, errors.New("lock denied")
+				}
+			},
+			wantText: "lock denied",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			certData := *makeTestCertData(t, 501, "locked.example.com", "active",
+				time.Now().AddDate(0, 0, 5).Format("2006-01-02"))
+			cfg := config.DefaultConfig()
+			cfg.Certificates = []config.CertConfig{runReportCertConfig(t, certData, 1, &calls)}
+
+			deps := successfulAutoDeployDependencies(nil)
+			tt.configure(&deps)
+			report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, deps)
+
+			if calls.Load() != 0 {
+				t.Fatalf("锁失败后不得发起外部调用，got %d", calls.Load())
+			}
+			if len(report.Results) != 0 || len(report.Errors) != 1 {
+				t.Fatalf("锁失败只能产生一个运行级错误: %+v", report)
+			}
+			if err := report.Err(); err == nil || !strings.Contains(err.Error(), tt.wantText) {
+				t.Fatalf("锁错误必须通过 Err 暴露: %v", err)
+			}
 		})
-		if err == nil {
-			t.Error("空路径时期望返回错误")
+	}
+}
+
+func TestRunAutoDeploy_AlreadyRunningIsNotAnError(t *testing.T) {
+	deps := successfulAutoDeployDependencies(nil)
+	deps.tryLock = func(autoDeployLock) (bool, error) { return false, nil }
+	cfg := &config.Config{Certificates: []config.CertConfig{{OrderID: 502, Domain: "busy.example.com", Enabled: true}}}
+
+	report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, deps)
+	if !report.AlreadyRunning {
+		t.Fatal("正常锁占用必须设置 AlreadyRunning")
+	}
+	if err := report.Err(); err != nil {
+		t.Fatalf("正常锁占用不是错误: %v", err)
+	}
+}
+
+func TestRunAutoDeploy_PersistFailuresAreClassified(t *testing.T) {
+	t.Run("per certificate save is a Result", func(t *testing.T) {
+		saveCalls := 0
+		deps := successfulAutoDeployDependencies(func(*config.Config) error {
+			saveCalls++
+			if saveCalls == 1 {
+				return errors.New("certificate state save failed")
+			}
+			return nil
+		})
+		cfg := &config.Config{Certificates: []config.CertConfig{{
+			OrderID: 503, Domain: "persist.example.com", Enabled: true,
+		}}}
+
+		report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, deps)
+		if len(report.Errors) != 0 {
+			t.Fatalf("逐证书保存错误不得进入运行级 Errors: %v", report.Errors)
 		}
-		if !strings.Contains(err.Error(), "验证文件信息不完整") {
-			t.Errorf("期望错误包含 '验证文件信息不完整'，得到 %s", err.Error())
+		found := false
+		for _, result := range report.Results {
+			if !result.Success && strings.Contains(result.Message, "certificate state save failed") {
+				found = result.OrderID == 503 && result.Domain == "persist.example.com"
+			}
+		}
+		if !found {
+			t.Fatalf("逐证书保存错误必须保留订单/域名语义: %+v", report.Results)
+		}
+		if err := report.Err(); err == nil || !strings.Contains(err.Error(), "certificate state save failed") {
+			t.Fatalf("逐证书保存错误必须通过 Err 暴露: %v", err)
 		}
 	})
 
-	t.Run("验证信息不完整-空内容", func(t *testing.T) {
-		err := handleFileValidation("example.com", &api.FileValidation{
-			Path:    "/.well-known/acme-challenge/token",
-			Content: "",
+	t.Run("final save is a runtime Error", func(t *testing.T) {
+		deps := successfulAutoDeployDependencies(func(*config.Config) error {
+			return errors.New("final config save failed")
 		})
-		if err == nil {
-			t.Error("空内容时期望返回错误")
+		cfg := &config.Config{Certificates: []config.CertConfig{{Enabled: false}}}
+
+		report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, deps)
+		if len(report.Results) != 0 || len(report.Errors) != 1 {
+			t.Fatalf("最终保存失败只能进入运行级 Errors: %+v", report)
 		}
-		if !strings.Contains(err.Error(), "验证文件信息不完整") {
-			t.Errorf("期望错误包含 '验证文件信息不完整'，得到 %s", err.Error())
+		if err := report.Err(); err == nil || !strings.Contains(err.Error(), "final config save failed") {
+			t.Fatalf("最终保存错误必须通过 Err 暴露: %v", err)
+		}
+	})
+}
+
+func TestRunAutoDeploy_CertificateValidationFailuresAreResults(t *testing.T) {
+	tests := []struct {
+		name     string
+		mutate   func(*api.CertData)
+		wantText string
+	}{
+		{"invalid expiry", func(certData *api.CertData) { certData.ExpiresAt = "not-a-date" }, "过期时间"},
+		{"oversized chain", func(certData *api.CertData) { certData.CACert = strings.Repeat("x", cert.MaxCertChainSize+1) }, "证书链"},
+		{"oversized private key", func(certData *api.CertData) { certData.PrivateKey = strings.Repeat("x", cert.MaxPrivateKeySize+1) }, "私钥"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			certData := *makeTestCertData(t, 504, "invalid.example.com", "active",
+				time.Now().AddDate(0, 0, 5).Format("2006-01-02"))
+			tt.mutate(&certData)
+			cfg := config.DefaultConfig()
+			cfg.Certificates = []config.CertConfig{runReportCertConfig(t, certData, 1, &calls)}
+
+			report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, successfulAutoDeployDependencies(nil))
+			if len(report.Errors) != 0 || len(report.Results) != 1 || report.Results[0].Success {
+				t.Fatalf("证书级校验失败必须是失败 Result: %+v", report)
+			}
+			if !strings.Contains(report.Results[0].Message, tt.wantText) {
+				t.Fatalf("失败原因 = %q, want contains %q", report.Results[0].Message, tt.wantText)
+			}
+			if err := report.Err(); err == nil {
+				t.Fatal("证书级校验失败必须通过 Err 暴露")
+			}
+		})
+	}
+}
+
+func TestRunAutoDeploy_NonErrorStates(t *testing.T) {
+	t.Run("processing", func(t *testing.T) {
+		var calls atomic.Int32
+		certData := *makeTestCertData(t, 505, "processing.example.com", "processing",
+			time.Now().AddDate(0, 0, 5).Format("2006-01-02"))
+		cfg := config.DefaultConfig()
+		cfg.Certificates = []config.CertConfig{runReportCertConfig(t, certData, 1, &calls)}
+
+		report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, successfulAutoDeployDependencies(nil))
+		if len(report.Results) != 0 || len(report.Attention) != 0 || report.Err() != nil {
+			t.Fatalf("processing 只等待，不是错误或 attention: %+v", report)
 		}
 	})
 
-	t.Run("危险扩展名-exe", func(t *testing.T) {
-		err := handleFileValidation("example.com", &api.FileValidation{
-			Path:    "/.well-known/acme-challenge/malware.exe",
-			Content: "dangerous content",
-		})
-		if err == nil {
-			t.Error("危险扩展名 .exe 时期望返回错误")
+	t.Run("API expired certificate", func(t *testing.T) {
+		var calls atomic.Int32
+		certData := *makeTestCertData(t, 505, "expired-api.example.com", "active",
+			time.Now().AddDate(0, 0, -1).Format("2006-01-02"))
+		cfg := config.DefaultConfig()
+		cfg.Certificates = []config.CertConfig{runReportCertConfig(t, certData, 1, &calls)}
+
+		report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, successfulAutoDeployDependencies(nil))
+		if len(report.Attention) != 1 || report.Attention[0].Reason != "EXPIRED" {
+			t.Fatalf("API 返回的已过期证书必须进入 Attention: %+v", report)
 		}
-		if !strings.Contains(err.Error(), "不允许创建") || !strings.Contains(err.Error(), ".exe") {
-			t.Errorf("期望错误提及 .exe 扩展名限制，得到 %s", err.Error())
+		if report.Err() != nil {
+			t.Fatalf("EXPIRED attention 不是运行错误: %v", report.Err())
 		}
 	})
 
-	t.Run("危险扩展名-dll", func(t *testing.T) {
-		err := handleFileValidation("example.com", &api.FileValidation{
-			Path:    "/.well-known/test.dll",
-			Content: "dangerous content",
+	tests := []struct {
+		name string
+		meta config.CertMetadata
+	}{
+		{"CAPPED", config.CertMetadata{LastIssueState: config.IssueStateCapped}},
+		{"EXPIRED", config.CertMetadata{LastIssueState: config.IssueStateExpired}},
+		{"policy", config.CertMetadata{LastIssueState: config.IssueStatePolicyBlocked}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{Certificates: []config.CertConfig{{
+				OrderID: 506, Domain: "attention.example.com", Enabled: true, Metadata: tt.meta,
+			}}}
+			report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, successfulAutoDeployDependencies(nil))
+			if len(report.Attention) != 1 || report.Attention[0].OrderID != 506 {
+				t.Fatalf("人工状态必须进入 Attention: %+v", report)
+			}
+			if len(report.Results) != 0 || report.Err() != nil {
+				t.Fatalf("attention 不得变成失败结果: %+v", report)
+			}
 		})
-		if err == nil {
-			t.Error("危险扩展名 .dll 时期望返回错误")
-		}
-		if !strings.Contains(err.Error(), ".dll") {
-			t.Errorf("期望错误提及 .dll，得到 %s", err.Error())
-		}
-	})
+	}
+}
 
-	t.Run("危险扩展名-bat", func(t *testing.T) {
-		err := handleFileValidation("example.com", &api.FileValidation{
-			Path:    "/.well-known/test.bat",
-			Content: "dangerous content",
-		})
-		if err == nil {
-			t.Error("危险扩展名 .bat 时期望返回错误")
-		}
-	})
+func TestRunAutoDeploy_WaitsAndCollectsCallbackWarning(t *testing.T) {
+	var calls atomic.Int32
+	certData := *makeTestCertData(t, 507, "callback-warning.example.com", "active",
+		time.Now().AddDate(0, 0, 5).Format("2006-01-02"))
+	cfg := config.DefaultConfig()
+	cfg.Certificates = []config.CertConfig{runReportCertConfig(t, certData, 0, &calls)}
 
-	t.Run("危险扩展名-ps1", func(t *testing.T) {
-		err := handleFileValidation("example.com", &api.FileValidation{
-			Path:    "/.well-known/test.ps1",
-			Content: "dangerous content",
-		})
-		if err == nil {
-			t.Error("危险扩展名 .ps1 时期望返回错误")
-		}
-	})
-
-	t.Run("危险扩展名-aspx", func(t *testing.T) {
-		err := handleFileValidation("example.com", &api.FileValidation{
-			Path:    "/.well-known/test.aspx",
-			Content: "dangerous content",
-		})
-		if err == nil {
-			t.Error("危险扩展名 .aspx 时期望返回错误")
-		}
-	})
+	report := runAutoDeploy(cfg, NewMockDeployer(), RunOptions{}, successfulAutoDeployDependencies(nil))
+	if len(report.Results) == 0 || !report.Results[0].Success {
+		t.Fatalf("callback 失败不得改写已成功部署结果: %+v", report.Results)
+	}
+	if len(report.Warnings) != 1 || !strings.Contains(report.Warnings[0], "callback") {
+		t.Fatalf("AutoDeploy 必须等待并汇总 callback warning: %+v", report.Warnings)
+	}
+	if err := report.Err(); err != nil {
+		t.Fatalf("callback warning 不得进入 Err: %v", err)
+	}
 }
