@@ -402,7 +402,7 @@ PATH="$COORDINATOR_ROOT/mock-bin:$PATH" bash "$COORDINATOR_ROOT/build/release.sh
     exit 1
 }
 for node in node1 node2; do
-    HIDDEN_ENTRIES="$("$PYTHON_BIN" -c 'import pathlib, sys; print("\n".join(sorted(path.name for path in pathlib.Path(sys.argv[1]).iterdir() if path.name.startswith("."))))' "$COORDINATOR_ROOT/$node")"
+    HIDDEN_ENTRIES="$("$PYTHON_BIN" -c 'import pathlib, sys; print("\n".join(sorted(path.name for path in pathlib.Path(sys.argv[1]).iterdir() if path.name.startswith("."))))' "$COORDINATOR_ROOT/$node" | tr -d '\r')"
     [ "$HIDDEN_ENTRIES" = "$(printf '.rollback\n.staging')" ] || {
         printf 'cleanup 后节点根仍有额外隐藏项 (%s):\n%s\n' "$node" "$HIDDEN_ENTRIES" >&2
         exit 1
