@@ -28,6 +28,8 @@ bash build/check-governance.sh
 
 不要直接把 `release.sh` 当作完整正式发布入口；正式发布必须从 `skills/remote-release.md` 开始。
 
+远端恢复所需的持久 helper、互斥文件和完成标记存放在 `.staging/.control/`；成功执行 `cleanup` 后，发布根只保留 `.staging/` 与 `.rollback/` 两个隐藏目录。
+
 ## 本地秘密配置
 
 ```bash

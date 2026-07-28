@@ -165,10 +165,11 @@ mv "$REMOTE_ROOT/.rollback/dev-new-final-release/release.old" "$REMOTE_ROOT/dev/
 cp "$REMOTE_ROOT/.rollback/dev-new-final-release/releases.json.old" "$REMOTE_ROOT/releases.json"
 cp "$REMOTE_ROOT/.rollback/dev-new-final-release/install.ps1.old" "$REMOTE_ROOT/install.ps1"
 ROLLBACK_MANIFEST_SHA="$("$PYTHON_BIN" "$HELPER" sha256-file --path "$REMOTE_ROOT/.staging/dev-new-final-release/bundle/manifest.json")"
-printf '{"schema_version":1,"release_id":"dev-new-final-release","manifest_sha256":"%s","publish_token":"33333333333333333333333333333333"}\n' "$ROLLBACK_MANIFEST_SHA" >"$REMOTE_ROOT/.rollback-complete.dev-new-final-release.json"
+mkdir -p "$REMOTE_ROOT/.staging/.control"
+printf '{"schema_version":1,"release_id":"dev-new-final-release","manifest_sha256":"%s","publish_token":"33333333333333333333333333333333"}\n' "$ROLLBACK_MANIFEST_SHA" >"$REMOTE_ROOT/.staging/.control/rollback-complete.dev-new-final-release.json"
 rm -rf "$REMOTE_ROOT/.rollback/dev-new-final-release"
 "$PYTHON_BIN" "$HELPER" rollback-release --root "$REMOTE_ROOT" --bundle "$REMOTE_ROOT/.staging/dev-new-final-release/bundle" --release-id dev-new-final-release --publish-token 33333333333333333333333333333333
-[ ! -e "$REMOTE_ROOT/.release-owner.json" ] && [ -e "$REMOTE_ROOT/.rollback-complete.dev-new-final-release.json" ] || {
+[ ! -e "$REMOTE_ROOT/.release-owner.json" ] && [ -e "$REMOTE_ROOT/.staging/.control/rollback-complete.dev-new-final-release.json" ] || {
     echo "rollback 完成窗口重试未保留完成标记" >&2
     exit 1
 }
@@ -304,6 +305,7 @@ SERVERS=(
 )
 EOF
 restrict_config_permissions "$COORDINATOR_ROOT/build/release.conf"
+touch "$COORDINATOR_ROOT/node1/.release.mutex" "$COORDINATOR_ROOT/node2/.release.mutex"
 
 coordinator_bundle() {
     local name="$1" version="$2" commit="$3" content="$4"
@@ -375,6 +377,12 @@ cmp -s "$COORDINATOR_ROOT/node1/releases.json" "$COORDINATOR_ROOT/node2/releases
     exit 1
 }
 [ -d "$OLD_COORDINATOR_BUNDLE" ] || { echo "发布后本地 bundle 被删除" >&2; exit 1; }
+for node in node1 node2; do
+    touch \
+        "$COORDINATOR_ROOT/$node/.release-helper.py" \
+        "$COORDINATOR_ROOT/$node/.cleanup-complete.legacy.json" \
+        "$COORDINATOR_ROOT/$node/.rollback-complete.legacy.json"
+done
 OLD_PUBLISH_TOKEN="$(tr -d '\r\n' <"$OLD_COORDINATOR_BUNDLE/.publish-token")"
 "$PYTHON_BIN" "$COORDINATOR_ROOT/node1/.staging/old/release-helper.py" cleanup-release \
     --root "$COORDINATOR_ROOT/node1" --bundle "$COORDINATOR_ROOT/node1/.staging/old/bundle" \
@@ -384,7 +392,7 @@ if MOCK_FAIL_HOST=node2 MOCK_FAIL_PATTERN=cleanup-release PATH="$COORDINATOR_ROO
     echo "部分节点 cleanup 失败未返回非零" >&2
     exit 1
 fi
-[ ! -e "$COORDINATOR_ROOT/node1/.staging/old" ] && [ -f "$COORDINATOR_ROOT/node1/.cleanup-complete.old.json" ] || {
+[ ! -e "$COORDINATOR_ROOT/node1/.staging/old" ] && [ -f "$COORDINATOR_ROOT/node1/.staging/.control/cleanup-complete.old.json" ] || {
     echo "cleanup 最终窗口未保留独立于 stage 的完成标记" >&2
     exit 1
 }
@@ -393,6 +401,13 @@ PATH="$COORDINATOR_ROOT/mock-bin:$PATH" bash "$COORDINATOR_ROOT/build/release.sh
     echo "cleanup 未释放发布根锁" >&2
     exit 1
 }
+for node in node1 node2; do
+    HIDDEN_ENTRIES="$("$PYTHON_BIN" -c 'import pathlib, sys; print("\n".join(sorted(path.name for path in pathlib.Path(sys.argv[1]).iterdir() if path.name.startswith("."))))' "$COORDINATOR_ROOT/$node")"
+    [ "$HIDDEN_ENTRIES" = "$(printf '.rollback\n.staging')" ] || {
+        printf 'cleanup 后节点根仍有额外隐藏项 (%s):\n%s\n' "$node" "$HIDDEN_ENTRIES" >&2
+        exit 1
+    }
+done
 
 NEW_COORDINATOR_BUNDLE="$(coordinator_bundle new 3.0.0-rc.1 1111111111111111111111111111111111111111 new)"
 PATH="$COORDINATOR_ROOT/mock-bin:$PATH" bash "$COORDINATOR_ROOT/build/release.sh" stage "$NEW_COORDINATOR_BUNDLE"
@@ -413,7 +428,7 @@ if MOCK_FAIL_HOST=node2 MOCK_FAIL_PATTERN=commit-release \
     echo "部分回滚失败未返回非零" >&2
     exit 1
 fi
-[ -f "$COORDINATOR_ROOT/node1/.rollback-complete.retry-rollback.json" ] || {
+[ -f "$COORDINATOR_ROOT/node1/.staging/.control/rollback-complete.retry-rollback.json" ] || {
     echo "已回滚节点未保留完成标记" >&2
     exit 1
 }
@@ -485,6 +500,16 @@ PATH="$COORDINATOR_ROOT/mock-bin:$PATH" bash "$COORDINATOR_ROOT/build/release.sh
 PATH="$COORDINATOR_ROOT/mock-bin:$PATH" bash "$COORDINATOR_ROOT/build/release.sh" publish "$MAIN_COORDINATOR_BUNDLE"
 PATH="$COORDINATOR_ROOT/mock-bin:$PATH" bash "$COORDINATOR_ROOT/build/release.sh" verify "$MAIN_COORDINATOR_BUNDLE"
 PATH="$COORDINATOR_ROOT/mock-bin:$PATH" bash "$COORDINATOR_ROOT/build/release.sh" cleanup "$MAIN_COORDINATOR_BUNDLE"
+
+SPACE_PYTHON_BIN="$COORDINATOR_ROOT/python path with spaces"
+mkdir -p "$SPACE_PYTHON_BIN"
+cp "$COORDINATOR_ROOT/mock-bin/python3" "$SPACE_PYTHON_BIN/python3"
+chmod +x "$SPACE_PYTHON_BIN/python3"
+SPACE_PYTHON_BUNDLE="$(coordinator_bundle space-python 4.1.0-rc.1 4444444444444444444444444444444444444444 space-python)"
+PATH="$COORDINATOR_ROOT/mock-bin:$PATH" bash "$COORDINATOR_ROOT/build/release.sh" stage "$SPACE_PYTHON_BUNDLE"
+PATH="$SPACE_PYTHON_BIN:$COORDINATOR_ROOT/mock-bin:$PATH" bash "$COORDINATOR_ROOT/build/release.sh" publish "$SPACE_PYTHON_BUNDLE"
+PATH="$COORDINATOR_ROOT/mock-bin:$PATH" bash "$COORDINATOR_ROOT/build/release.sh" verify "$SPACE_PYTHON_BUNDLE"
+PATH="$COORDINATOR_ROOT/mock-bin:$PATH" bash "$COORDINATOR_ROOT/build/release.sh" cleanup "$SPACE_PYTHON_BUNDLE"
 
 MISSING_HELPER_BUNDLE="$(coordinator_bundle missing-helper 3.1.0-rc.1 2222222222222222222222222222222222222222 missing)"
 PATH="$COORDINATOR_ROOT/mock-bin:$PATH" bash "$COORDINATOR_ROOT/build/release.sh" stage "$MISSING_HELPER_BUNDLE"

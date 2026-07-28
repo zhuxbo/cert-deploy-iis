@@ -81,7 +81,7 @@ bash build/release.sh dev <prerelease-version>  # prepare → stage → publish 
 bash build/release.sh test                      # 只测试所有节点 SSH 与依赖
 ```
 
-脚本不创建或移动 Git tag，不操作 GitHub Release，不合并或推送分支。`main` 不允许跳过构建/签名、单节点公开发布、覆盖已有正式目录或更新已有同版本索引；`stage` 可幂等重试，并要求所有节点生成的下一版索引字节一致。每个节点的发布根从 `stage` 到 `cleanup` 或成功 `rollback` 由同一 bundle 持久占用，其他发布必须失败；本地协调器互斥与首次 `publish` 生成的唯一 attempt token 共同阻止同一 bundle 的并发操作。回滚先在全部节点完成只读 CAS/备份预检，再绑定 `rolling-back` 阶段，最后才恢复公开状态；已完成节点保留可验证完成标记，支持另一节点失败后的幂等重试。`publish` 比较生成待发布索引时的基线代际，拒绝覆盖已变化的索引。索引通过同目录临时文件原子替换，任一节点失败时返回非零。`verify` 保留暂存与回滚数据供恢复，只有完整验收后才运行 `cleanup`；节点根目录的薄 helper 与完成标记只服务中断恢复，并在同 release ID 下次 `stage` 时核对后轮换。
+脚本不创建或移动 Git tag，不操作 GitHub Release，不合并或推送分支。`main` 不允许跳过构建/签名、单节点公开发布、覆盖已有正式目录或更新已有同版本索引；`stage` 可幂等重试，并要求所有节点生成的下一版索引字节一致。每个节点的发布根从 `stage` 到 `cleanup` 或成功 `rollback` 由同一 bundle 持久占用，其他发布必须失败；本地协调器互斥与首次 `publish` 生成的唯一 attempt token 共同阻止同一 bundle 的并发操作。回滚先在全部节点完成只读 CAS/备份预检，再绑定 `rolling-back` 阶段，最后才恢复公开状态；已完成节点在 `.staging/.control/` 中保留可验证完成标记，支持另一节点失败后的幂等重试。`publish` 比较生成待发布索引时的基线代际，拒绝覆盖已变化的索引。索引通过同目录临时文件原子替换，任一节点失败时返回非零。`verify` 保留暂存与回滚数据供恢复，只有完整验收后才运行 `cleanup`；持久 helper、互斥文件和完成标记统一位于 `.staging/.control/`，旧版互斥文件通过原子移动迁入而不直接删除。成功清理后发布根只保留 `.staging/` 与 `.rollback/` 两个隐藏目录，并清除旧版曾留在根目录的其他控制文件。
 
 ## 本地可执行验证
 
