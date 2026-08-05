@@ -438,6 +438,8 @@ func processOneCertWithSaveAndGate(
 
 	if isLocal {
 		// 本机提交：签发阶段的失败只记本地日志与本地计数，一律不发送回调（deploy-spec §2.8）
+		// 分散等待必须发生在 handleLocalKeyMode 创建 API context 之前，不能消耗请求超时预算。
+		trackedClient.beforeCall()
 		var reason string
 		certData, privateKey, reason, err = handleLocalKeyMode(d, trackedClient, &cfg.Certificates[i], cfg.Schedule.RenewBeforeDays, save)
 		// API 调用完成后更新续签提前天数（无论成功或跳过）
@@ -470,7 +472,7 @@ func processOneCertWithSaveAndGate(
 		}
 	} else {
 		// 自动签发：拉取失败属签发/获取阶段，只记本地日志、不发送回调（deploy-spec §2.8）
-		ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
+		ctx, cancel := beginTrackedAPIRequest(trackedClient, api.APIQueryTimeout)
 		certData, err = trackedClient.GetCertByOrderID(ctx, certCfg.OrderID)
 		cancel()
 		if err != nil {

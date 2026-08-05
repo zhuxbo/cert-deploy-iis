@@ -3,7 +3,7 @@
 # 使用方法:
 #   .\install.ps1 [-ReleaseHost <host>] [-Dev] [-Stable] [-Version <ver>] [-Force] [-Help]
 #
-# 注意: PowerShell 5.1 默认不启用 TLS 1.2，下载脚本前需先执行:
+# 注意: 旧版 Windows PowerShell 默认不启用 TLS 1.2，下载脚本前需先执行:
 #   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 #
 # 服务端要求:
@@ -18,13 +18,21 @@ param(
     [switch]$Help
 )
 
-#Requires -RunAsAdministrator
 $ErrorActionPreference = "Stop"
+
+# PowerShell 3.0 不支持较新的脚本管理员要求参数，改用运行时检查并保持失败关闭。
+$currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$currentPrincipal = New-Object -TypeName System.Security.Principal.WindowsPrincipal -ArgumentList $currentIdentity
+if (-not $currentPrincipal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    [Console]::Error.WriteLine("[ERROR] 请以管理员身份运行 PowerShell 后重新执行安装脚本")
+    exit 1
+}
+
 # 全局禁用 Invoke-WebRequest / Invoke-RestMethod 的进度条
-# 在脚本级别设置，避免函数作用域导致 PowerShell 5.1 进度条仍然渲染覆盖控制台输出
+# 在脚本级别设置，避免函数作用域导致旧版 Windows PowerShell 进度条仍然渲染覆盖控制台输出
 $ProgressPreference = 'SilentlyContinue'
 
-# 强制启用 TLS 1.2（PowerShell 5.1 默认仅 SSL3/TLS 1.0，无法连接现代 HTTPS 服务）
+# 强制启用 TLS 1.2（旧版 Windows PowerShell 默认仅 SSL3/TLS 1.0，无法连接现代 HTTPS 服务）
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 } catch {}
@@ -41,7 +49,8 @@ try {
 # 兼容控制台缓冲区损坏的 Windows 终端（0x1F 错误）
 # 创建底层输出流作为备用，覆盖 Write-Host：每次调用先尝试原生，失败自动降级
 $script:RawOut = try {
-    $w = [System.IO.StreamWriter]::new([Console]::OpenStandardOutput(), $script:OrigConsoleEncoding)
+    # Server 2012 等旧版 PowerShell 不支持较新的类型静态构造语法。
+    $w = New-Object -TypeName System.IO.StreamWriter -ArgumentList ([Console]::OpenStandardOutput()), $script:OrigConsoleEncoding
     $w.AutoFlush = $true; $w
 } catch { $null }
 $script:OrigWriteHost = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Write-Host', 'Cmdlet')
@@ -145,6 +154,21 @@ function Normalize-Version {
     return $Ver
 }
 
+# PowerShell 3.0 没有内置文件哈希命令，使用 .NET SHA256 保持下载完整性校验。
+function Get-SHA256FileHash {
+    param([Parameter(Mandatory=$true)][string]$Path)
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha256.ComputeHash($stream)
+        return [System.BitConverter]::ToString($hashBytes).Replace("-", "")
+    } finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
 # 重建目录 DACL，仅保留 SYSTEM 与 Administrators 完全控制。
 # 不能只用 icacls /inheritance:r /grant:r：它会移除继承 ACE，但会保留存量目录已有的其他显式 ACE。
 function Set-RestrictedDirectoryAcl {
@@ -161,8 +185,9 @@ function Set-RestrictedDirectoryAcl {
 
     $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
     foreach ($sidValue in $allowedSids) {
-        $sid = [System.Security.Principal.SecurityIdentifier]::new($sidValue)
-        $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+        # 使用 New-Object 保持旧版 Windows PowerShell 兼容，同时继续按 SID 避免本地化名称差异。
+        $sid = New-Object -TypeName System.Security.Principal.SecurityIdentifier -ArgumentList $sidValue
+        $rule = New-Object -TypeName System.Security.AccessControl.FileSystemAccessRule -ArgumentList (
             $sid,
             [System.Security.AccessControl.FileSystemRights]::FullControl,
             $inheritance,
@@ -414,7 +439,7 @@ $ExpectedChecksum = $targetInfo.Checksum
 if ($ExpectedChecksum -and $ExpectedChecksum.StartsWith("sha256:")) {
     Write-Info "SHA256 校验..."
     $expectedHash = $ExpectedChecksum.Substring(7)
-    $actualHash = (Get-FileHash -Path $TempExe -Algorithm SHA256).Hash
+    $actualHash = Get-SHA256FileHash -Path $TempExe
     if ($actualHash -ine $expectedHash) {
         Write-Err "SHA256 校验失败"
         Write-Err "  期望: $expectedHash"
@@ -461,7 +486,7 @@ if (Test-Path $ConfigFile) {
 $cfg | Add-Member -NotePropertyName "release_url" -NotePropertyValue $ReleaseUrl -Force
 $cfg | Add-Member -NotePropertyName "upgrade_channel" -NotePropertyValue $Channel -Force
 $tmpCfg = "$ConfigFile.tmp"
-# PowerShell 5.1 的 -Encoding UTF8 会写 BOM，Go JSON 解析器不支持 BOM
+# Windows PowerShell 的 -Encoding UTF8 会写 BOM，Go JSON 解析器不支持 BOM
 # 使用 .NET 直接写入 UTF-8 无 BOM
 $json = $cfg | ConvertTo-Json -Depth 10
 [System.IO.File]::WriteAllText($tmpCfg, $json, (New-Object System.Text.UTF8Encoding $false))

@@ -79,13 +79,13 @@ func setupRunOptions(t *testing.T) Options {
 	return Options{URL: server.URL, Token: "token", Order: "1"}
 }
 
-func stubSetupRunEffects(t *testing.T, saveErr, taskErr error) (*[]string, **config.Config) {
+func stubSetupRunEffects(t *testing.T, saveErr, taskErr, runTaskErr error) (*[]string, **config.Config) {
 	t.Helper()
 	oldInstall, oldBind := installPFXFn, bindCertToIISFn
-	oldSave, oldCreate := saveSetupConfigFn, createTaskFn
+	oldSave, oldCreate, oldRunTask := saveSetupConfigFn, createTaskFn, runTaskNowFn
 	t.Cleanup(func() {
 		installPFXFn, bindCertToIISFn = oldInstall, oldBind
-		saveSetupConfigFn, createTaskFn = oldSave, oldCreate
+		saveSetupConfigFn, createTaskFn, runTaskNowFn = oldSave, oldCreate, oldRunTask
 	})
 
 	events := &[]string{}
@@ -105,6 +105,10 @@ func stubSetupRunEffects(t *testing.T, saveErr, taskErr error) (*[]string, **con
 	createTaskFn = func(string) error {
 		*events = append(*events, "task")
 		return taskErr
+	}
+	runTaskNowFn = func(string) error {
+		*events = append(*events, "start")
+		return runTaskErr
 	}
 	return events, &savedCfg
 }
@@ -188,7 +192,7 @@ func TestRunConfigLoadFailureStopsBeforeInstallSaveAndTask(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{invalid"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	events, _ := stubSetupRunEffects(t, nil, nil)
+	events, _ := stubSetupRunEffects(t, nil, nil, nil)
 
 	result, err := Run(setupRunOptions(t), nil, nil)
 	if err == nil || result != nil {
@@ -203,7 +207,7 @@ func TestRunSaveFailureStopsTaskAndReturnsInstalledFact(t *testing.T) {
 	path := preserveSetupConfigFile(t)
 	writeSetupConfig(t, path, config.DefaultConfig())
 	saveErr := errors.New("save failed")
-	events, savedCfg := stubSetupRunEffects(t, saveErr, nil)
+	events, savedCfg := stubSetupRunEffects(t, saveErr, nil, nil)
 	var messages []string
 
 	result, err := Run(setupRunOptions(t), func(_, _ int, message string) {
@@ -229,7 +233,7 @@ func TestRunCreateTaskFailureKeepsSavedInstalledFact(t *testing.T) {
 	path := preserveSetupConfigFile(t)
 	writeSetupConfig(t, path, config.DefaultConfig())
 	taskErr := errors.New("task failed")
-	events, savedCfg := stubSetupRunEffects(t, nil, taskErr)
+	events, savedCfg := stubSetupRunEffects(t, nil, taskErr, nil)
 
 	result, err := Run(setupRunOptions(t), nil, nil)
 	if result == nil || result.Installed != 1 || !errors.Is(err, taskErr) {
@@ -246,13 +250,31 @@ func TestRunCreateTaskFailureKeepsSavedInstalledFact(t *testing.T) {
 func TestRunSuccessSavesBeforeCreatingTask(t *testing.T) {
 	path := preserveSetupConfigFile(t)
 	writeSetupConfig(t, path, config.DefaultConfig())
-	events, _ := stubSetupRunEffects(t, nil, nil)
+	events, _ := stubSetupRunEffects(t, nil, nil, nil)
 
 	result, err := Run(setupRunOptions(t), nil, nil)
 	if err != nil || result == nil || result.Installed != 1 {
 		t.Fatalf("result=%+v error=%v", result, err)
 	}
-	if strings.Join(*events, ",") != "install,save,task" {
+	if strings.Join(*events, ",") != "install,save,task,start" {
 		t.Fatalf("events=%v", *events)
+	}
+}
+
+func TestRunStartTaskFailureKeepsCreatedSchedule(t *testing.T) {
+	path := preserveSetupConfigFile(t)
+	writeSetupConfig(t, path, config.DefaultConfig())
+	runTaskErr := errors.New("start failed")
+	events, savedCfg := stubSetupRunEffects(t, nil, nil, runTaskErr)
+
+	result, err := Run(setupRunOptions(t), nil, nil)
+	if result == nil || result.Installed != 1 || !errors.Is(err, runTaskErr) {
+		t.Fatalf("result=%+v error=%v", result, err)
+	}
+	if strings.Join(*events, ",") != "install,save,task,start" {
+		t.Fatalf("events=%v", *events)
+	}
+	if *savedCfg == nil || !(*savedCfg).AutoCheckEnabled {
+		t.Fatalf("首次启动失败仍须保留已创建任务与启用配置: %+v", *savedCfg)
 	}
 }

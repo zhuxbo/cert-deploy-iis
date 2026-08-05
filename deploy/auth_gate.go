@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"sslctlw/api"
 )
@@ -107,6 +108,11 @@ func (c *trackedAPIClient) beforeCall() {
 	if c.beforeFirstCall != nil {
 		c.beforeFirstCall()
 	}
+}
+
+func beginTrackedAPIRequest(c *trackedAPIClient, timeout time.Duration) (context.Context, context.CancelFunc) {
+	c.beforeCall()
+	return context.WithTimeout(context.Background(), timeout)
 }
 
 func (c *trackedAPIClient) record(err error) {

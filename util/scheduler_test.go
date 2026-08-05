@@ -187,6 +187,8 @@ func TestEvaluateTaskHealth(t *testing.T) {
 	}{
 		{"nil 信息", nil, 1, "无法获取"},
 		{"从未运行", &TaskHealth{HasRun: false, LastTaskResult: 267011}, 1, "从未运行"},
+		{"首次运行中", &TaskHealth{HasRun: false, LastTaskResult: 0x41301}, 0, ""},
+		{"首次运行已排队", &TaskHealth{HasRun: false, LastTaskResult: 0x41325}, 0, ""},
 		{"健康", &TaskHealth{HasRun: true, LastRunTime: recent, LastTaskResult: 0}, 0, ""},
 		{"运行中不告警", &TaskHealth{HasRun: true, LastRunTime: recent, LastTaskResult: 0x41301}, 0, ""},
 		{"结果异常", &TaskHealth{HasRun: true, LastRunTime: recent, LastTaskResult: 0x80070002}, 1, "结果异常"},
@@ -201,6 +203,27 @@ func TestEvaluateTaskHealth(t *testing.T) {
 			}
 			if tt.wantSub != "" && len(warns) > 0 && !strings.Contains(warns[0], tt.wantSub) {
 				t.Errorf("告警 %q 应包含 %q", warns[0], tt.wantSub)
+			}
+		})
+	}
+}
+
+func TestTaskNeedsInitialRun(t *testing.T) {
+	tests := []struct {
+		name   string
+		health *TaskHealth
+		want   bool
+	}{
+		{"任务从未运行", &TaskHealth{LastTaskResult: 0x41303}, true},
+		{"首次运行中", &TaskHealth{LastTaskResult: 0x41301}, false},
+		{"首次运行已排队", &TaskHealth{LastTaskResult: 0x41325}, false},
+		{"已有运行记录", &TaskHealth{HasRun: true, LastTaskResult: 0}, false},
+		{"无任务信息", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := TaskNeedsInitialRun(tt.health); got != tt.want {
+				t.Fatalf("TaskNeedsInitialRun() = %v, want %v", got, tt.want)
 			}
 		})
 	}

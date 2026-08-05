@@ -79,6 +79,7 @@ require_regular_file .claude/commands/finish-check.md
 require_regular_file .claude/commands/remote-release.md
 require_regular_file .agents/skills/finish-check/SKILL.md
 require_regular_file .agents/skills/remote-release/SKILL.md
+require_regular_file build/install.ps1
 
 require_literal .gitattributes '*.sh text eol=lf'
 require_literal .gitattributes 'CLAUDE.md text eol=lf'
@@ -188,6 +189,9 @@ forbid_literal skills/api.md '新申请时可为 0'
 forbid_literal skills/api.md '`order_id=0`'
 forbid_literal skills/api.md 'resubmit_required'
 forbid_literal deploy-spec.md '`order_id=0`'
+forbid_literal build/install.ps1 '::new('
+forbid_literal build/install.ps1 '#Requires -RunAsAdministrator'
+forbid_literal build/install.ps1 'Get-FileHash'
 
 hash_file() {
     if command -v sha256sum >/dev/null 2>&1; then

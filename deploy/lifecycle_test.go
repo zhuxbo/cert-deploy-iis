@@ -253,6 +253,34 @@ func TestTrackedAPIClientRunsScatterHookOnlyBeforeFirstRequest(t *testing.T) {
 	}
 }
 
+// TestBeginTrackedAPIRequestStartsTimeoutAfterScatterDelay 防止分散等待消耗网络请求超时预算。
+// 若把 context.WithTimeout 移回 beforeFirstCall 之前，本测试会观察到明显缩短的剩余时间。
+func TestBeginTrackedAPIRequestStartsTimeoutAfterScatterDelay(t *testing.T) {
+	const (
+		delay   = 250 * time.Millisecond
+		timeout = 2 * time.Second
+	)
+	tracked := &trackedAPIClient{
+		APIClient: NewMockClient(),
+		concrete:  api.NewClient("https://api.example.com", "token"),
+		gate:      &authGate{},
+		tracker:   &apiCallTracker{},
+		beforeFirstCall: func() {
+			time.Sleep(delay)
+		},
+	}
+
+	ctx, cancel := beginTrackedAPIRequest(tracked, timeout)
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("API 请求 context 缺少 deadline")
+	}
+	if remaining := time.Until(deadline); remaining < timeout-100*time.Millisecond {
+		t.Fatalf("分散等待消耗了 API 超时预算: remaining=%v timeout=%v", remaining, timeout)
+	}
+}
+
 func TestSubmitPendingCSRAuthBlockRollsBackQuotaAndArtifacts(t *testing.T) {
 	removed := 0
 	saves := 0

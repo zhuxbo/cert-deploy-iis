@@ -193,6 +193,28 @@ func TestQueryTaskHealthPresentation(t *testing.T) {
 	}
 }
 
+func TestQueryTaskHealthPresentationStartsNeverRunTask(t *testing.T) {
+	startCalls := 0
+	healthy, message := queryTaskHealthPresentation(
+		true,
+		"SSLCtlW",
+		time.Now(),
+		func(string) (*util.TaskHealth, error) {
+			return &util.TaskHealth{LastTaskResult: 0x41303}, nil
+		},
+		func(name string) error {
+			startCalls++
+			if name != "SSLCtlW" {
+				t.Fatalf("task name = %q", name)
+			}
+			return nil
+		},
+	)
+	if !healthy || startCalls != 1 || !strings.Contains(message, "首次检查已启动") {
+		t.Fatalf("healthy=%v message=%q startCalls=%d", healthy, message, startCalls)
+	}
+}
+
 func TestObserveWorkerTimeoutDoesNotFinishBeforeWorker(t *testing.T) {
 	done := make(chan struct{})
 	timeout := make(chan time.Time, 1)

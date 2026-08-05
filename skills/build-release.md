@@ -8,6 +8,7 @@
 - 唯一规范正式资产：`sslctlw-windows-amd64.exe`。
 - GitHub-only 附加资产：无。
 - `install.ps1` 是发布节点上的非版本化安装入口，不属于正式资产，不写入版本条目的 `checksums`，也不上传 GitHub Release。
+- `install.ps1` 必须兼容 Windows Server 2012 自带的 Windows PowerShell 3.0；构造 .NET 对象使用 `New-Object`，不得使用较新版本才支持的 `[Type]::new(...)`、`#Requires -RunAsAdministrator` 或 `Get-FileHash`。管理员权限与 SHA256 校验改用 3.0 可用的 .NET API，不能降级或跳过。
 - 同一版本在所有发布节点和 GitHub Release 上的 EXE 必须来自同一个已签名 bundle，逐字节一致；禁止为不同目标重新构建或重新签名。
 
 ## 构建

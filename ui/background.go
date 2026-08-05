@@ -204,6 +204,7 @@ func queryTaskHealthPresentation(
 	taskName string,
 	now time.Time,
 	query func(string) (*util.TaskHealth, error),
+	startInitial ...func(string) error,
 ) (bool, string) {
 	if !enabled {
 		return false, "自动部署已停止"
@@ -211,6 +212,12 @@ func queryTaskHealthPresentation(
 	health, err := query(taskName)
 	if err != nil {
 		return false, fmt.Sprintf("任务计划不健康: %v", err)
+	}
+	if util.TaskNeedsInitialRun(health) && len(startInitial) > 0 && startInitial[0] != nil {
+		if err := startInitial[0](taskName); err != nil {
+			return false, fmt.Sprintf("任务计划不健康: 任务从未运行；首次启动失败: %v", err)
+		}
+		return true, "任务首次检查已启动"
 	}
 	warnings := util.EvaluateTaskHealth(health, now)
 	if len(warnings) > 0 {
