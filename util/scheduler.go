@@ -213,6 +213,9 @@ func EvaluateTaskHealth(h *TaskHealth, now time.Time) []string {
 	}
 	var warns []string
 	if !h.HasRun {
+		if h.LastTaskResult == taskResultRunning || h.LastTaskResult == taskResultQueued {
+			return nil
+		}
 		return append(warns, "任务从未运行（新安装可忽略，超过一天仍未运行需排查）")
 	}
 	switch h.LastTaskResult {
@@ -225,4 +228,9 @@ func EvaluateTaskHealth(h *TaskHealth, now time.Time) []string {
 		warns = append(warns, fmt.Sprintf("超过 25 小时未运行（上次运行: %s）", h.LastRunTime.Format("2006-01-02 15:04")))
 	}
 	return warns
+}
+
+// TaskNeedsInitialRun 判断任务是否从未启动过，供升级后保留的历史任务触发一次自愈运行。
+func TaskNeedsInitialRun(h *TaskHealth) bool {
+	return h != nil && !h.HasRun && h.LastTaskResult == taskResultHasNot
 }

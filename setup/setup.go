@@ -24,6 +24,7 @@ var (
 	bindCertToIISFn   = bindCertToIIS
 	saveSetupConfigFn = saveSetupConfig
 	createTaskFn      = util.CreateTask
+	runTaskNowFn      = util.RunTaskNow
 )
 
 // ProgressFunc 进度回调
@@ -276,19 +277,29 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 		return result, errors.Join(partialErr, fmt.Errorf("保存配置失败: %w", err))
 	}
 
-	// 7. 创建计划任务
-	report("创建计划任务...")
+	// 7. 创建计划任务并触发首次运行，避免新任务在随机日程到达前一直显示“从未运行”
+	report("创建并启动计划任务...")
 	taskName := config.DefaultTaskName
 	taskErr := createTaskFn(taskName)
+	var runTaskErr error
 	if taskErr != nil {
 		log.Printf("创建计划任务失败: %v", taskErr)
 	} else {
 		log.Printf("计划任务已创建: %s", taskName)
+		runTaskErr = runTaskNowFn(taskName)
+		if runTaskErr != nil {
+			log.Printf("首次运行计划任务失败: %v", runTaskErr)
+		} else {
+			log.Printf("计划任务首次运行已启动: %s", taskName)
+		}
 	}
 
 	finalErr := partialErr
 	if taskErr != nil {
 		finalErr = errors.Join(finalErr, fmt.Errorf("创建计划任务失败: %w", taskErr))
+	}
+	if runTaskErr != nil {
+		finalErr = errors.Join(finalErr, fmt.Errorf("首次运行计划任务失败: %w", runTaskErr))
 	}
 	if finalErr != nil {
 		return result, finalErr

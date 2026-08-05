@@ -23,7 +23,11 @@ ASSET_NAME = "sslctlw-windows-amd64.exe"
 MANIFEST_NAME = "manifest.json"
 INSTALL_NAME = "install.ps1"
 OWNER_NAME = ".release-owner.json"
-MUTEX_NAME = ".release.mutex"
+CONTROL_DIR = Path(".staging") / ".control"
+MUTEX_NAME = CONTROL_DIR / "release.mutex"
+LEGACY_CONTROL_RE = re.compile(
+    r"^\.(?:cleanup|rollback)-complete\.[0-9A-Za-z._-]+\.json$"
+)
 SEMVER_RE = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
     r"(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
@@ -177,6 +181,8 @@ def command_run_locked(args: argparse.Namespace) -> None:
 def validate_release_id(release_id: str) -> None:
     if not re.fullmatch(r"[0-9A-Za-z._-]+", release_id):
         fail("release_id 含非法字符")
+    if release_id == ".control":
+        fail("release_id 与发布控制目录冲突")
 
 
 def manifest_identity(bundle: Path) -> str:
@@ -245,12 +251,12 @@ def baseline_path(next_index: Path) -> Path:
 
 def cleanup_tombstone(root: Path, release_id: str) -> Path:
     validate_release_id(release_id)
-    return root / f".cleanup-complete.{release_id}.json"
+    return root / CONTROL_DIR / f"cleanup-complete.{release_id}.json"
 
 
 def rollback_tombstone(root: Path, release_id: str) -> Path:
     validate_release_id(release_id)
-    return root / f".rollback-complete.{release_id}.json"
+    return root / CONTROL_DIR / f"rollback-complete.{release_id}.json"
 
 
 def completion_record(bundle: Path, release_id: str, publish_token: str) -> dict[str, Any]:
@@ -1042,6 +1048,22 @@ def command_complete_cleanup(args: argparse.Namespace) -> None:
     shutil.rmtree(stage, ignore_errors=True)
 
 
+@locked_root_command
+def command_cleanup_legacy_control(args: argparse.Namespace) -> None:
+    root = Path(args.root).resolve()
+    if owner_path(root).exists():
+        fail("发布根仍被占用，拒绝清理旧版控制文件")
+    for name in (".release-helper.py", ".release-helper.py.tmp"):
+        path = root / name
+        if path.exists() or path.is_symlink():
+            path.unlink()
+    for path in root.iterdir():
+        if LEGACY_CONTROL_RE.fullmatch(path.name) and (
+            path.is_file() or path.is_symlink()
+        ):
+            path.unlink()
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     sub = result.add_subparsers(dest="command", required=True)
@@ -1149,6 +1171,9 @@ def parser() -> argparse.ArgumentParser:
     complete_cleanup.add_argument("--publish-token", required=True)
     complete_cleanup.add_argument("--manifest-sha256", required=True)
     complete_cleanup.set_defaults(func=command_complete_cleanup)
+    cleanup_legacy = sub.add_parser("cleanup-legacy-control")
+    cleanup_legacy.add_argument("--root", required=True)
+    cleanup_legacy.set_defaults(func=command_cleanup_legacy_control)
     return result
 
 

@@ -313,7 +313,7 @@ func RunApp() {
 			case <-time.After(100 * time.Millisecond):
 			}
 
-			app.refreshAutoCheckStatus()
+			app.refreshAutoCheckStatus(true)
 
 			// 检查 context
 			select {
@@ -405,7 +405,7 @@ func RunApp() {
 			ShowAPIDialog(app.mainWnd, func() {
 				app.doLoadDataAsync(nil)
 				// setup 成功后刷新自动部署状态（setup 内部已创建计划任务）
-				app.refreshAutoCheckStatus()
+				app.refreshAutoCheckStatus(false)
 			})
 		})
 	})
@@ -512,7 +512,7 @@ func (app *AppWindow) toggleAutoCheck() {
 				if saveErr != nil {
 					app.btnAutoCheck.SetText("停止自动部署")
 					app.statusIndicator.SetState(IndicatorStopped)
-					app.lblTaskStatus.Hwnd().SetWindowText("状态: 任务计划不健康")
+					_ = app.lblTaskStatus.Hwnd().SetWindowText("状态: 任务计划不健康")
 					app.appendTaskLog(fmt.Sprintf("任务计划已删除，但保存停用状态失败: %v", saveErr))
 					app.appendTaskLog("配置与任务计划状态可能不一致，请人工处理")
 					return
@@ -535,9 +535,13 @@ func (app *AppWindow) toggleAutoCheck() {
 
 			err := util.CreateTask(taskName)
 			var saveErr error
+			var runTaskErr error
 			if err == nil {
 				cfg.AutoCheckEnabled = true
 				saveErr = cfg.Save()
+				if saveErr == nil {
+					runTaskErr = util.RunTaskNow(taskName)
+				}
 			}
 
 			app.uiThreadIfActive(func() {
@@ -552,16 +556,24 @@ func (app *AppWindow) toggleAutoCheck() {
 				if saveErr != nil {
 					app.btnAutoCheck.SetText("启动自动部署")
 					app.statusIndicator.SetState(IndicatorStopped)
-					app.lblTaskStatus.Hwnd().SetWindowText("状态: 任务计划不健康")
+					_ = app.lblTaskStatus.Hwnd().SetWindowText("状态: 任务计划不健康")
 					app.appendTaskLog(fmt.Sprintf("任务计划已创建，但保存启用状态失败: %v", saveErr))
 					app.appendTaskLog("配置与任务计划状态可能不一致，请人工处理")
+					return
+				}
+				if runTaskErr != nil {
+					app.btnAutoCheck.SetText("停止自动部署")
+					app.statusIndicator.SetState(IndicatorStopped)
+					_ = app.lblTaskStatus.Hwnd().SetWindowText("状态: 任务计划不健康")
+					app.appendTaskLog(fmt.Sprintf("任务计划已创建，但首次运行启动失败: %v", runTaskErr))
+					app.appendTaskLog("每日计划仍然有效；可点击“立即检测”验证部署，或检查 Windows 任务计划程序")
 					return
 				}
 
 				app.btnAutoCheck.SetText("停止自动部署")
 				app.statusIndicator.SetState(IndicatorRunning)
-				app.lblTaskStatus.Hwnd().SetWindowText("状态: 任务计划运行中 (每天一次)")
-				app.appendTaskLog("自动部署已启动，每天检查一次")
+				_ = app.lblTaskStatus.Hwnd().SetWindowText("状态: 首次检查已启动 (以后每天一次)")
+				app.appendTaskLog("自动部署已启动，正在执行首次检查，以后每天检查一次")
 				app.appendTaskLog("任务计划已创建: " + taskName)
 			})
 		}
@@ -569,7 +581,7 @@ func (app *AppWindow) toggleAutoCheck() {
 }
 
 // refreshAutoCheckStatus 刷新自动部署按钮和状态指示器
-func (app *AppWindow) refreshAutoCheckStatus() {
+func (app *AppWindow) refreshAutoCheckStatus(recoverNeverRun bool) {
 	go func() {
 		select {
 		case <-app.ctx.Done():
@@ -604,7 +616,13 @@ func (app *AppWindow) refreshAutoCheckStatus() {
 			now = app.now()
 		}
 		enabled := cfg != nil && cfg.AutoCheckEnabled
-		healthy, message := queryTaskHealthPresentation(enabled, taskName, now, query)
+		var healthy bool
+		var message string
+		if recoverNeverRun {
+			healthy, message = queryTaskHealthPresentation(enabled, taskName, now, query, util.RunTaskNow)
+		} else {
+			healthy, message = queryTaskHealthPresentation(enabled, taskName, now, query)
+		}
 
 		select {
 		case <-app.ctx.Done():

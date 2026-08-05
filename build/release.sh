@@ -92,6 +92,7 @@ $output
 EOF
     RELEASE_ID="$(basename "$BUNDLE")"
     [[ "$RELEASE_ID" =~ ^[0-9A-Za-z._-]+$ ]] || die "bundle 目录名不安全: $RELEASE_ID"
+    [ "$RELEASE_ID" != ".control" ] || die "bundle 目录名与发布控制目录冲突"
     MANIFEST_SHA="$("$PYTHON_BIN" "$HELPER" sha256-file --path "$BUNDLE/manifest.json")"
 }
 
@@ -118,7 +119,7 @@ load_publish_token_optional() {
 create_publish_token() {
     local token_file token
     token_file="$(publish_token_path)"
-    token="$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(16))')"
+    token="$("$PYTHON_BIN" -c 'import secrets; print(secrets.token_hex(16))')"
     if ! (umask 077; set -o noclobber; printf '%s\n' "$token" >"$token_file") 2>/dev/null; then
         die "bundle 已存在 publish attempt；中断恢复请使用 resume-publish"
     fi
@@ -224,7 +225,8 @@ test_connections() {
     for server in "${SERVERS[@]}"; do
         parse_server "$server"
         info "检查节点 $SERVER_NAME ($SERVER_HOST:$SERVER_PORT)"
-        if ! ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "command -v python3 >/dev/null && mkdir -p '$SERVER_DIR/.staging' '$SERVER_DIR/.rollback'"; then
+        if ! ssh_cmd "$SERVER_HOST" "$SERVER_PORT" \
+            "command -v python3 >/dev/null && mkdir -p '$SERVER_DIR/.staging/.control' '$SERVER_DIR/.rollback' && if test -e '$SERVER_DIR/.release.mutex' || test -L '$SERVER_DIR/.release.mutex'; then test -f '$SERVER_DIR/.release.mutex' && test ! -L '$SERVER_DIR/.release.mutex' && test ! -e '$SERVER_DIR/.staging/.control/release.mutex' && mv '$SERVER_DIR/.release.mutex' '$SERVER_DIR/.staging/.control/release.mutex'; fi"; then
             printf '[ERROR] 节点不可用: %s\n' "$SERVER_NAME" >&2
             failed=1
         fi
@@ -293,7 +295,7 @@ stage_bundle() {
             "python3 '$stage/release-helper.incoming.py' verify-bundle --bundle '$bundle_remote' >/dev/null && python3 '$stage/release-helper.incoming.py' acquire-lock --root '$SERVER_DIR' --bundle '$bundle_remote' --release-id '$RELEASE_ID'"
         LOCKED_SERVERS+=("$server")
         ssh_cmd "$SERVER_HOST" "$SERVER_PORT" \
-            "python3 '$stage/release-helper.incoming.py' promote-stage --root '$SERVER_DIR' --incoming-bundle '$bundle_remote' --release-id '$RELEASE_ID' && rmdir '$incoming' && rm -rf '$stage/release' && mkdir -p '$stage/release' && cp '$stage/bundle/$ASSET_NAME' '$stage/release/$ASSET_NAME' && cp '$stage/release-helper.incoming.py' '$SERVER_DIR/.release-helper.py.tmp' && mv '$SERVER_DIR/.release-helper.py.tmp' '$SERVER_DIR/.release-helper.py' && mv '$stage/release-helper.incoming.py' '$stage/release-helper.py' && python3 '$stage/release-helper.py' next-index --root '$SERVER_DIR' --bundle '$stage/bundle' --output '$stage/releases.json.next' --release-id '$RELEASE_ID'"
+            "python3 '$stage/release-helper.incoming.py' promote-stage --root '$SERVER_DIR' --incoming-bundle '$bundle_remote' --release-id '$RELEASE_ID' && rmdir '$incoming' && rm -rf '$stage/release' && mkdir -p '$stage/release' '$SERVER_DIR/.staging/.control' && cp '$stage/bundle/$ASSET_NAME' '$stage/release/$ASSET_NAME' && cp '$stage/release-helper.incoming.py' '$SERVER_DIR/.staging/.control/release-helper.py.tmp' && mv '$SERVER_DIR/.staging/.control/release-helper.py.tmp' '$SERVER_DIR/.staging/.control/release-helper.py' && mv '$stage/release-helper.incoming.py' '$stage/release-helper.py' && python3 '$stage/release-helper.py' next-index --root '$SERVER_DIR' --bundle '$stage/bundle' --output '$stage/releases.json.next' --release-id '$RELEASE_ID'"
         node_index_sha="$(ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "python3 '$stage/release-helper.py' sha256-file --path '$stage/releases.json.next'")"
         if [ -z "$expected_index_sha" ]; then
             expected_index_sha="$node_index_sha"
@@ -507,12 +509,21 @@ cleanup_bundle_remote() {
         parse_server "$server"
         stage="$SERVER_DIR/.staging/$RELEASE_ID"
         if ! ssh_cmd "$SERVER_HOST" "$SERVER_PORT" \
-            "tombstone='$SERVER_DIR/.cleanup-complete.$RELEASE_ID.json'; if test -e '$SERVER_DIR/.release-owner.json'; then python3 '$stage/release-helper.py' cleanup-release --root '$SERVER_DIR' --bundle '$stage/bundle' --release-id '$RELEASE_ID' --publish-token '$PUBLISH_TOKEN'; fi; if test -f \"\$tombstone\"; then python3 '$SERVER_DIR/.release-helper.py' complete-cleanup --root '$SERVER_DIR' --bundle '$stage/bundle' --release-id '$RELEASE_ID' --publish-token '$PUBLISH_TOKEN' --manifest-sha256 '$MANIFEST_SHA'; elif test ! -e '$stage' && test ! -e '$SERVER_DIR/.release-owner.json'; then true; else exit 1; fi"; then
+            "if test -e '$SERVER_DIR/.release-owner.json'; then python3 '$stage/release-helper.py' cleanup-release --root '$SERVER_DIR' --bundle '$stage/bundle' --release-id '$RELEASE_ID' --publish-token '$PUBLISH_TOKEN'; fi; completed=false; if test -f '$SERVER_DIR/.staging/.control/release-helper.py' && python3 '$SERVER_DIR/.staging/.control/release-helper.py' complete-cleanup --root '$SERVER_DIR' --bundle '$stage/bundle' --release-id '$RELEASE_ID' --publish-token '$PUBLISH_TOKEN' --manifest-sha256 '$MANIFEST_SHA'; then completed=true; elif test -f '$SERVER_DIR/.release-helper.py' && python3 '$SERVER_DIR/.release-helper.py' complete-cleanup --root '$SERVER_DIR' --bundle '$stage/bundle' --release-id '$RELEASE_ID' --publish-token '$PUBLISH_TOKEN' --manifest-sha256 '$MANIFEST_SHA'; then completed=true; elif test ! -e '$stage' && test ! -e '$SERVER_DIR/.release-owner.json'; then completed=true; fi; test \"\$completed\" = true"; then
             printf '[ERROR] 节点清理失败: %s\n' "$SERVER_NAME" >&2
             failed=1
         fi
     done
     [ "$failed" -eq 0 ] || die "至少一个节点清理失败；修复后可用同一 bundle 重试 cleanup"
+    for server in "${SERVERS[@]}"; do
+        parse_server "$server"
+        if ! ssh_cmd "$SERVER_HOST" "$SERVER_PORT" \
+            "if test -f '$SERVER_DIR/.staging/.control/release-helper.py'; then python3 '$SERVER_DIR/.staging/.control/release-helper.py' cleanup-legacy-control --root '$SERVER_DIR'; fi"; then
+            printf '[ERROR] 节点旧版控制文件清理失败: %s\n' "$SERVER_NAME" >&2
+            failed=1
+        fi
+    done
+    [ "$failed" -eq 0 ] || die "发布数据已清理，但至少一个节点的旧版根目录控制文件清理失败；可用同一 bundle 重试 cleanup"
     clear_publish_token
     ok "全部节点的暂存、回滚数据和超额历史目录已清理"
 }
