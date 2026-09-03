@@ -97,31 +97,6 @@ func VerifyCSRIdentity(csrPEM, keyPEM, expectedHash, expectedCN string) (bool, e
 	return util.NormalizeDomain(csr.Subject.CommonName) == util.NormalizeDomain(expectedCN), nil
 }
 
-// VerifyCSRCertificateIdentity 验证 CSR 与已签发证书是否属于同一公钥和 CN。
-func VerifyCSRCertificateIdentity(csrPEM, certPEM, expectedCN string) (bool, error) {
-	csr, err := ParseCSR(csrPEM)
-	if err != nil {
-		return false, err
-	}
-	if err := csr.CheckSignature(); err != nil {
-		return false, fmt.Errorf("CSR 签名验证失败: %w", err)
-	}
-	parsedCert, err := ParseCertificate(certPEM)
-	if err != nil {
-		return false, err
-	}
-	csrPublic, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
-	if err != nil {
-		return false, fmt.Errorf("编码 CSR 公钥失败: %w", err)
-	}
-	certPublic, err := x509.MarshalPKIXPublicKey(parsedCert.PublicKey)
-	if err != nil {
-		return false, fmt.Errorf("编码证书公钥失败: %w", err)
-	}
-	return bytes.Equal(csrPublic, certPublic) &&
-		util.NormalizeDomain(csr.Subject.CommonName) == util.NormalizeDomain(expectedCN), nil
-}
-
 func privateKeyMatchesPublicKey(privateKey, publicKey any) (bool, error) {
 	switch priv := privateKey.(type) {
 	case *rsa.PrivateKey:

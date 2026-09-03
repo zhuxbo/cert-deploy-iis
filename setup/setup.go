@@ -127,15 +127,6 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 		if serialNumber != "" {
 			exists, certInfo, _ := cert.IsCertExists(serialNumber)
 			usableExisting := exists && certInfo != nil && certInfo.HasPrivKey
-			if usableExisting && strings.TrimSpace(certData.CSR) != "" {
-				matched, verifyErr := cert.VerifyCSRCertificateIdentity(
-					certData.CSR, certData.Certificate, certData.Domain(),
-				)
-				if verifyErr != nil || !matched {
-					usableExisting = false
-					log.Printf("证书 %s 的本地证书与服务端 CSR 归属不一致，继续查找原私钥", certData.Domain())
-				}
-			}
 			if usableExisting {
 				log.Printf("证书 %s 已存在，跳过导入", certData.Domain())
 				// 已存在证书仍需绑定生效才算部署成功：与新装路径共用 evalBindOutcome 判定，
@@ -183,12 +174,6 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 
 		// 优先级 1-2：尝试获取私钥
 		keyPEM, source := resolvePrivateKey(certData.Certificate, certData.PrivateKey, opts.KeyPath)
-		if keyPEM != "" {
-			if err := verifySetupCSRKey(certData, keyPEM); err != nil {
-				log.Printf("证书 %s 的 %s 私钥未通过服务端 CSR 归属校验: %v", certData.Domain(), source, err)
-				keyPEM = ""
-			}
-		}
 		if keyPEM == "" {
 			// 需要私钥，归入阶段 2
 			log.Printf("证书 %s 未找到可用私钥，等待用户提供", certData.Domain())
@@ -244,14 +229,6 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 				result.NeedKey--
 				continue
 			}
-			if err := verifySetupCSRKey(nk.certData, keyPEM); err != nil {
-				log.Printf("证书 %s 私钥与服务端 CSR 不匹配: %v", nk.certData.Domain(), err)
-				sendSetupCallback(client, nk.certData.OrderID, nk.certData.Domain(), false, "私钥与服务端 CSR 不匹配")
-				result.Failed++
-				result.NeedKey--
-				continue
-			}
-
 			notify, useLocal := deriveSetupPolicy(nk.certData, existingCfg, true)
 			deployed, installErr := installCert(client, nk.certData, keyPEM, nk.serialNumber, opts, &certConfigs, result, notify, useLocal)
 			if installErr != nil {
@@ -466,24 +443,6 @@ func resolvePrivateKey(certPEM string, apiKey string, keyPath string) (string, s
 
 	// 优先级 3（IsCertExists）在外层已处理
 	return "", ""
-}
-
-func verifySetupCSRKey(certData api.CertData, keyPEM string) error {
-	if strings.TrimSpace(certData.CSR) == "" {
-		return nil
-	}
-	hash, err := cert.CSRDERHash(certData.CSR)
-	if err != nil {
-		return err
-	}
-	matched, err := cert.VerifyCSRIdentity(certData.CSR, keyPEM, hash, certData.Domain())
-	if err != nil {
-		return err
-	}
-	if !matched {
-		return errors.New("CSR 公钥或 Common Name 与私钥/订单不匹配")
-	}
-	return nil
 }
 
 // readKeyFile 读取私钥文件（带大小限制）

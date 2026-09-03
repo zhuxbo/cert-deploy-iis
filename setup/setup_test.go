@@ -3,6 +3,7 @@ package setup
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -63,6 +64,11 @@ func setupRunOptions(t *testing.T) Options {
 		OrderID: 1, Domains: "setup.example.com", Status: "active",
 		Certificate: certPEM, CACert: certPEM, PrivateKey: keyPEM,
 	}
+	return setupRunOptionsForCert(t, certData)
+}
+
+func setupRunOptionsForCert(t *testing.T, certData api.CertData) Options {
+	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost {
@@ -76,7 +82,7 @@ func setupRunOptions(t *testing.T) Options {
 		})
 	}))
 	t.Cleanup(server.Close)
-	return Options{URL: server.URL, Token: "token", Order: "1"}
+	return Options{URL: server.URL, Token: "token", Order: fmt.Sprintf("%d", certData.OrderID)}
 }
 
 func stubSetupRunEffects(t *testing.T, saveErr, taskErr, runTaskErr error) (*[]string, **config.Config) {
@@ -226,6 +232,34 @@ func TestRunSaveFailureStopsTaskAndReturnsInstalledFact(t *testing.T) {
 		if strings.HasPrefix(message, "完成:") {
 			t.Fatalf("失败路径不应报告成功完成: %q", message)
 		}
+	}
+}
+
+func TestRunAcceptsCertificateKeyPairWhenResponseCSRDoesNotMatch(t *testing.T) {
+	path := preserveSetupConfigFile(t)
+	writeSetupConfig(t, path, config.DefaultConfig())
+	certPEM, keyPEM := setupTestPair(t, "*.miqiyun.com")
+	_, unrelatedCSR, err := cert.GenerateCSR("other.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := setupRunOptionsForCert(t, api.CertData{
+		OrderID: 76274443506176,
+		Domains: "miqiyun.com,*.miqiyun.com",
+		Status:  "active", CSR: unrelatedCSR,
+		Certificate: certPEM, CACert: certPEM, PrivateKey: keyPEM,
+	})
+	events, _ := stubSetupRunEffects(t, nil, nil, nil)
+
+	result, err := Run(opts, nil, nil)
+	if err != nil {
+		t.Fatalf("active 证书与 API 私钥配对时不应被 CSR 阻断: %v", err)
+	}
+	if result == nil || result.Installed != 1 || result.NeedKey != 0 || result.Failed != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+	if strings.Join(*events, ",") != "install,save,task,start" {
+		t.Fatalf("events=%v", *events)
 	}
 }
 
