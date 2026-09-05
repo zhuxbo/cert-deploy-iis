@@ -1,9 +1,7 @@
 #!/bin/bash
 
 # sign.sh - Authenticode 代码签名
-# 使用 SimplySign Desktop + signtool 进行云端 EV 签名
-#
-# 前提: SimplySign Desktop 已连接登录
+# 通过 SimplySignAuto HTTP API 签名，并在构建机使用 signtool 独立验签
 #
 # 用法:
 #   ./sign.sh [exe路径]          # 签名（默认 dist/sslctlw.exe）
@@ -16,10 +14,10 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONF_FILE="$SCRIPT_DIR/build.conf"
 
 # 默认值
-SIGN_TSA="http://time.certum.pl"
-SIGN_FD="sha256"
-SIGN_TD="sha256"
 SIGN_THUMBPRINT=""
+SIGN_API_BASE_URL="${SSLCTLW_SIGNING_BASE_URL:-}"
+SIGN_CERTIFICATE_SERIAL=""
+SIGN_TOKEN_FILE="${SSLCTLW_SIGNING_BEARER_TOKEN_FILE:-}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -70,10 +68,12 @@ load_config() {
         local key=$(echo "$line" | cut -d'=' -f1 | sed 's/[[:space:]]*$//')
         local val=$(echo "$line" | cut -d'=' -f2- | sed 's/^[[:space:]]*//;s/^["'"'"']//;s/["'"'"']$//')
         case "$key" in
-            SIGN_THUMBPRINT) SIGN_THUMBPRINT="$val" ;;
-            SIGN_TSA)        SIGN_TSA="$val" ;;
+            SIGN_THUMBPRINT)          SIGN_THUMBPRINT="$val" ;;
+            SIGN_CERTIFICATE_SERIAL)  SIGN_CERTIFICATE_SERIAL="$val" ;;
         esac
     done < "$CONF_FILE"
+
+    SIGN_CERTIFICATE_SERIAL="${SSLCTLW_SIGNING_CERTIFICATE_SERIAL:-$SIGN_CERTIFICATE_SERIAL}"
 
     if [ -z "$SIGN_THUMBPRINT" ]; then
         log_error "未配置 SIGN_THUMBPRINT（证书指纹）"
@@ -87,18 +87,56 @@ load_config() {
 sign_file() {
     local exe="$1"
     local signtool_path="$2"
-    local win_exe=$(cygpath -w "$exe")
+    local powershell_path
+    powershell_path="$(resolve_windows_powershell)" || {
+        log_error "找不到 Windows PowerShell，无法调用签名 API"
+        return 1
+    }
 
-    log_info "签名: $exe"
-    log_info "指纹: $SIGN_THUMBPRINT"
-    log_info "时间戳: $SIGN_TSA"
+    if [ -z "$SIGN_API_BASE_URL" ]; then
+        log_error "未配置 SSLCTLW_SIGNING_BASE_URL"
+        return 1
+    fi
+    if [ -z "$SIGN_CERTIFICATE_SERIAL" ]; then
+        log_error "未配置 SIGN_CERTIFICATE_SERIAL 或 SSLCTLW_SIGNING_CERTIFICATE_SERIAL"
+        return 1
+    fi
+    if [ -z "$SIGN_TOKEN_FILE" ] || [ ! -f "$SIGN_TOKEN_FILE" ]; then
+        log_error "SSLCTLW_SIGNING_BEARER_TOKEN_FILE 必须指向受保护的 Bearer Token 文件"
+        return 1
+    fi
 
-    MSYS_NO_PATHCONV=1 "$signtool_path" sign \
-        /sha1 "$SIGN_THUMBPRINT" \
-        /tr "$SIGN_TSA" \
-        /td "$SIGN_TD" \
-        /fd "$SIGN_FD" \
-        /v "$win_exe"
+    local signed_output="${exe}.signed.$$.$RANDOM"
+    local win_exe win_signed_output win_token_file win_script
+    win_exe=$(cygpath -w "$exe")
+    win_signed_output=$(cygpath -w "$signed_output")
+    win_token_file=$(cygpath -w "$SIGN_TOKEN_FILE")
+    win_script=$(cygpath -w "$SCRIPT_DIR/sign-via-simplysign.ps1")
+
+    log_info "通过 SimplySignAuto API 签名: $exe"
+    log_info "API: $SIGN_API_BASE_URL"
+
+    if ! MSYS_NO_PATHCONV=1 "$powershell_path" \
+        -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+        -File "$win_script" \
+        -InputPath "$win_exe" \
+        -OutputPath "$win_signed_output" \
+        -BaseUrl "$SIGN_API_BASE_URL" \
+        -BearerTokenPath "$win_token_file" \
+        -CertificateSerialNumber "$SIGN_CERTIFICATE_SERIAL" \
+        -IdempotencyPrefix "sslctlw-release" \
+        -TimeoutSeconds 300; then
+        rm -f "$signed_output"
+        log_error "签名 API 调用失败"
+        return 1
+    fi
+
+    if ! verify_file "$signed_output" "$signtool_path"; then
+        rm -f "$signed_output"
+        return 1
+    fi
+
+    mv -f "$signed_output" "$exe"
 
     log_success "签名完成: $exe"
 }

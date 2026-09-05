@@ -1,6 +1,8 @@
 module sslctlw
 
-go 1.24.0
+go 1.26.0
+
+toolchain go1.26.8
 
 replace github.com/rodrigocfd/windigo => ./_windigo
 

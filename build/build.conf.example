@@ -15,8 +15,12 @@ TRUSTED_COUNTRY="CN"
 # Authenticode 代码签名（SimplySign 云端 EV 证书）
 # ========================================
 
-# 证书指纹（SHA1 thumbprint，从 SimplySign Desktop 查看）
+# 证书指纹（SHA1 thumbprint，用于构建机独立验签）
 SIGN_THUMBPRINT="your-certificate-thumbprint"
 
-# 时间戳服务器（默认 Certum）
-# SIGN_TSA="http://time.certum.pl"
+# HTTP API 使用的证书序列号（十六进制）
+SIGN_CERTIFICATE_SERIAL="your-certificate-serial"
+
+# 签名 API 地址与 Bearer Token 保存在项目根 .env：
+# SSLCTLW_SIGNING_BASE_URL="https://signing.example.com"
+# SSLCTLW_SIGNING_BEARER_TOKEN="..."

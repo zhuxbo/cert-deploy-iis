@@ -23,6 +23,8 @@ bash build/release.sh --dry-run 1.2.3-rc.1
 bash build/release.sh --dry-run 1.2.3
 ```
 
+Windows CI 还必须使用 PowerShell AST parser 确认 `build/sign-via-simplysign.ps1` 无语法错误；静态解析不调用签名 API，也不需要 Bearer Token。
+
 治理检查必须确认固定 `CLAUDE.md`、扁平领域 skill、路由叶子、旧路径清理，以及 Claude/Codex 的 `remote-release`、`finish-check` 薄入口完全一致。dry-run 不得构建、签名、连接 SSH、修改 Git 或创建 bundle。
 
 若修改发布脚本，再使用临时目录或 mock 验证以下语义：
@@ -47,13 +49,13 @@ GOOS=windows GOARCH=amd64 go vet ./...
 
 ## 3. golangci-lint 基线零净增
 
-本仓存在历史告警，只要求本次改动不新增。使用兼容 Go 1.24 的 golangci-lint 环境，且固定 `GOOS=windows GOARCH=amd64`：
+本仓存在历史告警，只要求本次改动不新增。使用兼容 Go 1.26 的 golangci-lint 环境，且固定 `GOOS=windows GOARCH=amd64`：
 
 ```bash
 GOOS=windows GOARCH=amd64 golangci-lint run --max-issues-per-linter=0 --max-same-issues=0 ./...
 ```
 
-若绝对结果非零，对比任务基线（通常 `origin/dev`），按“文件、linter、消息”归一化后确认 HEAD 侧零新增。工作区有改动时不得通过切换分支破坏用户文件，可使用独立临时 worktree 或对仅文档/脚本变更说明 Go 告警集合未受影响。macOS 新版 Go 出现 `context loading failed: no go files to analyze` 属工具链限制，不等于 lint 通过；应使用 Go 1.24 环境重跑或如实报告未验证。
+若绝对结果非零，对比任务基线（通常 `origin/dev`），按“文件、linter、消息”归一化后确认 HEAD 侧零新增。工作区有改动时不得通过切换分支破坏用户文件，可使用独立临时 worktree 或对仅文档/脚本变更说明 Go 告警集合未受影响。macOS 出现 `context loading failed: no go files to analyze` 属跨平台工具链限制，不等于 lint 通过；应在 Go 1.26 Windows 环境重跑或如实报告未验证。
 
 ## 4. 测试
 
@@ -72,7 +74,11 @@ SSLCTLW_WINDOWS_SSH_KEY=/absolute/path/to/private-key
 SSLCTLW_WINDOWS_SSH_USER=Administrator
 SSLCTLW_WINDOWS_SSH_HOST=192.0.2.10
 SSLCTLW_WINDOWS_SSH_PORT=22
+SSLCTLW_SIGNING_BASE_URL=https://signing.example.com
+SSLCTLW_SIGNING_BEARER_TOKEN=protected-token
 ```
+
+`.env` 必须为 `0600` 且保持 Git 忽略。不得将它整体复制到 Windows VM；需要真实签名时，只将 Token 写入远端随机临时文件，收紧 ACL 后通过文件路径交给签名脚本，并在结束时删除。
 
 从 macOS 向长期使用的 Windows VM 发送当前工作区时，使用独立临时目录，禁止覆盖远端已有项目；
 打包须禁用 macOS 扩展属性，避免 `._*` AppleDouble 文件令治理检查误判：
@@ -108,7 +114,7 @@ go build -ldflags "-X main.version=check-test" -o out\sslctlw-windows-amd64-vers
 
 默认测试不启用 `integration` build tag。未经用户明确允许，不得运行会修改 IIS、证书存储、绑定或计划
 任务的实机集成测试。验证结束后只删除本轮创建的精确远端临时目录。Windows VM 运行结果可补充本地
-证据，但合并和发布仍须满足下文同一 commit 的 GitHub `windows-latest` 要求。
+证据，但合并和发布仍须满足下文同一 commit 的 GitHub `windows-2022` 要求。
 
 非 Windows 环境无法运行本仓依赖 windigo/Windows syscall 的测试；编译每个 Windows 测试包，并明确把运行期验证留给 Windows CI：
 
@@ -120,7 +126,7 @@ while IFS= read -r package; do
 done <<<"$packages"
 ```
 
-最终必须引用同一 commit 的 GitHub `windows-latest` 运行结果作为 Windows 行为证据。只要求本地提交且明确禁止推送时，将该项标为“待推送后验证”，不得声称 Windows 运行测试通过；它不阻止本地提交，但仍阻止合并和发布。测试暴露生产缺陷时修复生产代码，不削弱安全校验或篡改断言迎合错误行为。
+最终必须引用同一 commit 的 GitHub `windows-2022` 运行结果作为 Windows 行为证据。只要求本地提交且明确禁止推送时，将该项标为“待推送后验证”，不得声称 Windows 运行测试通过；它不阻止本地提交，但仍阻止合并和发布。测试暴露生产缺陷时修复生产代码，不削弱安全校验或篡改断言迎合错误行为。
 
 ## 5. 变更面专项审查
 

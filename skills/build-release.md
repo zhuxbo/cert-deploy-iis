@@ -15,9 +15,10 @@
 
 `build/build.sh <version>` 是唯一发布构建入口：
 
-1. 要求 `build/build.conf` 提供 `TRUSTED_ORG`，可选 `TRUSTED_COUNTRY` 默认 `CN`。
-2. 使用 `GOOS=windows GOARCH=amd64`、`-trimpath -s -w`，通过 `-X main.version=<version>` 注入不带 `v` 的 SemVer。
-3. 输出临时文件 `dist/sslctlw.exe`；Console 子系统保持不变，不使用 `-H windowsgui`。
+1. 从 `go.mod` 读取并强制使用精确的 `toolchain go1.26.8`。
+2. 要求 `build/build.conf` 提供 `TRUSTED_ORG`，可选 `TRUSTED_COUNTRY` 默认 `CN`。
+3. 使用 `GOOS=windows GOARCH=amd64`、`-trimpath -s -w`，通过 `-X main.version=<version>` 注入不带 `v` 的 SemVer。
+4. 输出临时文件 `dist/sslctlw.exe`；Console 子系统保持不变，不使用 `-H windowsgui`。
 
 该脚本不运行测试：dev 发布按规范不增加本地 CI 门禁；main 的 Windows 测试属于 `skills/remote-release.md` 明确的 release gate，在构建 bundle 前已经对应精确 commit 通过。
 
@@ -29,14 +30,16 @@ GOOS=windows GOARCH=amd64 go build -o sslctlw.exe .
 
 ## Authenticode 签名
 
-所有公开的 `main` 和 `dev` 产物都必须签名，不提供跳过签名的发布入口。`build/sign.sh` 使用 SimplySign Desktop、Windows SDK `signtool` 和 `build/build.conf` 中的 `SIGN_THUMBPRINT`：
+所有公开的 `main` 和 `dev` 产物都必须签名，不提供跳过签名的发布入口。`build/sign.sh` 在 Windows 构建机调用签名机 HTTP API，严格执行异步上传、轮询、下载和结果 SHA256 校验，再使用 Windows SDK `signtool` 独立验签：
 
 ```bash
 bash build/sign.sh dist/sslctlw.exe
 bash build/sign.sh --verify dist/sslctlw.exe
 ```
 
-签名会改变 EXE 字节，因此 SHA256 只能在签名及 `signtool verify /pa /all` 成功后计算。验证步骤还通过 PowerShell 确认签名状态为 `Valid`，且签名证书指纹与 `build.conf` 的 `SIGN_THUMBPRINT` 一致。发布机必须可用 `cygpath`、Windows PowerShell、SimplySign Desktop 和 `signtool`；这些条件无法用 macOS 交叉构建替代。
+`build/build.conf` 保存公开的 `SIGN_THUMBPRINT` 和 `SIGN_CERTIFICATE_SERIAL`，不得保存 Bearer Token。API 地址和 Token 保存在本机受保护且被忽略的 `.env`；执行远程发布时，只把 Token 写入 Windows 构建机的随机临时文件，以仅允许当前管理员和 `SYSTEM` 的 ACL 保护，通过 `SSLCTLW_SIGNING_BEARER_TOKEN_FILE` 传给脚本，并在结束时无条件删除。API 地址通过 `SSLCTLW_SIGNING_BASE_URL` 传入。
+
+签名会改变 EXE 字节，因此 SHA256 只能在 API 结果哈希、PowerShell Authenticode 状态、证书序列号与指纹以及 `signtool verify /pa /all` 全部成功后计算。发布机必须可用 `cygpath`、Windows PowerShell 5.1 和 `signtool`，并能访问签名机 API；这些条件无法用 macOS 交叉构建替代。
 
 Linux 发布节点不重复执行 Windows Authenticode API，而是要求远端 EXE 的 SHA256 与已在 Windows 验签的 bundle 完全一致；最终再从公网下载代表资产回到 Windows 验签，形成端到端证据。
 

@@ -100,7 +100,7 @@ API 配置在证书级别，每个证书可以有不同的 API 地址和 Token�
 
 ### 依赖
 
-- Go 1.24+
+- Go 1.26.8
 - Windows 环境 (使用 windigo GUI 库)
 
 Windows 开发环境须保留仓库 `.gitattributes` 的 LF 规则；Shell 脚本及治理薄入口依赖该规则进行确定性字节比较。
@@ -117,7 +117,8 @@ Python 解释器会在实际通过 3.9+ 版本探测后才被采用，Windows St
 ./build/build.sh 1.0.0
 
 # 仅签名
-./build/sign.sh
+set -a; . ./.env; set +a
+SSLCTLW_SIGNING_BEARER_TOKEN_FILE=/protected/path/token.txt ./build/sign.sh
 
 # 或直接构建
 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=1.0.0" -o dist/sslctlw.exe .

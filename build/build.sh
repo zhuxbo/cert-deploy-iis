@@ -65,6 +65,12 @@ fi
 
 cd "$PROJECT_ROOT"
 
+GO_TOOLCHAIN="$(awk '$1 == "toolchain" { print $2; exit }' go.mod)"
+[ "$GO_TOOLCHAIN" = "go1.26.8" ] || {
+    echo -e "${YELLOW}ERROR: go.mod 必须固定 toolchain go1.26.8${NC}"
+    exit 1
+}
+
 # ========================================
 # 发布构建必须配置 TRUSTED_ORG
 # ========================================
@@ -91,7 +97,7 @@ echo "  Trusted Org: ${TRUSTED_ORG:-not set}"
 echo "  Country: $TRUSTED_COUNTRY"
 echo ""
 
-GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o "$DIST_DIR/sslctlw.exe"
+GOTOOLCHAIN="$GO_TOOLCHAIN" GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o "$DIST_DIR/sslctlw.exe"
 
 SIZE=$(du -h "$DIST_DIR/sslctlw.exe" | cut -f1)
 echo -e "${GREEN}Build successful: dist/sslctlw.exe ($SIZE)${NC}"

@@ -157,7 +157,7 @@ for contract in \
     '跨仓公共行为以 `deploy-spec.md` 为准' \
     '由 `skills/SKILL.md` 路由到对应叶子资源' \
     '任务命中某领域时，必须先读根路由及选中的叶子资源' \
-    'Windows 运行期行为以 GitHub Actions 的 `windows-latest` 结果为准' \
+    'Windows 运行期行为以 GitHub Actions 的 `windows-2022` 结果为准' \
     '不得削弱 Authenticode、DPAPI、数据目录 ACL、证书私钥配对或 IIS 绑定恢复校验' \
     '未经明确发布指令，不创建或移动 tag、GitHub Release，不上传发布节点' \
     'Codex 原生入口只保留 `.agents/skills/remote-release/SKILL.md` 与 `.agents/skills/finish-check/SKILL.md`' \
@@ -172,6 +172,18 @@ for contract in \
     '修改后删除失效或重复内容'; do
     require_literal AGENTS.md "$contract"
 done
+
+require_literal go.mod 'go 1.26.0'
+require_literal go.mod 'toolchain go1.26.8'
+require_literal .github/workflows/ci.yml 'runs-on: windows-2022'
+require_literal .github/workflows/ci.yml 'go-version: "1.26.8"'
+require_literal .github/workflows/ci.yml 'Signing client syntax check'
+require_literal docker/Dockerfile 'ARG GO_VERSION=1.26.8'
+require_literal build/build.sh 'GOTOOLCHAIN="$GO_TOOLCHAIN" GOOS=windows GOARCH=amd64 go build'
+require_literal build/sign.sh 'SSLCTLW_SIGNING_BEARER_TOKEN_FILE'
+require_literal build/sign.sh 'sign-via-simplysign.ps1'
+require_literal build/sign-via-simplysign.ps1 "Invoke-SimplySignArtifact"
+require_literal build/build.conf.example 'SIGN_CERTIFICATE_SERIAL="your-certificate-serial"'
 
 require_literal README.md 'GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=1.0.0" -o dist/sslctlw.exe .'
 require_literal README.md '| GET | `/api/deploy?order=123` | 按订单查询 |'

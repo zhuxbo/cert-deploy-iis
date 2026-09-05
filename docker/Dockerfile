@@ -14,7 +14,7 @@ RUN Install-WindowsFeature Web-Server, Web-Mgmt-Tools; `
     if (!(Get-WindowsFeature Web-Server).Installed) { throw 'IIS installation failed' }
 
 # 安装 Go
-ARG GO_VERSION=1.24.0
+ARG GO_VERSION=1.26.8
 RUN $url = \"https://go.dev/dl/go${env:GO_VERSION}.windows-amd64.zip\"; `
     Write-Host \"Downloading Go $env:GO_VERSION ...\"; `
     Invoke-WebRequest -Uri $url -OutFile C:\go.zip; `

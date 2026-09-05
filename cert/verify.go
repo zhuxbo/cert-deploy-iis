@@ -106,7 +106,7 @@ func privateKeyMatchesPublicKey(privateKey, publicKey any) (bool, error) {
 		return false, nil
 	case *ecdsa.PrivateKey:
 		if ecdsaPub, ok := publicKey.(*ecdsa.PublicKey); ok {
-			return priv.PublicKey.X.Cmp(ecdsaPub.X) == 0 && priv.PublicKey.Y.Cmp(ecdsaPub.Y) == 0, nil
+			return priv.PublicKey.Equal(ecdsaPub), nil
 		}
 		return false, nil
 	case ed25519.PrivateKey:

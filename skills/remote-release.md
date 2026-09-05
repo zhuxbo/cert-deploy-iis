@@ -16,9 +16,9 @@
 
 适用于 PR commit、合并后的精确 `main` commit 和回同步后的精确 `dev` commit：
 
-1. GitHub required check `test`（工作流 `CI`）成功：Windows latest、Go 1.24、`go vet ./...`、`go test ./...`、治理防漂移检查和发布 helper 临时目录测试。
+1. GitHub required check `test`（工作流 `CI`）成功：Windows Server 2022、Go 1.26.8、`go vet ./...`、`go test ./...`、治理防漂移检查和发布 helper 临时目录测试。
 2. `skills/finish-check.md` 的本地门禁通过；非 Windows 环境只能把测试编译作为补充证据，不能替代 Windows CI 运行。
-3. 发布机执行 `go test ./...`、版本注入构建、Authenticode 签名与验证成功。
+3. Windows 构建机执行 `go test ./...`、版本注入构建、签名机 HTTP API Authenticode 签名与本地验证成功；Bearer Token 只允许通过受保护的随机临时文件进入构建机，并在结束时删除。
 
 每次等待检查都要核对结果对应的 commit SHA，不接受其他 commit 的历史绿灯。
 
